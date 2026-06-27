@@ -1,25 +1,3 @@
-use soroban_sdk::{
-    contract, contractimpl, token::TokenClient, Address, BytesN, Env, Symbol,
-};
-
-use crate::events;
-use crate::storage;
-use crate::types::{Bounty, Contributor};
-
-const STATUS_OPEN: &str = "open";
-const STATUS_IN_PROGRESS: &str = "in_progress";
-
-fn generate_bounty_id(env: &Env) -> BytesN<32> {
-    let count = storage::get_bounty_count(env);
-    let mut buf = [0u8; 32];
-    let count_bytes = count.to_be_bytes();
-    buf[24..32].copy_from_slice(&count_bytes);
-    BytesN::from_array(env, &buf)
-}
-
-#[contract]
-pub struct MergeMintContract;
-
 #[contractimpl]
 impl MergeMintContract {
     pub fn create_bounty(
@@ -92,17 +70,5 @@ impl MergeMintContract {
 
         events::emit_bounty_completed(&env, &bounty_id, &assignee);
         events::emit_reward_paid(&env, &bounty_id, &assignee, &bounty.reward_amount);
-    }
-
-    pub fn get_bounty(env: Env, bounty_id: BytesN<32>) -> Option<Bounty> {
-        storage::get_bounty(&env, &bounty_id)
-    }
-
-    pub fn get_contributor(env: Env, address: Address) -> Option<Contributor> {
-        storage::get_contributor(&env, &address)
-    }
-
-    pub fn get_bounty_count(env: Env) -> u64 {
-        storage::get_bounty_count(&env)
     }
 }
