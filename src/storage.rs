@@ -158,3 +158,18 @@ pub fn set_open_bounties(env: &Env, bounties: &Vec<BytesN<32>>) {
         .persistent()
         .set(&DataKey::OpenBounties, bounties);
 }
+
+pub fn get_creator_bounties(env: &Env, creator: &Address) -> Vec<BytesN<32>> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::CreatorBounties(creator.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn append_creator_bounty(env: &Env, creator: &Address, bounty_id: &BytesN<32>) {
+    let mut list = get_creator_bounties(env, creator);
+    list.push_back(bounty_id.clone());
+    env.storage()
+        .persistent()
+        .set(&DataKey::CreatorBounties(creator.clone()), &list);
+}

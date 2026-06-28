@@ -1,1 +1,5 @@
-target/
+/target
+test_snapshots/
+*.wasm
+*.env
+.DS_Store
