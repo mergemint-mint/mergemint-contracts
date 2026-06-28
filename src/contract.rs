@@ -302,6 +302,79 @@ impl MergeMintContract {
         events::emit_bounty_disputed(&env, &bounty_id, &caller);
     }
 
+    /// Resolve a disputed bounty. Only the bounty creator (acting as arbitrator) may call this.
+    /// resolution must be the Symbol "complete" (pay assignees) or "cancel" (refund creator).
+    pub fn resolve_dispute(
+        env: Env,
+        arbitrator: Address,
+        bounty_id: BytesN<32>,
+        resolution: Symbol,
+    ) {
+        arbitrator.require_auth();
+
+        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => panic!("{}", errors::BOUNTY_NOT_FOUND),
+        };
+
+        if bounty.status != Symbol::new(&env, STATUS_DISPUTED) {
+            panic!("{}", errors::BOUNTY_NOT_DISPUTED);
+        }
+
+        // The arbitrator must be the bounty creator; there is no separate admin address.
+        if arbitrator != bounty.creator {
+            panic!("{}", errors::NOT_ARBITRATOR);
+        }
+
+        let resolve_complete = Symbol::new(&env, "complete");
+        let resolve_cancel = Symbol::new(&env, "cancel");
+
+        if resolution == resolve_complete {
+            let token = TokenClient::new(&env, &bounty.reward_token);
+
+            for (assignee, share_bp) in bounty.assignees.iter() {
+                let payout =
+                    (bounty.reward_amount as i128) * (share_bp as i128) / 10_000_i128;
+                token.transfer(&env.current_contract_address(), &assignee, &payout);
+
+                let mut contrib = storage::get_contributor(&env, &assignee)
+                    .unwrap_or(Contributor {
+                        address: assignee.clone(),
+                        reputation: 0,
+                        total_earned: 0,
+                        contribution_count: 0,
+                        active_claims: 0,
+                        metadata: None,
+                    });
+
+                contrib.reputation += 10;
+                contrib.total_earned += payout;
+                contrib.contribution_count += 1;
+                if contrib.active_claims > 0 {
+                    contrib.active_claims -= 1;
+                }
+
+                storage::store_contributor(&env, &assignee, &contrib);
+                events::emit_reward_paid(&env, &bounty_id, &assignee, &payout);
+            }
+
+            let previous_status = bounty.status.clone();
+            bounty.status = Symbol::new(&env, STATUS_COMPLETED);
+            storage::store_bounty(&env, &bounty_id, &bounty);
+            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        } else if resolution == resolve_cancel {
+            // Escrow refund to creator goes here once escrow is implemented.
+            let previous_status = bounty.status.clone();
+            bounty.status = Symbol::new(&env, STATUS_CANCELLED);
+            storage::store_bounty(&env, &bounty_id, &bounty);
+            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        } else {
+            panic!("resolution must be 'complete' or 'cancel'");
+        }
+
+        events::emit_dispute_resolved(&env, &bounty_id, &arbitrator, &resolution);
+    }
+
     /// Update the on-chain metadata URI for a contributor profile.
     /// Only the contributor themselves may call this (enforced by `require_auth`).
     pub fn update_contributor_metadata(env: Env, contributor: Address, metadata: Symbol) {
