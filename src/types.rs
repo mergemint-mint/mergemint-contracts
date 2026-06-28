@@ -1,12 +1,33 @@
 // SPDX-License-Identifier: MIT
 use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
 
+/// A type-safe identifier for a bounty.
+///
+/// Wraps a raw `BytesN<32>` to prevent accidental substitution with other
+/// 32-byte values (hashes, keys, nonces). Serialises identically to the
+/// inner `BytesN<32>` when used with `#[contracttype]`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct BountyId(pub BytesN<32>);
+
+impl From<BytesN<32>> for BountyId {
+    fn from(value: BytesN<32>) -> Self {
+        BountyId(value)
+    }
+}
+
+impl From<BountyId> for BytesN<32> {
+    fn from(value: BountyId) -> Self {
+        value.0
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum DataKey {
     BountyCount,
-    Bounty(BytesN<32>),
-    BountyMeta(BytesN<32>),
+    Bounty(BountyId),
+    BountyMeta(BountyId),
     Contributor(Address),
     StatusIndex(Symbol),
     OpenBounties,

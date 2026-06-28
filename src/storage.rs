@@ -1,6 +1,6 @@
-use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{Address, Env, Symbol, Vec};
 
-use crate::types::{Bounty, BountyMeta, Contributor, DataKey};
+use crate::types::{Bounty, BountyId, BountyMeta, Contributor, DataKey};
 
 /// Approximate 1 year in ledger sequences at 5 seconds per ledger.
 const STORAGE_TTL_LEDGERS: u32 = 6_307_200;
@@ -51,7 +51,7 @@ pub fn set_bounty_count(env: &Env, count: &u64) {
 ///
 /// This is called during `create_bounty` (initial store) and
 /// `claim_bounty` (when the assignee and status are updated).
-pub fn store_bounty(env: &Env, id: &BytesN<32>, bounty: &Bounty) {
+pub fn store_bounty(env: &Env, id: &BountyId, bounty: &Bounty) {
     let key = DataKey::Bounty(id.clone());
     env.storage().persistent().set(&key, bounty);
     env.storage()
@@ -67,7 +67,7 @@ pub fn store_bounty(env: &Env, id: &BytesN<32>, bounty: &Bounty) {
 ///
 /// Callers should handle the `None` case (e.g., by panicking with a
 /// descriptive message as done in `claim_bounty` and `complete_bounty`).
-pub fn get_bounty(env: &Env, id: &BytesN<32>) -> Option<Bounty> {
+pub fn get_bounty(env: &Env, id: &BountyId) -> Option<Bounty> {
     let key = DataKey::Bounty(id.clone());
     let bounty: Option<Bounty> = env.storage().persistent().get(&key);
     if bounty.is_some() {
@@ -78,13 +78,13 @@ pub fn get_bounty(env: &Env, id: &BytesN<32>) -> Option<Bounty> {
     bounty
 }
 
-pub fn store_bounty_meta(env: &Env, id: &BytesN<32>, meta: &BountyMeta) {
+pub fn store_bounty_meta(env: &Env, id: &BountyId, meta: &BountyMeta) {
     env.storage()
         .temporary()
         .set(&DataKey::BountyMeta(id.clone()), meta);
 }
 
-pub fn get_bounty_meta(env: &Env, id: &BytesN<32>) -> Option<BountyMeta> {
+pub fn get_bounty_meta(env: &Env, id: &BountyId) -> Option<BountyMeta> {
     env.storage()
         .temporary()
         .get(&DataKey::BountyMeta(id.clone()))
@@ -127,9 +127,9 @@ pub fn get_contributor(env: &Env, address: &Address) -> Option<Contributor> {
     contributor
 }
 
-pub fn get_bounties_by_status(env: &Env, status: &Symbol) -> Vec<BytesN<32>> {
+pub fn get_bounties_by_status(env: &Env, status: &Symbol) -> Vec<BountyId> {
     let key = DataKey::StatusIndex(status.clone());
-    let result: Option<Vec<BytesN<32>>> = env.storage().persistent().get(&key);
+    let result: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
     if result.is_some() {
         env.storage()
             .persistent()
@@ -138,7 +138,7 @@ pub fn get_bounties_by_status(env: &Env, status: &Symbol) -> Vec<BytesN<32>> {
     result.unwrap_or_else(|| Vec::new(env))
 }
 
-pub fn set_bounties_by_status(env: &Env, status: &Symbol, bounties: &Vec<BytesN<32>>) {
+pub fn set_bounties_by_status(env: &Env, status: &Symbol, bounties: &Vec<BountyId>) {
     let key = DataKey::StatusIndex(status.clone());
     env.storage().persistent().set(&key, bounties);
     env.storage()
@@ -146,7 +146,7 @@ pub fn set_bounties_by_status(env: &Env, status: &Symbol, bounties: &Vec<BytesN<
         .extend_ttl(&key, STORAGE_TTL_THRESHOLD, STORAGE_TTL_LEDGERS);
 }
 
-pub fn add_bounty_to_status(env: &Env, bounty_id: &BytesN<32>, status: &Symbol) {
+pub fn add_bounty_to_status(env: &Env, bounty_id: &BountyId, status: &Symbol) {
     let mut current = get_bounties_by_status(env, status);
 
     if current.iter().all(|existing_id| existing_id != *bounty_id) {
@@ -156,7 +156,7 @@ pub fn add_bounty_to_status(env: &Env, bounty_id: &BytesN<32>, status: &Symbol) 
     set_bounties_by_status(env, status, &current);
 }
 
-pub fn remove_bounty_from_status(env: &Env, bounty_id: &BytesN<32>, status: &Symbol) {
+pub fn remove_bounty_from_status(env: &Env, bounty_id: &BountyId, status: &Symbol) {
     let current = get_bounties_by_status(env, status);
     let mut updated = Vec::new(env);
 
@@ -171,7 +171,7 @@ pub fn remove_bounty_from_status(env: &Env, bounty_id: &BytesN<32>, status: &Sym
 
 pub fn move_bounty_status(
     env: &Env,
-    bounty_id: &BytesN<32>,
+    bounty_id: &BountyId,
     old_status: &Symbol,
     new_status: &Symbol,
 ) {
@@ -181,9 +181,9 @@ pub fn move_bounty_status(
     }
 }
 
-pub fn get_open_bounties(env: &Env) -> Vec<BytesN<32>> {
+pub fn get_open_bounties(env: &Env) -> Vec<BountyId> {
     let key = DataKey::OpenBounties;
-    let result: Option<Vec<BytesN<32>>> = env.storage().persistent().get(&key);
+    let result: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
     if result.is_some() {
         env.storage()
             .persistent()
@@ -192,7 +192,7 @@ pub fn get_open_bounties(env: &Env) -> Vec<BytesN<32>> {
     result.unwrap_or_else(|| Vec::new(env))
 }
 
-pub fn set_open_bounties(env: &Env, bounties: &Vec<BytesN<32>>) {
+pub fn set_open_bounties(env: &Env, bounties: &Vec<BountyId>) {
     let key = DataKey::OpenBounties;
     env.storage().persistent().set(&key, bounties);
     env.storage()
