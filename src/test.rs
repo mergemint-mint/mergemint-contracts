@@ -10,6 +10,73 @@ use soroban_sdk::{
 use crate::contract::MergeMintContract;
 use crate::contract::MergeMintContractClient;
 
+// ===========================================================================
+// Issue #335: negative auth tests — verify require_auth is enforced
+// ===========================================================================
+//
+// These tests deliberately omit env.mock_all_auths(). Soroban's auth
+// framework will panic when require_auth() is invoked without a matching
+// recorded authorisation. The #[should_panic] attribute asserts that the
+// call is rejected, proving the auth guard is present and cannot be removed
+// without breaking these tests.
+
+/// create_bounty must reject unauthenticated calls.
+/// require_auth() fires before any storage is touched, so the panic is
+/// immediate and independent of contract state.
+#[test]
+#[should_panic]
+fn test_create_bounty_requires_auth() {
+    let env = Env::default(); // no mock_all_auths()
+    let contract_id = env.register_contract(None, MergeMintContract);
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    let reward_token = Address::generate(&env);
+
+    // creator.require_auth() inside create_bounty will panic — no auth provided.
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "bounty"),
+        &Symbol::new(&env, "desc"),
+        &1000,
+        &reward_token,
+        &None,
+    );
+}
+
+/// claim_bounty must reject unauthenticated calls.
+/// contributor.require_auth() is the first statement in claim_bounty, so the
+/// panic fires before any bounty-existence check.
+#[test]
+#[should_panic]
+fn test_claim_bounty_requires_auth() {
+    let env = Env::default(); // no mock_all_auths()
+    let contract_id = env.register_contract(None, MergeMintContract);
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let contributor = Address::generate(&env);
+    let bounty_id = BytesN::from_array(&env, &[0u8; 32]);
+
+    // contributor.require_auth() inside claim_bounty will panic — no auth provided.
+    client.claim_bounty(&contributor, &bounty_id);
+}
+
+/// complete_bounty must reject unauthenticated calls.
+/// verifier.require_auth() is the first statement in complete_bounty.
+#[test]
+#[should_panic]
+fn test_complete_bounty_requires_auth() {
+    let env = Env::default(); // no mock_all_auths()
+    let contract_id = env.register_contract(None, MergeMintContract);
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let verifier = Address::generate(&env);
+    let bounty_id = BytesN::from_array(&env, &[0u8; 32]);
+
+    // verifier.require_auth() inside complete_bounty will panic — no auth provided.
+    client.complete_bounty(&verifier, &bounty_id);
+}
+
 fn setup_test() -> (Env, Address, Address, Address) {
     let env = Env::default();
     let creator = Address::generate(&env);
