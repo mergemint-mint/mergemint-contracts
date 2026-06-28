@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: MIT
 use soroban_sdk::{contract, contractimpl, token::TokenClient, Address, BytesN, Env, Symbol, Vec};
 
-use crate::errors;
+use crate::errors::{fail, ContractError};
 use crate::events;
 use crate::storage;
 use crate::types::{Bounty, BountyMeta, Contributor};
@@ -13,8 +14,7 @@ const STATUS_DISPUTED: &str = "disputed";
 
 fn generate_bounty_id(env: &Env, count: u64) -> BytesN<32> {
     let mut buf = [0u8; 32];
-    let count_bytes = count.to_be_bytes();
-    buf[24..32].copy_from_slice(&count_bytes);
+    buf[24..32].copy_from_slice(&count.to_be_bytes());
     BytesN::from_array(env, &buf)
 }
 
@@ -23,6 +23,9 @@ pub struct MergeMintContract;
 
 #[contractimpl]
 impl MergeMintContract {
+    /// Create a new open bounty.
+    /// Issue #4: accepts `tags` (max 5), stored on Bounty.
+    /// Issue #3: appends bounty ID to creator's list.
     pub fn create_bounty(
         env: Env,
         creator: Address,
@@ -32,8 +35,14 @@ impl MergeMintContract {
         reward_token: Address,
         min_reputation: u32,
         deadline: Option<u32>,
+        tags: Vec<Symbol>,
     ) -> BytesN<32> {
         creator.require_auth();
+
+        // Issue #4: validate tag count
+        if tags.len() > 5 {
+            fail(ContractError::TooManyTags);
+        }
 
         let count = storage::get_bounty_count(&env);
         let id = generate_bounty_id(&env, count);
@@ -47,6 +56,7 @@ impl MergeMintContract {
             status: Symbol::new(&env, STATUS_OPEN),
             min_reputation,
             deadline,
+            tags,
         };
 
         let meta = BountyMeta { title, description };
@@ -60,31 +70,28 @@ impl MergeMintContract {
         open.push_back(id.clone());
         storage::set_open_bounties(&env, &open);
 
+        // Issue #3: append to creator index
+        storage::append_creator_bounty(&env, &creator, &id);
+
         events::emit_bounty_created(&env, &id, &creator, &reward_amount);
         id
     }
 
-    /// Claim an open bounty. A contributor receives 10 000 basis points (full reward)
-    /// when claiming a single-assignee bounty (`max_assignees == 1`).
-    /// For multi-assignee bounties the caller must supply an explicit `share` in basis
-    /// points; the sum of all shares must not exceed 10 000.
     pub fn claim_bounty(env: Env, contributor: Address, bounty_id: BytesN<32>) {
         contributor.require_auth();
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
-            None => panic!("{}", errors::BOUNTY_NOT_FOUND),
+            None => fail(ContractError::BountyNotFound),
         };
 
-        // Reject if already at capacity.
         if bounty.assignees.len() >= bounty.max_assignees {
-            panic!("{}", errors::BOUNTY_ALREADY_ASSIGNED);
+            fail(ContractError::BountyAlreadyAssigned);
         }
 
-        // Reject if the contributor is already listed.
         for (addr, _) in bounty.assignees.iter() {
             if addr == contributor {
-                panic!("{}", errors::BOUNTY_ALREADY_ASSIGNED);
+                fail(ContractError::BountyAlreadyAssigned);
             }
         }
 
@@ -99,33 +106,23 @@ impl MergeMintContract {
             });
 
         if contrib.active_claims >= 1 {
-            panic!("{}", errors::CONTRIBUTOR_HAS_ACTIVE_CLAIM);
+            fail(ContractError::ContributorHasActiveClaim);
         }
 
-        // Deadline enforcement: if a deadline is set and has passed, reject the claim
         if let Some(deadline) = bounty.deadline {
             if env.ledger().sequence() > deadline {
-                panic!("{}", errors::BOUNTY_DEADLINE_PASSED);
+                fail(ContractError::BountyDeadlinePassed);
             }
         }
 
-        if bounty.min_reputation > 0 {
-            let contributor_profile = storage::get_contributor(&env, &contributor).unwrap_or(Contributor {
-                address: contributor.clone(),
-                reputation: 0,
-                total_earned: 0,
-                contribution_count: 0,
-            });
-            if contributor_profile.reputation < bounty.min_reputation {
-                panic!("contributor reputation is too low");
-            }
+        if bounty.min_reputation > 0 && contrib.reputation < bounty.min_reputation {
+            fail(ContractError::ReputationTooLow);
         }
 
         let previous_status = bounty.status.clone();
-        bounty.assignee = Some(contributor.clone());
+        bounty.assignees.push_back((contributor.clone(), 10_000u32));
         bounty.status = Symbol::new(&env, STATUS_IN_PROGRESS);
 
-        let previous_status = Symbol::new(&env, STATUS_OPEN);
         storage::store_bounty(&env, &bounty_id, &bounty);
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
 
@@ -134,7 +131,7 @@ impl MergeMintContract {
 
         events::emit_bounty_claimed(&env, &bounty_id, &contributor);
 
-        let mut open = storage::get_open_bounties(&env);
+        let open = storage::get_open_bounties(&env);
         let mut new_open = Vec::new(&env);
         for existing_id in open.iter() {
             if existing_id != bounty_id {
@@ -144,24 +141,28 @@ impl MergeMintContract {
         storage::set_open_bounties(&env, &new_open);
     }
 
-    /// Complete a bounty: distribute `reward_amount` proportionally across all assignees
-    /// according to their basis-point shares (shares sum to 10 000).
+    /// Complete a bounty. Issue #2: panics if status is "disputed".
     pub fn complete_bounty(env: Env, verifier: Address, bounty_id: BytesN<32>) {
         verifier.require_auth();
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
-            None => panic!("{}", errors::BOUNTY_NOT_FOUND),
+            None => fail(ContractError::BountyNotFound),
         };
 
+        // Issue #2: guard against disputed status
+        if bounty.status == Symbol::new(&env, STATUS_DISPUTED) {
+            fail(ContractError::BountyIsDisputed);
+        }
+
         if bounty.assignees.is_empty() {
-            panic!("{}", errors::BOUNTY_HAS_NO_ASSIGNEE);
+            fail(ContractError::BountyHasNoAssignee);
         }
 
         let token = TokenClient::new(&env, &bounty.reward_token);
 
         for (assignee, share_bp) in bounty.assignees.iter() {
-            let payout = (bounty.reward_amount as i128) * (share_bp as i128) / 10_000_i128;
+            let payout = bounty.reward_amount * (share_bp as i128) / 10_000_i128;
             token.transfer(&verifier, &assignee, &payout);
 
             let mut contrib = storage::get_contributor(&env, &assignee)
@@ -185,7 +186,6 @@ impl MergeMintContract {
             events::emit_reward_paid(&env, &bounty_id, &assignee, &payout);
         }
 
-        // Use the first assignee as the primary for the completion event (backward compat).
         let (primary_assignee, _) = bounty.assignees.get(0).unwrap();
 
         let previous_status = bounty.status.clone();
@@ -196,15 +196,18 @@ impl MergeMintContract {
         events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
     }
 
+    /// Issue #2: raise a dispute on a bounty — only creator or assignee may call this.
     pub fn raise_dispute(env: Env, caller: Address, bounty_id: BytesN<32>) {
         caller.require_auth();
 
-        let mut bounty = storage::get_bounty(&env, &bounty_id).expect("bounty not found");
+        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => fail(ContractError::BountyNotFound),
+        };
 
-        // Allow creator or any assignee to raise a dispute.
         let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == caller);
         if caller != bounty.creator && !is_assignee {
-            panic!("only creator or assignee can raise dispute");
+            fail(ContractError::OnlyCreatorOrAssigneeCanDispute);
         }
 
         let previous_status = bounty.status.clone();
@@ -214,8 +217,6 @@ impl MergeMintContract {
         events::emit_bounty_disputed(&env, &bounty_id, &caller);
     }
 
-    /// Update the on-chain metadata URI for a contributor profile.
-    /// Only the contributor themselves may call this (enforced by `require_auth`).
     pub fn update_contributor_metadata(env: Env, contributor: Address, metadata: Symbol) {
         contributor.require_auth();
 
@@ -233,64 +234,60 @@ impl MergeMintContract {
         storage::store_contributor(&env, &contributor, &contrib);
     }
 
-    /// Cancel a bounty. Only the creator can cancel.
-    /// Security-critical: prevents non-creators from cancelling and potentially
-    /// triggering escrow refunds they shouldn't receive.
     pub fn cancel_bounty(env: Env, caller: Address, bounty_id: BytesN<32>) {
         caller.require_auth();
 
-        let mut bounty = storage::get_bounty(&env, &bounty_id).expect("bounty not found");
+        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => fail(ContractError::BountyNotFound),
+        };
 
-        // Security check: only creator can cancel
         if caller != bounty.creator {
-            panic!("{}", errors::NOT_BOUNTY_CREATOR);
+            fail(ContractError::NotBountyCreator);
         }
 
-        // Guard: bounty must be open to be cancelled
         if bounty.status != Symbol::new(&env, STATUS_OPEN) {
-            panic!("{}", errors::BOUNTY_NOT_OPEN);
+            fail(ContractError::BountyNotOpen);
         }
 
+        let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_CANCELLED);
         storage::store_bounty(&env, &bounty_id, &bounty);
+        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
 
-        // Note: Escrow refund will go here once escrow is implemented.
         events::emit_bounty_cancelled(&env, &bounty_id, &caller);
     }
 
-    /// Expire an open bounty whose deadline has passed.
-    /// Design choice: permissionless — any caller can trigger expiry to keep the
-    /// open list clean without requiring the creator to be online. The caller
-    /// still needs to authenticate (require_auth) so the transaction is signed.
-    /// Once escrow is implemented this will trigger a refund to the creator.
     pub fn expire_bounty(env: Env, caller: Address, bounty_id: BytesN<32>) {
         caller.require_auth();
 
-        let mut bounty = storage::get_bounty(&env, &bounty_id).expect("bounty not found");
-
-        // Guard: must have a deadline set.
-        let deadline = match bounty.deadline {
-            Some(d) => d,
-            None => panic!("{}", errors::BOUNTY_NO_DEADLINE),
+        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => fail(ContractError::BountyNotFound),
         };
 
-        // Guard: deadline must have passed.
+        let deadline = match bounty.deadline {
+            Some(d) => d,
+            None => fail(ContractError::BountyNoDeadline),
+        };
+
         if env.ledger().sequence() <= deadline {
-            panic!("{}", errors::DEADLINE_NOT_PASSED);
+            fail(ContractError::DeadlineNotPassed);
         }
 
-        // Guard: only open bounties can be expired.
         if bounty.status != Symbol::new(&env, STATUS_OPEN) {
-            panic!("{}", errors::BOUNTY_NOT_OPEN);
+            fail(ContractError::BountyNotOpen);
         }
 
+        let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_CANCELLED);
         storage::store_bounty(&env, &bounty_id, &bounty);
-
-        // Escrow refund goes here once escrow is implemented.
+        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
 
         events::emit_bounty_expired(&env, &bounty_id, &bounty.creator);
     }
+
+    // ── Read-only ────────────────────────────────────────────────────────────
 
     pub fn get_bounty(env: Env, bounty_id: BytesN<32>) -> Option<Bounty> {
         storage::get_bounty(&env, &bounty_id)
@@ -314,5 +311,10 @@ impl MergeMintContract {
 
     pub fn get_open_bounties(env: Env) -> Vec<BytesN<32>> {
         storage::get_open_bounties(&env)
+    }
+
+    /// Issue #3: return all bounty IDs created by a given address.
+    pub fn get_bounties_by_creator(env: Env, creator: Address) -> Vec<BytesN<32>> {
+        storage::get_creator_bounties(&env, &creator)
     }
 }
