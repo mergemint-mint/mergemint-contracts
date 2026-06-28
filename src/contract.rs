@@ -47,6 +47,8 @@ impl MergeMintContract {
             status: Symbol::new(&env, STATUS_OPEN),
             min_reputation,
             deadline,
+            required_verifiers: None,
+            approval_threshold: 1,
         };
 
         let meta = BountyMeta { title, description };
@@ -115,17 +117,18 @@ impl MergeMintContract {
                 reputation: 0,
                 total_earned: 0,
                 contribution_count: 0,
+                active_claims: 0,
+                metadata: None,
             });
             if contributor_profile.reputation < bounty.min_reputation {
                 panic!("contributor reputation is too low");
             }
         }
 
-        let previous_status = bounty.status.clone();
-        bounty.assignee = Some(contributor.clone());
-        bounty.status = Symbol::new(&env, STATUS_IN_PROGRESS);
-
+        let share_bp: u32 = 10_000u32 / bounty.max_assignees;
+        bounty.assignees.push_back((contributor.clone(), share_bp));
         let previous_status = Symbol::new(&env, STATUS_OPEN);
+        bounty.status = Symbol::new(&env, STATUS_IN_PROGRESS);
         storage::store_bounty(&env, &bounty_id, &bounty);
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
 
@@ -194,6 +197,91 @@ impl MergeMintContract {
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
 
         events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
+    }
+
+    /// Record one verifier's approval for a multi-sig bounty completion.
+    /// When the number of unique approvals reaches approval_threshold, completion executes automatically.
+    /// Falls back to single-verifier behaviour when required_verifiers is None (any verifier completes directly).
+    pub fn approve_completion(env: Env, verifier: Address, bounty_id: BytesN<32>) {
+        verifier.require_auth();
+
+        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => panic!("{}", errors::BOUNTY_NOT_FOUND),
+        };
+
+        if bounty.assignees.is_empty() {
+            panic!("{}", errors::BOUNTY_HAS_NO_ASSIGNEE);
+        }
+
+        // If no required_verifiers list is set, fall back to immediate single-verifier completion.
+        if bounty.required_verifiers.is_none() {
+            MergeMintContract::complete_bounty(env, verifier, bounty_id);
+            return;
+        }
+
+        let required = bounty.required_verifiers.as_ref().unwrap();
+        let is_authorized = required.iter().any(|v| v == verifier);
+        if !is_authorized {
+            panic!("{}", errors::VERIFIER_NOT_AUTHORIZED);
+        }
+
+        let mut approvals = storage::get_approvals(&env, &bounty_id);
+
+        // Guard against duplicate votes from the same verifier.
+        let already_voted = approvals.iter().any(|v| v == verifier);
+        if already_voted {
+            panic!("{}", errors::ALREADY_APPROVED);
+        }
+
+        approvals.push_back(verifier.clone());
+        storage::set_approvals(&env, &bounty_id, &approvals);
+
+        let approval_count = approvals.len();
+        events::emit_approval_recorded(&env, &bounty_id, &verifier, approval_count);
+
+        let threshold = if bounty.approval_threshold == 0 {
+            1
+        } else {
+            bounty.approval_threshold
+        };
+
+        if approval_count >= threshold {
+            let token = TokenClient::new(&env, &bounty.reward_token);
+
+            for (assignee, share_bp) in bounty.assignees.iter() {
+                let payout =
+                    (bounty.reward_amount as i128) * (share_bp as i128) / 10_000_i128;
+                token.transfer(&env.current_contract_address(), &assignee, &payout);
+
+                let mut contrib = storage::get_contributor(&env, &assignee)
+                    .unwrap_or(Contributor {
+                        address: assignee.clone(),
+                        reputation: 0,
+                        total_earned: 0,
+                        contribution_count: 0,
+                        active_claims: 0,
+                        metadata: None,
+                    });
+
+                contrib.reputation += 10;
+                contrib.total_earned += payout;
+                contrib.contribution_count += 1;
+                if contrib.active_claims > 0 {
+                    contrib.active_claims -= 1;
+                }
+
+                storage::store_contributor(&env, &assignee, &contrib);
+                events::emit_reward_paid(&env, &bounty_id, &assignee, &payout);
+            }
+
+            let (primary_assignee, _) = bounty.assignees.get(0).unwrap();
+            let previous_status = bounty.status.clone();
+            bounty.status = Symbol::new(&env, STATUS_COMPLETED);
+            storage::store_bounty(&env, &bounty_id, &bounty);
+            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
+        }
     }
 
     pub fn raise_dispute(env: Env, caller: Address, bounty_id: BytesN<32>) {

@@ -146,6 +146,19 @@ pub fn move_bounty_status(
     }
 }
 
+pub fn get_approvals(env: &Env, bounty_id: &BytesN<32>) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Approvals(bounty_id.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_approvals(env: &Env, bounty_id: &BytesN<32>, approvals: &Vec<Address>) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Approvals(bounty_id.clone()), approvals);
+}
+
 pub fn get_open_bounties(env: &Env) -> Vec<BytesN<32>> {
     env.storage()
         .persistent()

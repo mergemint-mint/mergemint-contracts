@@ -56,3 +56,25 @@ pub fn emit_bounty_expired(env: &Env, bounty_id: &BytesN<32>, creator: &Address)
         bounty_id.clone(),
     );
 }
+
+pub fn emit_approval_recorded(
+    env: &Env,
+    bounty_id: &BytesN<32>,
+    verifier: &Address,
+    approval_count: u32,
+) {
+    let topic = Symbol::new(env, "approval_recorded");
+    env.events()
+        .publish((topic, verifier.clone()), (bounty_id.clone(), approval_count));
+}
+
+pub fn emit_dispute_resolved(
+    env: &Env,
+    bounty_id: &BytesN<32>,
+    arbitrator: &Address,
+    resolution: &Symbol,
+) {
+    let topic = Symbol::new(env, "dispute_resolved");
+    env.events()
+        .publish((topic, arbitrator.clone()), (bounty_id.clone(), resolution.clone()));
+}

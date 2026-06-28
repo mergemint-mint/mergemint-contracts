@@ -10,6 +10,7 @@ pub enum DataKey {
     Contributor(Address),
     StatusIndex(Symbol),
     OpenBounties,
+    Approvals(BytesN<32>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +53,13 @@ pub struct Bounty {
     /// If set, claim_bounty will reject claims from contributors once the ledger
     /// sequence number exceeds this value.
     pub deadline: Option<u32>,
+    /// Optional list of addresses permitted to approve completion.
+    /// When set, approve_completion enforces that only listed addresses may vote.
+    /// When None, the single-verifier complete_bounty flow applies unchanged.
+    pub required_verifiers: Option<Vec<Address>>,
+    /// Number of approvals required before completion executes automatically.
+    /// Only meaningful when required_verifiers is Some. A value of 0 is treated as 1.
+    pub approval_threshold: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
