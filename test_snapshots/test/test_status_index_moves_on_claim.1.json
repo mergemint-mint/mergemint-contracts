@@ -19,7 +19,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                 },
                 {
-                  "symbol": "bounty_1"
+                  "symbol": "bounty_y"
                 },
                 {
                   "symbol": "desc"
@@ -63,6 +63,7 @@
         }
       ]
     ],
+    [],
     []
   ],
   "ledger": {
@@ -349,7 +350,7 @@
                         "symbol": "title"
                       },
                       "val": {
-                        "symbol": "bounty_1"
+                        "symbol": "bounty_y"
                       }
                     }
                   ]

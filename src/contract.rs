@@ -64,10 +64,12 @@ impl MergeMintContract {
         id
     }
 
-    /// Claim an open bounty. A contributor receives 10 000 basis points (full reward)
-    /// when claiming a single-assignee bounty (`max_assignees == 1`).
-    /// For multi-assignee bounties the caller must supply an explicit `share` in basis
-    /// points; the sum of all shares must not exceed 10 000.
+    /// Claim an open bounty. A contributor receives an even split of 10 000 basis
+    /// points across `max_assignees` slots (10 000 / `max_assignees` each); for the
+    /// current single-assignee bounties (`max_assignees == 1`) this is the full reward.
+    ///
+    /// Security: `require_auth()` is the first executable statement, before any
+    /// storage reads or business logic.
     pub fn claim_bounty(env: Env, contributor: Address, bounty_id: BytesN<32>) {
         contributor.require_auth();
 
@@ -109,23 +111,15 @@ impl MergeMintContract {
             }
         }
 
-        if bounty.min_reputation > 0 {
-            let contributor_profile = storage::get_contributor(&env, &contributor).unwrap_or(Contributor {
-                address: contributor.clone(),
-                reputation: 0,
-                total_earned: 0,
-                contribution_count: 0,
-            });
-            if contributor_profile.reputation < bounty.min_reputation {
-                panic!("contributor reputation is too low");
-            }
+        if bounty.min_reputation > 0 && contrib.reputation < bounty.min_reputation {
+            panic!("contributor reputation is too low");
         }
 
         let previous_status = bounty.status.clone();
-        bounty.assignee = Some(contributor.clone());
+        let share: u32 = 10_000 / bounty.max_assignees;
+        bounty.assignees.push_back((contributor.clone(), share));
         bounty.status = Symbol::new(&env, STATUS_IN_PROGRESS);
 
-        let previous_status = Symbol::new(&env, STATUS_OPEN);
         storage::store_bounty(&env, &bounty_id, &bounty);
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
 
@@ -146,6 +140,11 @@ impl MergeMintContract {
 
     /// Complete a bounty: distribute `reward_amount` proportionally across all assignees
     /// according to their basis-point shares (shares sum to 10 000).
+    ///
+    /// Security: `require_auth()` is the first executable statement. The bounty must be
+    /// `"in_progress"` (guards against double-completion) and the verifier must not be
+    /// one of the assignees (guards against self-verification) — both checks happen
+    /// before any token transfer.
     pub fn complete_bounty(env: Env, verifier: Address, bounty_id: BytesN<32>) {
         verifier.require_auth();
 
@@ -154,8 +153,18 @@ impl MergeMintContract {
             None => panic!("{}", errors::BOUNTY_NOT_FOUND),
         };
 
+        if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
+            panic!("{}", errors::BOUNTY_NOT_IN_PROGRESS);
+        }
+
         if bounty.assignees.is_empty() {
             panic!("{}", errors::BOUNTY_HAS_NO_ASSIGNEE);
+        }
+
+        for (assignee, _) in bounty.assignees.iter() {
+            if assignee == verifier {
+                panic!("{}", errors::VERIFIER_CANNOT_BE_ASSIGNEE);
+            }
         }
 
         let token = TokenClient::new(&env, &bounty.reward_token);
@@ -251,8 +260,10 @@ impl MergeMintContract {
             panic!("{}", errors::BOUNTY_NOT_OPEN);
         }
 
+        let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_CANCELLED);
         storage::store_bounty(&env, &bounty_id, &bounty);
+        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
 
         // Note: Escrow refund will go here once escrow is implemented.
         events::emit_bounty_cancelled(&env, &bounty_id, &caller);
@@ -284,8 +295,10 @@ impl MergeMintContract {
             panic!("{}", errors::BOUNTY_NOT_OPEN);
         }
 
+        let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_CANCELLED);
         storage::store_bounty(&env, &bounty_id, &bounty);
+        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
 
         // Escrow refund goes here once escrow is implemented.
 

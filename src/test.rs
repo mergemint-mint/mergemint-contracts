@@ -21,33 +21,36 @@ fn setup_test() -> (Env, Address, Address, Address) {
     (env, creator, contributor, verifier)
 }
 
-/// Convenience: create a bounty with an optional deadline.
-fn make_bounty(
-    env: &Env,
+/// Convenience: create a bounty with default reward/min_reputation and a given tag/token.
+fn create_bounty_helper(
     client: &MergeMintContractClient,
+    env: &Env,
     creator: &Address,
+    token: &Address,
     tag: &str,
-    deadline: Option<u32>,
 ) -> BytesN<32> {
     client.create_bounty(
         creator,
         &Symbol::new(env, tag),
         &Symbol::new(env, "desc"),
         &1000,
-        &Address::generate(env),
-        &deadline,
+        token,
+        &0,
+        &None,
     )
 }
 
-/// Helper: create a bounty with default min_reputation=0.
+/// Helper: create a bounty with default min_reputation=0 and no deadline.
 fn create_test_bounty(
     client: &MergeMintContractClient,
     env: &Env,
     creator: &Address,
     reward: i128,
-) -> soroban_sdk::BytesN<32> {
+) -> BytesN<32> {
+    let title = Symbol::new(env, "title");
+    let description = Symbol::new(env, "description");
     let reward_token = Address::generate(env);
-    client.create_bounty(creator, &title, &description, &reward, &reward_token, &None)
+    client.create_bounty(creator, &title, &description, &reward, &reward_token, &0, &None)
 }
 
 // ===========================================================================
@@ -64,7 +67,7 @@ fn test_create_bounty() {
     let description = Symbol::new(&env, "Test_bounty_desc");
     let reward_amount: i128 = 1000;
     let reward_token = Address::generate(&env);
-    let bounty_id = client.create_bounty(&creator, &title, &description, &reward_amount, &reward_token, &None);
+    let bounty_id = client.create_bounty(&creator, &title, &description, &reward_amount, &reward_token, &0, &None);
     let bounty = client.get_bounty(&bounty_id).unwrap();
     assert_eq!(bounty.reward_amount, reward_amount);
     assert_eq!(bounty.creator, creator);
@@ -83,7 +86,7 @@ fn test_claim_bounty() {
 
     let bounty_id = client.create_bounty(
         &creator, &Symbol::new(&env, "bounty_1"),
-        &Symbol::new(&env, "desc"), &1000, &Address::generate(&env), &None
+        &Symbol::new(&env, "desc"), &1000, &Address::generate(&env), &0, &None
     );
     client.claim_bounty(&contributor, &bounty_id);
     let bounty = client.get_bounty(&bounty_id).unwrap();
@@ -101,9 +104,9 @@ fn test_bounty_count() {
 
     assert_eq!(client.get_bounty_count(), 0);
     let reward_token = Address::generate(&env);
-    client.create_bounty(&creator, &Symbol::new(&env, "bounty_a"), &Symbol::new(&env, "desc_a"), &100, &reward_token, &None);
+    client.create_bounty(&creator, &Symbol::new(&env, "bounty_a"), &Symbol::new(&env, "desc_a"), &100, &reward_token, &0, &None);
     assert_eq!(client.get_bounty_count(), 1);
-    client.create_bounty(&creator, &Symbol::new(&env, "bounty_b"), &Symbol::new(&env, "desc_b"), &200, &reward_token, &None);
+    client.create_bounty(&creator, &Symbol::new(&env, "bounty_b"), &Symbol::new(&env, "desc_b"), &200, &reward_token, &0, &None);
     assert_eq!(client.get_bounty_count(), 2);
 }
 
@@ -123,6 +126,7 @@ fn test_bounty_count_increment_loop() {
             &1000,
             &reward_token,
             &0,
+            &None,
         );
         assert_eq!(client.get_bounty_count(), i + 1);
     }
@@ -137,7 +141,7 @@ fn test_complete_bounty_updates_contributor() {
 
     let bounty_id = client.create_bounty(
         &creator, &Symbol::new(&env, "bounty_c"),
-        &Symbol::new(&env, "desc_c"), &1000, &Address::generate(&env), &None
+        &Symbol::new(&env, "desc_c"), &1000, &Address::generate(&env), &0, &None
     );
     client.claim_bounty(&contributor, &bounty_id);
     let bounty = client.get_bounty(&bounty_id).unwrap();
@@ -193,7 +197,7 @@ fn test_bounty_id_uniqueness_sequential() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected = "bounty has no assignee")]
+#[should_panic(expected = "bounty is not in progress")]
 fn test_complete_bounty_no_assignee_panics() {
     let (env, creator, _contributor, verifier) = setup_test();
     let contract_id = env.register_contract(None, MergeMintContract);
@@ -201,7 +205,7 @@ fn test_complete_bounty_no_assignee_panics() {
 
     let bounty_id = client.create_bounty(
         &creator, &Symbol::new(&env, "unclaimed"),
-        &Symbol::new(&env, "no_assignee"), &1000, &Address::generate(&env), &None
+        &Symbol::new(&env, "no_assignee"), &1000, &Address::generate(&env), &0, &None
     );
 
     let bounty = client.get_bounty(&bounty_id).unwrap();
@@ -229,7 +233,7 @@ fn test_contributor_reputation_accumulation() {
         let reward: i128 = 1000 + (i as i128) * 500;
         let bounty_id = client.create_bounty(
             &creator, &Symbol::new(&env, "rep_b"),
-            &Symbol::new(&env, "rep_d"), &reward, &Address::generate(&env), &None
+            &Symbol::new(&env, "rep_d"), &reward, &Address::generate(&env), &0, &None
         );
         client.claim_bounty(&contributor, &bounty_id);
         client.complete_bounty(&verifier, &bounty_id);
@@ -257,9 +261,10 @@ fn test_contributor_initial_state_after_first_completion() {
     let contract_id = env.register_contract(None, MergeMintContract);
     let client = MergeMintContractClient::new(&env, &contract_id);
 
+    let reward: i128 = 500;
     let bounty_id = client.create_bounty(
         &creator, &Symbol::new(&env, "first"),
-        &Symbol::new(&env, "completion"), &reward, &Address::generate(&env), &None
+        &Symbol::new(&env, "completion"), &reward, &Address::generate(&env), &0, &None
     );
     client.claim_bounty(&contributor, &bounty_id);
     client.complete_bounty(&verifier, &bounty_id);
@@ -288,6 +293,7 @@ fn test_raise_dispute_creator() {
         &1000,
         &Address::generate(&env),
         &0,
+        &None,
     );
     client.claim_bounty(&contributor, &bounty_id);
     client.raise_dispute(&creator, &bounty_id);
@@ -309,6 +315,7 @@ fn test_raise_dispute_assignee() {
         &1000,
         &Address::generate(&env),
         &0,
+        &None,
     );
     client.claim_bounty(&contributor, &bounty_id);
     client.raise_dispute(&contributor, &bounty_id);
@@ -332,6 +339,7 @@ fn test_raise_dispute_third_party_fails() {
         &1000,
         &Address::generate(&env),
         &0,
+        &None,
     );
     client.claim_bounty(&contributor, &bounty_id);
     client.raise_dispute(&third_party, &bounty_id);
@@ -344,7 +352,7 @@ fn test_raise_dispute_third_party_fails() {
 #[test]
 #[should_panic(expected = "contributor already has an active claim")]
 fn test_second_claim_rejected_while_active() {
-    let (env, creator, contributor, _verifier) = setup_test();
+    let (env, creator, contributor, verifier) = setup_test();
     let contract_id = env.register_contract(None, MergeMintContract);
     let client = MergeMintContractClient::new(&env, &contract_id);
 
@@ -360,6 +368,7 @@ fn test_second_claim_rejected_while_active() {
         &Symbol::new(&env, "desc"),
         &1000,
         &reward_token,
+        &0,
         &None,
     );
 
@@ -391,6 +400,7 @@ fn test_second_claim_rejected_while_active() {
         &Symbol::new(&env, "desc"),
         &500,
         &reward_token,
+        &0,
         &None,
     );
     client.cancel_bounty(&creator, &cancelled_bounty_id);
@@ -448,7 +458,7 @@ fn test_status_index_moves_on_cancel() {
 
 #[test]
 fn test_active_claims_decremented_after_complete() {
-    let (env, creator, contributor, verifier) = setup_test();
+    let (env, creator, contributor, _verifier) = setup_test();
     let contract_id = env.register_contract(None, MergeMintContract);
     let client = MergeMintContractClient::new(&env, &contract_id);
 
@@ -456,10 +466,10 @@ fn test_active_claims_decremented_after_complete() {
     let reward_token = Address::generate(&env);
 
     let bounty_id_1 = client.create_bounty(
-        &creator, &Symbol::new(&env, "b1"), &Symbol::new(&env, "d1"), &reward_amount, &reward_token, &0,
+        &creator, &Symbol::new(&env, "b1"), &Symbol::new(&env, "d1"), &reward_amount, &reward_token, &0, &None,
     );
     let bounty_id_2 = client.create_bounty(
-        &creator, &Symbol::new(&env, "b2"), &Symbol::new(&env, "d2"), &reward_amount, &reward_token, &0,
+        &creator, &Symbol::new(&env, "b2"), &Symbol::new(&env, "d2"), &reward_amount, &reward_token, &0, &None,
     );
 
     client.claim_bounty(&contributor, &bounty_id_1);
@@ -520,7 +530,7 @@ fn test_contributor_metadata_default_none() {
 
     let bounty_id = client.create_bounty(
         &creator, &Symbol::new(&env, "meta_b"), &Symbol::new(&env, "d"), &100,
-        &Address::generate(&env), &0,
+        &Address::generate(&env), &0, &None,
     );
     client.claim_bounty(&contributor, &bounty_id);
     client.complete_bounty(&verifier, &bounty_id);
@@ -541,7 +551,7 @@ fn test_single_assignee_gets_full_share() {
 
     let bounty_id = client.create_bounty(
         &creator, &Symbol::new(&env, "single"), &Symbol::new(&env, "desc"), &1000,
-        &Address::generate(&env), &0,
+        &Address::generate(&env), &0, &None,
     );
     client.claim_bounty(&contributor, &bounty_id);
 
@@ -560,7 +570,7 @@ fn test_bounty_already_assigned_when_at_capacity() {
 
     let bounty_id = client.create_bounty(
         &creator, &Symbol::new(&env, "full_b"), &Symbol::new(&env, "desc"), &1000,
-        &Address::generate(&env), &0,
+        &Address::generate(&env), &0, &None,
     );
     // First claim should succeed (max_assignees defaults to 1)
     client.claim_bounty(&contributor, &bounty_id);
@@ -579,11 +589,50 @@ fn test_second_contributor_cannot_claim_full_bounty() {
 
     let bounty_id = client.create_bounty(
         &creator, &Symbol::new(&env, "full_c"), &Symbol::new(&env, "desc"), &1000,
-        &Address::generate(&env), &0,
+        &Address::generate(&env), &0, &None,
     );
     client.claim_bounty(&contributor, &bounty_id);
 
     // A different contributor tries to claim a full single-slot bounty — should panic.
     let contributor2 = Address::generate(&env);
     client.claim_bounty(&contributor2, &bounty_id);
+}
+
+// ===========================================================================
+// Security: self-verification and double-completion guards
+// ===========================================================================
+
+#[test]
+#[should_panic(expected = "verifier cannot be the assignee")]
+fn test_assignee_cannot_self_verify() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register_contract(None, MergeMintContract);
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = client.create_bounty(
+        &creator, &Symbol::new(&env, "self_verify"), &Symbol::new(&env, "desc"), &1000,
+        &Address::generate(&env), &0, &None,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+
+    // The assignee attempts to verify and complete their own bounty.
+    client.complete_bounty(&contributor, &bounty_id);
+}
+
+#[test]
+#[should_panic(expected = "bounty is not in progress")]
+fn test_double_complete_panics() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register_contract(None, MergeMintContract);
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = client.create_bounty(
+        &creator, &Symbol::new(&env, "double_complete"), &Symbol::new(&env, "desc"), &1000,
+        &Address::generate(&env), &0, &None,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+
+    // Second call on the now-completed bounty must panic.
+    client.complete_bounty(&verifier, &bounty_id);
 }
