@@ -587,3 +587,99 @@ fn test_second_contributor_cannot_claim_full_bounty() {
     let contributor2 = Address::generate(&env);
     client.claim_bounty(&contributor2, &bounty_id);
 }
+
+// ===========================================================================
+// Issue #258: verify all Contributor struct fields round-trip correctly
+// through persistent storage
+// ===========================================================================
+
+#[test]
+fn test_contributor_fields_roundtrip() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register_contract(None, MergeMintContract);
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let reward_amount: i128 = 2000;
+    let bounty_id = client.create_bounty(
+        &creator, &Symbol::new(&env, "roundtrip_c"),
+        &Symbol::new(&env, "contrib_rt"), &reward_amount,
+        &Address::generate(&env), &None,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+
+    // Retrieve the contributor profile and assert every field.
+    let data = client.get_contributor(&contributor).unwrap();
+    assert_eq!(data.address, contributor);
+    assert_eq!(data.reputation, 10);
+    assert_eq!(data.total_earned, reward_amount);
+    assert_eq!(data.contribution_count, 1);
+    assert_eq!(data.active_claims, 0);
+    assert!(data.metadata.is_none());
+
+    // Second completion: cumulative state.
+    let reward2: i128 = 3000;
+    let bounty_id2 = client.create_bounty(
+        &creator, &Symbol::new(&env, "roundtrip_c2"),
+        &Symbol::new(&env, "contrib_rt2"), &reward2,
+        &Address::generate(&env), &None,
+    );
+    client.claim_bounty(&contributor, &bounty_id2);
+    client.complete_bounty(&verifier, &bounty_id2);
+
+    let data2 = client.get_contributor(&contributor).unwrap();
+    assert_eq!(data2.address, contributor);
+    assert_eq!(data2.reputation, 20);
+    assert_eq!(data2.total_earned, reward_amount + reward2);
+    assert_eq!(data2.contribution_count, 2);
+    assert_eq!(data2.active_claims, 0);
+    assert!(data2.metadata.is_none());
+}
+
+// ===========================================================================
+// Issue #257: verify all Bounty struct fields round-trip correctly through
+// persistent storage
+// ===========================================================================
+
+#[test]
+fn test_bounty_fields_roundtrip() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register_contract(None, MergeMintContract);
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let title = Symbol::new(&env, "full_bounty");
+    let description = Symbol::new(&env, "Full field roundtrip bounty");
+    let reward_amount: i128 = 5000;
+    let reward_token = Address::generate(&env);
+
+    let bounty_id = client.create_bounty(
+        &creator, &title, &description, &reward_amount,
+        &reward_token, &None,
+    );
+
+    // Retrieve and assert every field of Bounty.
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.creator, creator);
+    assert_eq!(bounty.reward_amount, reward_amount);
+    assert_eq!(bounty.reward_token, reward_token);
+    assert!(bounty.assignees.is_empty());
+    assert_eq!(bounty.max_assignees, 1);
+    assert_eq!(bounty.status, Symbol::new(&env, "open"));
+    assert_eq!(bounty.min_reputation, 0);
+    assert_eq!(bounty.deadline, None);
+
+    // Also verify BountyMeta round-trips correctly.
+    let meta = client.get_bounty_meta(&bounty_id).unwrap();
+    assert_eq!(meta.title, title);
+    assert_eq!(meta.description, description);
+
+    // Claim the bounty and verify assignee is populated.
+    client.claim_bounty(&contributor, &bounty_id);
+    let bounty_after_claim = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty_after_claim.assignees.len(), 1);
+    let (assignee_addr, share) = bounty_after_claim.assignees.get(0).unwrap();
+    assert_eq!(assignee_addr, contributor);
+    assert_eq!(share, 10_000u32);
+    assert_eq!(bounty_after_claim.status, Symbol::new(&env, "in_progress"));
+}
+
