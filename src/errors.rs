@@ -8,3 +8,6 @@ pub const NOT_BOUNTY_CREATOR: &str = "not bounty creator";
 pub const VERIFIER_CANNOT_BE_ASSIGNEE: &str = "verifier cannot be assignee";
 pub const CREATOR_CANNOT_CLAIM: &str = "creator cannot claim";
 pub const CONTRIBUTOR_HAS_ACTIVE_CLAIM: &str = "contributor already has an active claim";
+pub const BOUNTY_NO_DEADLINE: &str = "bounty has no deadline";
+pub const DEADLINE_NOT_PASSED: &str = "deadline not passed";
+pub const BOUNTY_DEADLINE_PASSED: &str = "bounty deadline has passed";

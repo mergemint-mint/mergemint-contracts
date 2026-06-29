@@ -158,3 +158,21 @@ pub fn set_open_bounties(env: &Env, bounties: &Vec<BytesN<32>>) {
         .persistent()
         .set(&DataKey::OpenBounties, bounties);
 }
+
+// #271: contributor index — append address on first completion
+pub fn get_contributor_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ContributorIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn add_to_contributor_index(env: &Env, address: &Address) {
+    let mut index = get_contributor_index(env);
+    if index.iter().all(|a| a != *address) {
+        index.push_back(address.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContributorIndex, &index);
+    }
+}
