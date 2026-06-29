@@ -19,13 +19,13 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                 },
                 {
-                  "symbol": "bounty_1"
+                  "symbol": "meta_b"
                 },
                 {
-                  "symbol": "desc"
+                  "symbol": "d"
                 },
                 {
-                  "i128": "1000"
+                  "i128": "100"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
@@ -232,7 +232,7 @@
                         "symbol": "reward_amount"
                       },
                       "val": {
-                        "i128": "1000"
+                        "i128": "100"
                       }
                     },
                     {
@@ -341,7 +341,7 @@
                         "symbol": "description"
                       },
                       "val": {
-                        "symbol": "desc"
+                        "symbol": "d"
                       }
                     },
                     {
@@ -349,7 +349,7 @@
                         "symbol": "title"
                       },
                       "val": {
-                        "symbol": "bounty_1"
+                        "symbol": "meta_b"
                       }
                     }
                   ]

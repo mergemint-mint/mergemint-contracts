@@ -19,10 +19,10 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                 },
                 {
-                  "symbol": "bounty_1"
+                  "symbol": "bounty_c"
                 },
                 {
-                  "symbol": "desc"
+                  "symbol": "desc_c"
                 },
                 {
                   "i128": "1000"
@@ -341,7 +341,7 @@
                         "symbol": "description"
                       },
                       "val": {
-                        "symbol": "desc"
+                        "symbol": "desc_c"
                       }
                     },
                     {
@@ -349,7 +349,7 @@
                         "symbol": "title"
                       },
                       "val": {
-                        "symbol": "bounty_1"
+                        "symbol": "bounty_c"
                       }
                     }
                   ]

@@ -57,13 +57,37 @@ than the bounty's `reward_amount`.
 - Reentrancy via a malicious token contract that calls back into `complete_bounty` during
   `token.transfer`.
 
-**Mitigations:**
-- Follow checks-effects-interactions strictly: update the bounty status to `completed` and
-  persist it *before* calling `token.transfer`.
-- Validate that `bounty.status == STATUS_IN_PROGRESS` at the top of `complete_bounty` and
-  panic otherwise — this prevents double-completion even without reentrancy guards.
-- Note: Soroban's single-contract-at-a-time execution model eliminates classic reentrancy, but
-  the ordering discipline should still be enforced for clarity and defence-in-depth.
+**Mitigations — implemented:**
+- `complete_bounty` now validates `bounty.status == STATUS_IN_PROGRESS` as its first guard
+  (before the assignee check, the token transfer, or any storage write). Calling it on an
+  `open`, `completed`, `cancelled`, or `disputed` bounty panics with `"bounty is not in
+  progress"` instead of attempting a transfer.
+- The function now follows checks-effects-interactions: all state effects (contributor
+  reputation/earnings updates and the bounty status flip to `completed`) are computed and
+  persisted *before* any `token.transfer` call is made. Previously the transfer happened
+  inside the same loop that computed payouts, ahead of the status write — so during a
+  multi-assignee payout, or during the cross-contract transfer itself, the bounty was still
+  `in_progress`. A reentrant call landing in that window would have passed the (now-added)
+  status guard and could have triggered a second payout. With the reorder, by the time any
+  transfer is issued the bounty is already `completed`, so a reentrant call is rejected by
+  the guard at the top of the function.
+
+**Soroban reentrancy research (current findings, June 2026):**
+- Soroban's host enforces a strict call-stack authorization and storage model per
+  invocation, and same-contract reentrancy (a contract re-entering itself, directly or via a
+  callback chain through another contract) is restricted by the host's call protections in
+  current protocol versions — but this is a host-level mitigation, not a guarantee the
+  contract can rely on indefinitely across all token implementations and future protocol
+  versions.
+- Because the token referenced by `reward_token` is caller-supplied and not restricted to a
+  known-safe asset contract, this contract cannot assume the token it calls is non-reentrant
+  or trusted. The CEI reorder above means the contract's own state no longer depends on the
+  host's reentrancy protections for correctness — even a fully reentrant/malicious token
+  contract cannot trigger a double payout, because the status guard is effects-complete
+  before the first transfer is issued.
+- Recommendation: keep the CEI ordering as the primary defense. Do not rely solely on
+  Soroban's host-level reentrancy protections, since they are an implementation detail of the
+  current protocol version rather than a contractual guarantee.
 
 #### 3. Griefing (gas/fee exhaustion)
 

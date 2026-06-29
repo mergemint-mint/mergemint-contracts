@@ -22,14 +22,18 @@
                   "symbol": "test_bounty"
                 },
                 {
-                  "symbol": "Test_bounty_description"
+                  "symbol": "Test_bounty_desc"
                 },
                 {
                   "i128": "1000"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
-                }
+                },
+                {
+                  "u32": 0
+                },
+                "void"
               ]
             }
           },
@@ -37,6 +41,7 @@
         }
       ]
     ],
+    [],
     []
   ],
   "ledger": {
@@ -121,9 +126,11 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "assignee"
+                        "symbol": "assignees"
                       },
-                      "val": "void"
+                      "val": {
+                        "vec": []
+                      }
                     },
                     {
                       "key": {
@@ -135,10 +142,24 @@
                     },
                     {
                       "key": {
-                        "symbol": "description"
+                        "symbol": "deadline"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
+                        "symbol": "max_assignees"
                       },
                       "val": {
-                        "symbol": "Test_bounty_description"
+                        "u32": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "min_reputation"
+                      },
+                      "val": {
+                        "u32": 0
                       }
                     },
                     {
@@ -163,14 +184,6 @@
                       },
                       "val": {
                         "symbol": "open"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "title"
-                      },
-                      "val": {
-                        "symbol": "test_bounty"
                       }
                     }
                   ]
@@ -213,6 +226,111 @@
                 "durability": "persistent",
                 "val": {
                   "u64": "1"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "BountyMeta"
+                },
+                {
+                  "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              ]
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "BountyMeta"
+                    },
+                    {
+                      "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                    }
+                  ]
+                },
+                "durability": "temporary",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "description"
+                      },
+                      "val": {
+                        "symbol": "Test_bounty_desc"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "title"
+                      },
+                      "val": {
+                        "symbol": "test_bounty"
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          15
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "OpenBounties"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "OpenBounties"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "vec": [
+                    {
+                      "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                    }
+                  ]
                 }
               }
             },
