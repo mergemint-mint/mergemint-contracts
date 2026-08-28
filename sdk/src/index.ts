@@ -13,6 +13,30 @@ import {
 export * from "./types";
 import { NetworkConfig, Bounty, BountyMeta, Contributor, CreateBountyParams } from "./types";
 
+// === Errors
+
+export type MergeMintSdkErrorCode =
+  | "INVALID_RPC_URL"
+  | "MISSING_CONTRACT_ID"
+  | "SYMBOL_TOO_LONG"
+  | "SIMULATION_FAILED";
+
+/**
+ * Error thrown by the SDK. Carries a stable `code` so consumers can branch on
+ * the failure mode programmatically instead of matching on message strings.
+ */
+export class MergeMintSdkError extends Error {
+  readonly code: MergeMintSdkErrorCode;
+
+  constructor(code: MergeMintSdkErrorCode, message: string) {
+    super(message);
+    this.name = "MergeMintSdkError";
+    this.code = code;
+    // Keep `instanceof` working when compiled down to ES2020 / CommonJS.
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 export const TESTNET: Omit<NetworkConfig, "contractId"> = {
   rpcUrl: "https://soroban-testnet.stellar.org",
   networkPassphrase: Networks.TESTNET,
@@ -40,7 +64,10 @@ function addressToScVal(address: string): xdr.ScVal {
 
 function symbolToScVal(value: string): xdr.ScVal {
   if (value.length > 32) {
-    throw new Error(`value exceeds 32-character Symbol limit: ${value}`);
+    throw new MergeMintSdkError(
+      "SYMBOL_TOO_LONG",
+      `value exceeds 32-character Symbol limit: ${value}`
+    );
   }
   return nativeToScVal(value, { type: "symbol" });
 }
@@ -171,7 +198,10 @@ export class MergeMintSDK {
 
   constructor(config: NetworkConfig) {
     if (config.rpcUrl.includes("XCa...") || config.rpcUrl.includes("...")) {
-      throw new Error("Invalid RPC URL: placeholder detected in configuration. Please provide a valid Soroban RPC provider URL.");
+      throw new MergeMintSdkError(
+        "INVALID_RPC_URL",
+        "Invalid RPC URL: placeholder detected in configuration. Please provide a valid Soroban RPC provider URL."
+      );
     }
     this.rpc = new SorobanRpc.Server(config.rpcUrl);
     this.contract = new Contract(config.contractId);
@@ -324,7 +354,10 @@ export class MergeMintSDK {
 
     const sim = await this.rpc.simulateTransaction(tx);
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throw new MergeMintSdkError(
+        "SIMULATION_FAILED",
+        `Simulation failed: ${sim.error}`
+      );
     }
 
     const prepared = SorobanRpc.assembleTransaction(
@@ -336,4 +369,4 @@ export class MergeMintSDK {
   }
 }
 
-export { bytesNToHex };
+export { bytesNToHex, symbolToScVal };
