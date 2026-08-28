@@ -57,13 +57,12 @@ fn decrement_active_claims(contrib: &mut Contributor) {
 }
 
 /// Complete a bounty by marking it as completed and distributing payout.
-/// Used as a helper by both complete_bounty and approve_completion.
-fn complete_bounty_inner(env: Env, bounty_id: BountyId) {
-    let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-        Some(b) => b,
-        None => fail(ContractError::BountyNotFound),
-    };
-
+/// Used as a helper by `approve_completion`'s no-required-verifiers fallback.
+///
+/// Takes the already-loaded `bounty` rather than re-reading it from storage —
+/// the caller has already fetched it (see issue #90's fix to `create_bounty`
+/// for the same pattern).
+fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
     if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
         fail(ContractError::BountyNotInProgress);
     }
@@ -532,7 +531,7 @@ impl MergeMintContract {
 
         // If no required_verifiers list is set, fall back to immediate single-verifier completion.
         if bounty.required_verifiers.is_none() {
-            complete_bounty_inner(env, bounty_id);
+            complete_bounty_inner(env, bounty_id, bounty);
             return;
         }
 
