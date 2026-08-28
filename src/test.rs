@@ -390,6 +390,10 @@ fn test_contract_error_messages() {
         message(ContractError::NotArbitrator),
         "caller is not authorized to resolve this dispute"
     );
+    assert_eq!(
+        message(ContractError::MetadataEmpty),
+        "metadata must not be empty"
+    );
 }
 
 /// ContractError::TooManyTags is wired to the correct panic message.
@@ -1041,6 +1045,17 @@ fn test_update_contributor_metadata_overwrites() {
 
     let data = client.get_contributor(&contributor).unwrap();
     assert_eq!(data.metadata.unwrap(), Symbol::new(&env, "new_uri"));
+}
+
+/// An empty metadata Symbol must be rejected before writing to storage.
+#[test]
+#[should_panic(expected = "metadata must not be empty")]
+fn test_update_contributor_metadata_rejects_empty_symbol() {
+    let (env, _creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    client.update_contributor_metadata(&contributor, &Symbol::new(&env, ""));
 }
 
 // ===========================================================================

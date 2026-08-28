@@ -730,6 +730,10 @@ impl MergeMintContract {
     pub fn update_contributor_metadata(env: Env, contributor: Address, metadata: Symbol) {
         contributor.require_auth();
 
+        if metadata == Symbol::new(&env, "") {
+            fail(ContractError::MetadataEmpty);
+        }
+
         // #275: use Contributor::new for default construction (DONE - all call sites updated)
         let mut contrib = storage::get_contributor(&env, &contributor)
             .unwrap_or_else(|| Contributor::new(contributor.clone()));
