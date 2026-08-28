@@ -28,6 +28,8 @@ pub enum ContractError {
     NotArbitrator,
     ApprovalThresholdExceedsVerifiers,
     InvalidRewardToken,
+    InvalidStatus,
+    InvalidTag,
     MilestoneAlreadyCompleted,
     NotAllMilestonesCompleted,
     InvalidMilestoneIndex,
@@ -71,6 +73,8 @@ pub const fn message(e: ContractError) -> &'static str {
             "approval_threshold cannot exceed the number of required_verifiers"
         }
         ContractError::InvalidRewardToken => "invalid reward_token address",
+        ContractError::InvalidStatus => "invalid bounty status",
+        ContractError::InvalidTag => "invalid bounty tag",
         ContractError::MilestoneAlreadyCompleted => "milestone is already completed",
         ContractError::NotAllMilestonesCompleted => "not all milestones are completed",
         ContractError::InvalidMilestoneIndex => "invalid milestone index",

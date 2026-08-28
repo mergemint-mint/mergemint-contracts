@@ -154,11 +154,11 @@ fn test_five_tags_allowed() {
     let client = MergeMintContractClient::new(&env, &contract_id);
 
     let mut tags: Vec<Symbol> = Vec::new(&env);
-    tags.push_back(Symbol::new(&env, "a"));
-    tags.push_back(Symbol::new(&env, "b"));
-    tags.push_back(Symbol::new(&env, "c"));
-    tags.push_back(Symbol::new(&env, "d"));
-    tags.push_back(Symbol::new(&env, "e"));
+    tags.push_back(Symbol::new(&env, "bug"));
+    tags.push_back(Symbol::new(&env, "docs"));
+    tags.push_back(Symbol::new(&env, "feature"));
+    tags.push_back(Symbol::new(&env, "security"));
+    tags.push_back(Symbol::new(&env, "test"));
 
     let bounty_id = client.create_bounty(
         &creator,
@@ -189,7 +189,7 @@ fn test_too_many_tags_panics() {
 
     let mut tags: Vec<Symbol> = Vec::new(&env);
     for _ in 0..6 {
-        tags.push_back(Symbol::new(&env, "tag"));
+        tags.push_back(Symbol::new(&env, "bug"));
     }
 
     client.create_bounty(
@@ -2013,4 +2013,51 @@ fn test_escrow_balance_invariant() {
         expected_balance(0, 0),
         "after complete b3: contract balance must be zero"
     );
+}
+
+/// Unknown status symbols are rejected by query entrypoints (issue #653).
+#[test]
+#[should_panic(expected = "invalid bounty status")]
+fn test_get_status_count_rejects_unknown_status() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.get_status_count(&Symbol::new(&env, "not_a_status"));
+}
+
+/// Unknown tag symbols are rejected at bounty creation (issue #653).
+#[test]
+#[should_panic(expected = "invalid bounty tag")]
+fn test_create_bounty_rejects_unknown_tag() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut tags: Vec<Symbol> = Vec::new(&env);
+    tags.push_back(Symbol::new(&env, "not_a_tag"));
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "bad_tag"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &tags,
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+}
+
+/// get_bounties_by_tag rejects tags outside the shared allow-list (issue #653).
+#[test]
+#[should_panic(expected = "invalid bounty tag")]
+fn test_get_bounties_by_tag_rejects_unknown_tag() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.get_bounties_by_tag(&Symbol::new(&env, "not_a_tag"));
 }

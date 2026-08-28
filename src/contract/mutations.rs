@@ -1,8 +1,7 @@
-const STATUS_OPEN: &str = "open";
-const STATUS_IN_PROGRESS: &str = "in_progress";
-const STATUS_COMPLETED: &str = "completed";
-const STATUS_CANCELLED: &str = "cancelled";
-const STATUS_DISPUTED: &str = "disputed";
+use crate::symbols::{
+    self, SymbolKind, STATUS_CANCELLED, STATUS_COMPLETED, STATUS_DISPUTED, STATUS_IN_PROGRESS,
+    STATUS_OPEN,
+};
 
 /// Minimum reward amount enforced at bounty creation.
 const MIN_REWARD_AMOUNT: i128 = 100;
@@ -169,6 +168,10 @@ impl MergeMintContract {
 
         if tags.len() > 5 {
             fail(ContractError::TooManyTags);
+        }
+
+        for tag in tags.iter() {
+            symbols::validate_symbol_or_fail(&env, SymbolKind::Tag, &tag);
         }
 
         if max_assignees < 1 {
