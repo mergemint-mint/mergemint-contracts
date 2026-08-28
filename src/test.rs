@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::contract::MergeMintContract;
+use crate::types::Milestone;
 use crate::MergeMintContractClient;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
@@ -574,6 +575,42 @@ fn test_create_bounty_rejects_below_minimum_reward() {
         &None,
         &1,
         &Vec::new(&env),
+    );
+}
+
+/// Milestone reward summation must fail closed on i128 overflow.
+#[test]
+#[should_panic(expected = "reward amount arithmetic overflow")]
+fn test_create_bounty_rejects_milestone_reward_overflow() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: i128::MAX,
+        completed: false,
+    });
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m2"),
+        reward: 1,
+        completed: false,
+    });
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "overflow"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
     );
 }
 
