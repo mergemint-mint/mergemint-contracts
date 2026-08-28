@@ -179,6 +179,62 @@ fn test_five_tags_allowed() {
     assert_eq!(bounty.tags.len(), 5);
 }
 
+/// get_bounties_by_tag returns an empty Vec (never panics) for a tag that
+/// was never attached to any bounty — covering both the case where no
+/// bounties exist at all and the case where open bounties exist but under
+/// different tags.
+#[test]
+fn test_bounties_by_tag_unregistered_returns_empty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // No bounties exist yet at all.
+    assert_eq!(
+        client.get_bounties_by_tag(&Symbol::new(&env, "never_used")).len(),
+        0
+    );
+
+    let mut tags: Vec<Symbol> = Vec::new(&env);
+    tags.push_back(Symbol::new(&env, "bug"));
+    tags.push_back(Symbol::new(&env, "docs"));
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "tagged_bounty"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &tags,
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+
+    // A fuzz-style sweep of unregistered tags — none of them were ever
+    // attached to the bounty above, so each must come back empty.
+    let unregistered = [
+        "feature", "urgent", "wontfix", "duplicate", "help_wanted", "BUG", "nonexistent_tag",
+    ];
+    for tag in unregistered {
+        assert_eq!(
+            client.get_bounties_by_tag(&Symbol::new(&env, tag)).len(),
+            0,
+            "expected empty result for unregistered tag {tag:?}"
+        );
+    }
+
+    // Sanity check: a tag that *is* registered still returns the bounty,
+    // confirming the empty results above are due to the tag, not a bug in
+    // get_bounties_by_tag itself.
+    assert_eq!(
+        client.get_bounties_by_tag(&Symbol::new(&env, "bug")).len(),
+        1
+    );
+}
+
 /// Supplying more than 5 tags must panic with "too many tags".
 #[test]
 #[should_panic(expected = "too many tags")]
@@ -1220,6 +1276,36 @@ fn test_status_count_matches_index_length() {
             .get_bounties_by_status(&Symbol::new(&env, "open"), &None, &50)
             .0
             .len(),
+    );
+}
+
+/// get_status_count on a Symbol that is not one of the real status values
+/// (open/in_progress/completed/cancelled) returns 0 rather than erroring,
+/// both with no bounties present and with bounties present under real
+/// statuses. get_status_count does not validate its input against the set
+/// of known statuses — it is a plain storage lookup keyed by whatever
+/// Symbol is passed in, defaulting to 0 when the key has never been set.
+#[test]
+fn test_status_count_unrecognized_symbol() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "not_a_real_status")),
+        0
+    );
+
+    let _bounty_id = make_bounty(&client, &env, &creator, "sc_unknown", None);
+
+    assert_eq!(client.get_status_count(&Symbol::new(&env, "open")), 1);
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "not_a_real_status")),
+        0
+    );
+    assert_eq!(
+        client.get_status_count(&Symbol::new(&env, "OPEN")),
+        0
     );
 }
 
