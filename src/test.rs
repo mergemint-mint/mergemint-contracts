@@ -320,6 +320,10 @@ fn test_contract_error_messages() {
         message(ContractError::BountyAlreadyAssigned),
         "bounty already assigned"
     );
+    assert_eq!(
+        message(ContractError::AlreadyClaimed),
+        "bounty already claimed by contributor"
+    );
     assert_eq!(message(ContractError::BountyNotOpen), "bounty not open");
     assert_eq!(
         message(ContractError::BountyNotInProgress),
@@ -762,6 +766,20 @@ fn test_second_contributor_cannot_claim_full_bounty() {
     // A different contributor tries to claim a full single-slot bounty.
     let contributor2 = Address::generate(&env);
     client.claim_bounty(&contributor2, &bounty_id);
+}
+
+/// Issue #629 — idempotency guard rejects duplicate claim by same contributor.
+#[test]
+#[should_panic(expected = "bounty already claimed by contributor")]
+fn test_claim_bounty_idempotency_rejects_double_claim() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "idempotent", None);
+    client.claim_bounty(&contributor, &bounty_id);
+    // Second claim by the same contributor must fail with AlreadyClaimed.
+    client.claim_bounty(&contributor, &bounty_id);
 }
 
 // ===========================================================================

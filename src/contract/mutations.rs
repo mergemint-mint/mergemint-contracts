@@ -259,6 +259,14 @@ impl MergeMintContract {
             None => fail(ContractError::BountyNotFound),
         };
 
+        // Idempotency: reject a duplicate claim by the same contributor before
+        // any other state checks or storage mutations.
+        for (addr, _) in bounty.assignees.iter() {
+            if addr == contributor {
+                fail(ContractError::AlreadyClaimed);
+            }
+        }
+
         // GUARD: a bounty in a terminal/blocked state can never be claimed.
         // Note this is intentionally broader than `status == STATUS_OPEN`: a
         // multi-assignee bounty moves to "in_progress" after its first claim
@@ -278,12 +286,6 @@ impl MergeMintContract {
 
         if bounty.assignees.len() >= bounty.max_assignees {
             fail(ContractError::BountyAlreadyAssigned);
-        }
-
-        for (addr, _) in bounty.assignees.iter() {
-            if addr == contributor {
-                fail(ContractError::BountyAlreadyAssigned);
-            }
         }
 
         // #275: use Contributor::new for default construction (DONE - all call sites updated)
