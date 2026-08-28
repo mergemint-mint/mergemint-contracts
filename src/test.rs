@@ -1298,6 +1298,28 @@ fn test_cancel_bounty_refunds_escrow() {
     );
 }
 
+/// expire_bounty before the deadline must panic with DeadlineNotPassed.
+#[test]
+#[should_panic(expected = "deadline has not passed")]
+fn test_expire_bounty_before_deadline_panics() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "expire_too_early",
+        1000,
+        Some(100),
+    );
+
+    let caller = Address::generate(&env);
+    client.expire_bounty(&caller, &bounty_id);
+}
+
 /// expire_bounty refunds the escrowed reward to the creator.
 #[test]
 fn test_expire_bounty_refunds_escrow() {
