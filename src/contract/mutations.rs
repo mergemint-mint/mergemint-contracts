@@ -766,6 +766,13 @@ impl MergeMintContract {
             fail(ContractError::NotBountyCreator);
         }
 
+        // Terminal statuses must never be cancelled (or re-cancelled).
+        if bounty.status == Symbol::new(&env, STATUS_COMPLETED)
+            || bounty.status == Symbol::new(&env, STATUS_CANCELLED)
+        {
+            fail(ContractError::BountyNotOpen);
+        }
+
         if bounty.status != Symbol::new(&env, STATUS_OPEN) {
             fail(ContractError::BountyNotOpen);
         }

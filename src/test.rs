@@ -871,6 +871,30 @@ fn test_cancel_bounty_claimed_bounty_fails() {
     client.cancel_bounty(&creator, &bounty_id);
 }
 
+/// Cancelling a bounty that is already completed must panic.
+#[test]
+#[should_panic(expected = "bounty not open")]
+fn test_cancel_bounty_completed_bounty_fails() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let reward_amount: i128 = 1000;
+    let (bounty_id, _token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "cancel_done",
+        reward_amount,
+        None,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+    // Bounty is now completed — cancel must fail.
+    client.cancel_bounty(&creator, &bounty_id);
+}
+
 // ===========================================================================
 // Status index
 // ===========================================================================
