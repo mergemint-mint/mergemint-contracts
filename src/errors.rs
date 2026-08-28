@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-/// All contract error conditions in one place.
+//! Canonical contract error conditions.
+//!
+//! Each variant must be referenced from contract logic (`fail(ContractError::…)`)
+//! and have a unique panic message. `InvalidRewardToken` is enforced during
+//! `create_bounty` via a non-trapping token `balance` probe.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ContractError {
     BountyNotFound,

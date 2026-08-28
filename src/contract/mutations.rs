@@ -14,6 +14,24 @@ fn generate_bounty_id(env: &Env, count: u64) -> BountyId {
     BountyId(BytesN::from_array(env, &buf))
 }
 
+/// Probe `reward_token` by invoking the SEP-41 `balance` method. Non-token
+/// addresses must fail closed with `InvalidRewardToken` instead of trapping.
+fn validate_reward_token(env: &Env, reward_token: &Address) {
+    use soroban_sdk::{IntoVal, InvokeError, Val, Vec as SorobanVec};
+
+    let mut args: SorobanVec<Val> = SorobanVec::new(env);
+    args.push_back(env.current_contract_address().into_val(env));
+
+    match env.try_invoke_contract::<i128, InvokeError>(
+        reward_token,
+        &Symbol::new(env, "balance"),
+        args,
+    ) {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) | Err(_) => fail(ContractError::InvalidRewardToken),
+    }
+}
+
 /// Shared payout loop used by `complete_bounty`, `approve_completion`,
 /// and `resolve_dispute`'s "complete" branch.
 ///
@@ -181,8 +199,7 @@ impl MergeMintContract {
             }
         }
 
-        let token = TokenClient::new(&env, &reward_token);
-        token.balance(&env.current_contract_address());
+        validate_reward_token(&env, &reward_token);
 
         if !milestones.is_empty() {
             let mut total: i128 = 0;

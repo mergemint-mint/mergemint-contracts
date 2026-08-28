@@ -390,6 +390,110 @@ fn test_contract_error_messages() {
         message(ContractError::NotArbitrator),
         "caller is not authorized to resolve this dispute"
     );
+    assert_eq!(
+        message(ContractError::RewardBelowMinimum),
+        "reward_amount is below the minimum allowed"
+    );
+    assert_eq!(
+        message(ContractError::MaxAssigneesMustBePositive),
+        "max_assignees must be at least 1"
+    );
+    assert_eq!(
+        message(ContractError::ApprovalThresholdExceedsVerifiers),
+        "approval_threshold cannot exceed the number of required_verifiers"
+    );
+    assert_eq!(
+        message(ContractError::InvalidRewardToken),
+        "invalid reward_token address"
+    );
+    assert_eq!(
+        message(ContractError::MilestoneAlreadyCompleted),
+        "milestone is already completed"
+    );
+    assert_eq!(
+        message(ContractError::NotAllMilestonesCompleted),
+        "not all milestones are completed"
+    );
+    assert_eq!(
+        message(ContractError::InvalidMilestoneIndex),
+        "invalid milestone index"
+    );
+    assert_eq!(
+        message(ContractError::MilestoneRewardsMismatch),
+        "milestone rewards do not sum to reward_amount"
+    );
+}
+
+/// Every `ContractError` variant must map to a distinct panic message.
+#[test]
+fn test_contract_error_messages_are_unique() {
+    use crate::errors::{message, ContractError};
+
+    let variants = [
+        ContractError::BountyNotFound,
+        ContractError::BountyAlreadyAssigned,
+        ContractError::BountyNotOpen,
+        ContractError::BountyNotInProgress,
+        ContractError::BountyHasNoAssignee,
+        ContractError::RewardMustBePositive,
+        ContractError::RewardBelowMinimum,
+        ContractError::NotBountyCreator,
+        ContractError::VerifierCannotBeAssignee,
+        ContractError::CreatorCannotClaim,
+        ContractError::ContributorHasActiveClaim,
+        ContractError::BountyIsDisputed,
+        ContractError::BountyDeadlinePassed,
+        ContractError::BountyNoDeadline,
+        ContractError::DeadlineNotPassed,
+        ContractError::ReputationTooLow,
+        ContractError::TooManyTags,
+        ContractError::MaxAssigneesMustBePositive,
+        ContractError::OnlyCreatorOrAssigneeCanDispute,
+        ContractError::VerifierNotAuthorized,
+        ContractError::AlreadyApproved,
+        ContractError::BountyNotDisputed,
+        ContractError::NotArbitrator,
+        ContractError::ApprovalThresholdExceedsVerifiers,
+        ContractError::InvalidRewardToken,
+        ContractError::MilestoneAlreadyCompleted,
+        ContractError::NotAllMilestonesCompleted,
+        ContractError::InvalidMilestoneIndex,
+        ContractError::MilestoneRewardsMismatch,
+    ];
+
+    for (i, left) in variants.iter().enumerate() {
+        for right in variants.iter().skip(i + 1) {
+            assert_ne!(
+                message(*left),
+                message(*right),
+                "duplicate ContractError message between variants"
+            );
+        }
+    }
+}
+
+/// create_bounty rejects non-token reward_token addresses (issue #649).
+#[test]
+#[should_panic(expected = "invalid reward_token address")]
+fn test_create_bounty_rejects_invalid_reward_token() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "bad_token"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &Address::generate(&env),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
 }
 
 /// ContractError::TooManyTags is wired to the correct panic message.
