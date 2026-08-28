@@ -50,6 +50,24 @@ pub fn set_bounty_count(env: &Env, count: &u64) {
     extend(env, &key);
 }
 
+/// Decode the monotonic creation sequence embedded in a `BountyId`.
+///
+/// IDs are minted by `generate_bounty_id`, which writes the current
+/// `get_bounty_count()` into the last eight bytes (big-endian).
+pub fn bounty_id_sequence(id: &BountyId) -> u64 {
+    let mut seq_bytes = [0u8; 8];
+    for i in 0u32..8 {
+        seq_bytes[i as usize] = id.0.get(24 + i).unwrap_or(0);
+    }
+    u64::from_be_bytes(seq_bytes)
+}
+
+/// Returns `true` when `id`'s embedded sequence is strictly less than the
+/// number of bounties ever created (i.e. the ID was allocated at some point).
+pub fn bounty_id_was_allocated(env: &Env, id: &BountyId) -> bool {
+    bounty_id_sequence(id) < get_bounty_count(env)
+}
+
 // ── Bounty ────────────────────────────────────────────────────────────────────
 
 /// Persists a `Bounty` struct under its unique 32-byte identifier.

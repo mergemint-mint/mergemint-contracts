@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 
 use crate::contract::MergeMintContract;
+use crate::storage;
+use crate::types::{BountyId, DataKey};
 use crate::MergeMintContractClient;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token::StellarAssetClient,
-    Address, Env, String, Symbol, Vec,
+    Address, BytesN, Env, String, Symbol, Vec,
 };
 
 fn setup_test() -> (Env, Address, Address, Address) {
@@ -82,6 +84,13 @@ fn make_bounty_with_token(
         &Vec::new(env),
     );
     (bounty_id, token_addr)
+}
+
+/// Fabricate a `BountyId` with the given monotonic sequence (mirrors `generate_bounty_id`).
+fn fake_bounty_id(env: &Env, sequence: u64) -> BountyId {
+    let mut buf = [0u8; 32];
+    buf[24..32].copy_from_slice(&sequence.to_be_bytes());
+    BountyId(BytesN::from_array(env, &buf))
 }
 
 // ===========================================================================
@@ -667,6 +676,52 @@ fn test_bounty_count() {
         &Vec::new(&env),
     );
     assert_eq!(client.get_bounty_count(), 2);
+}
+
+/// Issue #633 — never-allocated IDs return None without panicking.
+#[test]
+fn test_get_bounty_never_allocated_id_returns_none() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_bounty_count(), 0);
+    let unallocated = fake_bounty_id(&env, 0);
+    assert!(client.get_bounty(&unallocated).is_none());
+}
+
+/// Issue #633 — IDs beyond `get_bounty_count()` return None without panicking.
+#[test]
+fn test_get_bounty_id_beyond_count_returns_none() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    make_bounty(&client, &env, &creator, "only", None);
+    assert_eq!(client.get_bounty_count(), 1);
+
+    let beyond = fake_bounty_id(&env, 99);
+    assert!(client.get_bounty(&beyond).is_none());
+}
+
+/// Issue #633 — pruned (allocated but missing) IDs return None without panicking.
+#[test]
+fn test_get_bounty_pruned_allocated_id_returns_none() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "pruned", None);
+    assert!(client.get_bounty(&bounty_id).is_some());
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Bounty(bounty_id.clone()));
+        assert!(storage::bounty_id_was_allocated(&env, &bounty_id));
+    });
+
+    assert!(client.get_bounty(&bounty_id).is_none());
 }
 
 #[test]

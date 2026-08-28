@@ -47,6 +47,11 @@ fn paginate(
 #[contractimpl]
 impl MergeMintContract {
     pub fn get_bounty(env: Env, bounty_id: BountyId) -> Option<Bounty> {
+        // Never-allocated IDs (sequence >= count) and pruned entries (sequence
+        // < count but missing from storage) both return None without panicking.
+        if !storage::bounty_id_was_allocated(&env, &bounty_id) {
+            return None;
+        }
         storage::get_bounty(&env, &bounty_id)
     }
 
