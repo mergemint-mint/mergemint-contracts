@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 
 use crate::contract::MergeMintContract;
+use crate::types::BountyId;
 use crate::MergeMintContractClient;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token::StellarAssetClient,
-    Address, Env, String, Symbol, Vec,
+    Address, BytesN, Env, String, Symbol, Vec,
 };
 
 fn setup_test() -> (Env, Address, Address, Address) {
@@ -82,6 +83,13 @@ fn make_bounty_with_token(
         &Vec::new(env),
     );
     (bounty_id, token_addr)
+}
+
+/// Fabricate a `BountyId` with the given monotonic sequence (mirrors `generate_bounty_id`).
+fn fake_bounty_id(env: &Env, sequence: u64) -> BountyId {
+    let mut buf = [0u8; 32];
+    buf[24..32].copy_from_slice(&sequence.to_be_bytes());
+    BountyId(BytesN::from_array(env, &buf))
 }
 
 // ===========================================================================
@@ -762,6 +770,18 @@ fn test_second_contributor_cannot_claim_full_bounty() {
     // A different contributor tries to claim a full single-slot bounty.
     let contributor2 = Address::generate(&env);
     client.claim_bounty(&contributor2, &bounty_id);
+}
+
+/// Issue #630 — complete_milestone must fail before touching milestone state.
+#[test]
+#[should_panic(expected = "bounty not found")]
+fn test_complete_milestone_nonexistent_bounty() {
+    let (env, _creator, _contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let fake_id = fake_bounty_id(&env, 42);
+    client.complete_milestone(&verifier, &fake_id, &0);
 }
 
 // ===========================================================================
