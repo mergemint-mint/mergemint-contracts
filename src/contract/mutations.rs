@@ -611,6 +611,10 @@ impl MergeMintContract {
             None => fail(ContractError::BountyNotFound),
         };
 
+        if bounty.status == Symbol::new(&env, STATUS_DISPUTED) {
+            fail(ContractError::BountyIsDisputed);
+        }
+
         if bounty.status != Symbol::new(&env, STATUS_OPEN)
             && bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS)
         {

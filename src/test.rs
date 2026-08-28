@@ -717,6 +717,21 @@ fn test_raise_dispute_assignee() {
     assert_eq!(bounty.status, Symbol::new(&env, "disputed"));
 }
 
+/// A second `raise_dispute` on an already-disputed bounty must panic.
+#[test]
+#[should_panic(expected = "bounty is disputed")]
+fn test_raise_dispute_second_dispute_fails() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "dispute_2x", None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+    // Bounty is already disputed — a second raise must be rejected.
+    client.raise_dispute(&creator, &bounty_id);
+}
+
 #[test]
 #[should_panic(expected = "only creator or assignee can raise dispute")]
 fn test_raise_dispute_third_party_fails() {
