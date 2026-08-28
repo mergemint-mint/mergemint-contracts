@@ -3,9 +3,9 @@
 use crate::contract::MergeMintContract;
 use crate::MergeMintContractClient;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{Address as _, Events as _, Ledger as _},
     token::StellarAssetClient,
-    Address, Env, String, Symbol, Vec,
+    vec, Address, Env, String, Symbol, TryFromVal, Val, Vec,
 };
 
 fn setup_test() -> (Env, Address, Address, Address) {
@@ -1436,6 +1436,79 @@ fn test_resolve_dispute_complete_pays_from_arbitrator() {
         token_client.balance(&contributor),
         reward_amount,
         "assignee received the full reward from the arbitrator"
+    );
+}
+
+/// Pin the relative event order emitted by `resolve_dispute` so future refactors
+/// cannot silently reorder contract events consumed by indexers.
+#[test]
+fn test_resolve_dispute_event_order() {
+    use soroban_sdk::xdr::ContractEventBody;
+
+    fn event_topics_since(env: &Env, contract_id: &Address, start: usize) -> Vec<Symbol> {
+        let mut topics = Vec::new(env);
+        for ev in env.events().all().filter_by_contract(contract_id).events()[start..].iter() {
+            let ContractEventBody::V0(body) = &ev.body;
+            let topic_sc = body.topics.first().expect("event topic");
+            let val = Val::try_from_val(env, topic_sc).expect("topic val");
+            topics.push_back(Symbol::try_from_val(env, &val).expect("topic symbol"));
+        }
+        topics
+    }
+
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let reward_amount: i128 = 1000;
+    let (bounty_id, _token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "evt_order_cancel",
+        reward_amount,
+        None,
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+
+    assert_eq!(
+        event_topics_since(&env, &contract_id, 0),
+        vec![&env, Symbol::new(&env, "dispute_resolved")],
+        "resolve_dispute(cancel) must emit dispute_resolved only"
+    );
+
+    let contributor2 = Address::generate(&env);
+    let token_addr2 = create_token_and_mint(&env, &creator, &creator, reward_amount);
+    let dispute_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "evt_order_complete"),
+        &String::from_str(&env, "desc"),
+        &reward_amount,
+        &token_addr2,
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+    client.claim_bounty(&contributor2, &dispute_id);
+    client.raise_dispute(&creator, &dispute_id);
+    client.resolve_dispute(&creator, &dispute_id, &Symbol::new(&env, "complete"));
+
+    assert_eq!(
+        event_topics_since(&env, &contract_id, 0),
+        vec![
+            &env,
+            Symbol::new(&env, "reward_paid"),
+            Symbol::new(&env, "dispute_resolved"),
+        ],
+        "resolve_dispute(complete) must emit reward_paid before dispute_resolved"
     );
 }
 
