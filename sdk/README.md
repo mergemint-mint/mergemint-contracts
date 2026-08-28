@@ -118,6 +118,24 @@ const sdk = new MergeMintSDK({
 });
 ```
 
+`buildNetworkConfig` fills in the testnet defaults so you only pass what differs:
+
+```ts
+import { MergeMintSDK, buildNetworkConfig } from "@mergemint/sdk";
+
+// Testnet defaults, custom contract
+const sdk = new MergeMintSDK(buildNetworkConfig({ contractId: "C..." }));
+
+// Custom network
+const custom = new MergeMintSDK(
+  buildNetworkConfig({
+    rpcUrl: "https://your-rpc.example.com",
+    networkPassphrase: "Custom Stellar Network ; January 2025",
+    contractId: "C...",
+  })
+);
+```
+
 ## Bounty ID format
 
 Bounty IDs are 32-byte values returned from `createBounty` and stored on-chain. The SDK represents them as lowercase hex strings (64 characters). Pass them directly to any method that accepts a `bountyId`.

@@ -42,6 +42,32 @@ export const TESTNET: Omit<NetworkConfig, "contractId"> = {
   networkPassphrase: Networks.TESTNET,
 };
 
+/**
+ * Builds a `NetworkConfig` for a custom deployment without hand-assembling the
+ * object. Defaults to the testnet RPC URL and passphrase; pass `overrides` to
+ * point at another network and to supply the deployed `contractId`.
+ *
+ * ```ts
+ * const sdk = new MergeMintSDK(
+ *   buildNetworkConfig({
+ *     rpcUrl: "https://your-rpc.example.com",
+ *     networkPassphrase: "Custom Stellar Network ; January 2025",
+ *     contractId: "C...",
+ *   })
+ * );
+ * ```
+ */
+export function buildNetworkConfig(
+  overrides: Partial<NetworkConfig> = {}
+): NetworkConfig {
+  return {
+    rpcUrl: TESTNET.rpcUrl,
+    networkPassphrase: TESTNET.networkPassphrase,
+    contractId: "",
+    ...overrides,
+  };
+}
+
 const MAINNET_RPC_PLACEHOLDER_PATTERN = /\/v1\/XCa\.\.\.$/;
 
 export const MAINNET: Omit<NetworkConfig, "contractId"> = {
