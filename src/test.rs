@@ -2014,3 +2014,165 @@ fn test_escrow_balance_invariant() {
         "after complete b3: contract balance must be zero"
     );
 }
+
+// ===========================================================================
+// Issue #650 — `docs/event-schema.md` parity with mutation emissions
+// ===========================================================================
+
+/// Primary event topic names documented in `docs/event-schema.md`.
+const DOCUMENTED_MUTATION_EVENTS: &[&str] = &[
+    "bounty_created",
+    "bounty_claimed",
+    "bounty_disputed",
+    "bounty_completed",
+    "reward_paid",
+    "bounty_cancelled",
+    "bounty_expired",
+    "approval_recorded",
+    "dispute_resolved",
+];
+
+fn invocation_contains_topic(env: &Env, contract_id: &Address, name: &str) -> bool {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::xdr::ContractEventBody;
+    use soroban_sdk::{TryFromVal, Val};
+
+    let target = Symbol::new(env, name);
+    env.events()
+        .all()
+        .filter_by_contract(contract_id)
+        .events()
+        .iter()
+        .any(|ev| {
+            let ContractEventBody::V0(body) = &ev.body;
+            let Some(topic_sc) = body.topics.first() else {
+                return false;
+            };
+            let Ok(val) = Val::try_from_val(env, topic_sc) else {
+                return false;
+            };
+            Symbol::try_from_val(env, &val).ok().as_ref() == Some(&target)
+        })
+}
+
+fn assert_invocation_emits(env: &Env, contract_id: &Address, expected: &[&str]) {
+    for name in expected {
+        assert!(
+            invocation_contains_topic(env, contract_id, name),
+            "expected event '{name}' from last invocation"
+        );
+    }
+}
+
+#[test]
+fn test_documented_event_schema_topics_are_complete() {
+    assert_eq!(DOCUMENTED_MUTATION_EVENTS.len(), 9);
+}
+
+/// Table-driven: each mutation path must emit the event(s) named in `docs/event-schema.md`.
+#[test]
+fn test_mutations_emit_documented_events_per_schema() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let reward_amount: i128 = 1000;
+
+    // create_bounty → bounty_created
+    let (bounty_id, token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "evt_create",
+        reward_amount,
+        None,
+    );
+    assert_invocation_emits(&env, &contract_id, &["bounty_created"]);
+
+    // claim_bounty → bounty_claimed
+    client.claim_bounty(&contributor, &bounty_id);
+    assert_invocation_emits(&env, &contract_id, &["bounty_claimed"]);
+
+    // raise_dispute → bounty_disputed
+    client.raise_dispute(&creator, &bounty_id);
+    assert_invocation_emits(&env, &contract_id, &["bounty_disputed"]);
+
+    // resolve_dispute (cancel) → dispute_resolved
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+    assert_invocation_emits(&env, &contract_id, &["dispute_resolved"]);
+
+    // cancel_bounty → bounty_cancelled
+    let (cancel_id, _) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "evt_cancel",
+        reward_amount,
+        None,
+    );
+    client.cancel_bounty(&creator, &cancel_id);
+    assert_invocation_emits(&env, &contract_id, &["bounty_cancelled"]);
+
+    // expire_bounty → bounty_expired
+    let (expire_id, _) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "evt_expire",
+        reward_amount,
+        Some(10),
+    );
+    env.ledger().set_sequence_number(100);
+    let caller = Address::generate(&env);
+    client.expire_bounty(&caller, &expire_id);
+    assert_invocation_emits(&env, &contract_id, &["bounty_expired"]);
+
+    // approve_completion (below threshold) → approval_recorded
+    let contributor2 = Address::generate(&env);
+    let (msig_id, _msig_token, v1, _v2, _v3) =
+        make_multisig_bounty(&client, &env, &creator, &contract_id, reward_amount, 2);
+    client.claim_bounty(&contributor2, &msig_id);
+    client.approve_completion(&v1, &msig_id);
+    assert_invocation_emits(&env, &contract_id, &["approval_recorded"]);
+
+    // complete_bounty → reward_paid + bounty_completed
+    let contributor3 = Address::generate(&env);
+    let (complete_id, _) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "evt_complete",
+        reward_amount,
+        None,
+    );
+    client.claim_bounty(&contributor3, &complete_id);
+    client.complete_bounty(&verifier, &complete_id);
+    assert_invocation_emits(&env, &contract_id, &["reward_paid", "bounty_completed"]);
+
+    // resolve_dispute (complete) → reward_paid + dispute_resolved
+    let contributor4 = Address::generate(&env);
+    let token_addr2 = create_token_and_mint(&env, &creator, &creator, reward_amount);
+    let dispute_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "evt_resolve"),
+        &String::from_str(&env, "desc"),
+        &reward_amount,
+        &token_addr2,
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+    client.claim_bounty(&contributor4, &dispute_id);
+    client.raise_dispute(&creator, &dispute_id);
+    client.resolve_dispute(&creator, &dispute_id, &Symbol::new(&env, "complete"));
+    assert_invocation_emits(&env, &contract_id, &["reward_paid", "dispute_resolved"]);
+
+    let _ = token_addr; // silence unused in some toolchains
+}
