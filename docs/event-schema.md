@@ -57,3 +57,9 @@ Contract events emitted for indexer integration.
 - **Data**: `(bounty_id, resolution)`
 - **Trigger**: Arbitrator resolves dispute
 - **Purpose**: Notify indexer of dispute outcome
+
+### milestone_completed
+- **Topics**: `(Symbol("milestone_completed"), milestone_index)`
+- **Data**: `(bounty_id, amount)`
+- **Trigger**: A milestone is completed and its staged reward paid
+- **Purpose**: Notify indexer of milestone-level progress

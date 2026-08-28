@@ -3,9 +3,9 @@
 use crate::contract::MergeMintContract;
 use crate::MergeMintContractClient;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{storage::Persistent as _, Address as _, Events as _, Ledger as _},
     token::StellarAssetClient,
-    Address, Env, String, Symbol, Vec,
+    Address, Env, IntoVal, String, Symbol, Val, Vec,
 };
 
 fn setup_test() -> (Env, Address, Address, Address) {
@@ -2012,5 +2012,364 @@ fn test_escrow_balance_invariant() {
         token_admin.balance(&contract_id),
         expected_balance(0, 0),
         "after complete b3: contract balance must be zero"
+    );
+}
+
+// ===========================================================================
+// Issue #653 — shared Symbol allow-list validation
+// ===========================================================================
+
+/// resolve_dispute must reject a resolution Symbol outside {"complete", "cancel"}.
+#[test]
+#[should_panic(expected = "invalid symbol value")]
+fn test_resolve_dispute_rejects_unknown_resolution_symbol() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "bad_resolution",
+        1000,
+        None,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "nonsense"));
+}
+
+/// get_bounties_by_status must reject a status Symbol outside the known set.
+#[test]
+#[should_panic(expected = "invalid symbol value")]
+fn test_get_bounties_by_status_rejects_unknown_status() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    client.get_bounties_by_status(&Symbol::new(&env, "not_a_real_status"), &None, &10);
+}
+
+/// get_status_count must reject a status Symbol outside the known set.
+#[test]
+#[should_panic(expected = "invalid symbol value")]
+fn test_get_status_count_rejects_unknown_status() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    client.get_status_count(&Symbol::new(&env, "not_a_real_status"));
+}
+
+// ===========================================================================
+// Issue #651 — Storage TTL bump regression test
+// ===========================================================================
+
+/// A `Contributor` entry must survive well beyond its original creation-time
+/// TTL window as long as it keeps getting read/written, because every
+/// `storage::get_contributor` / `store_contributor` call extends the TTL back
+/// out to `STORAGE_TTL_LEDGERS` whenever the remaining life drops below half
+/// (see `storage::extend`). This test creates a contributor, advances the
+/// ledger to just inside the TTL threshold, touches the entry once (bumping
+/// it), then advances far past what the *original* TTL window would have
+/// allowed and confirms the entry is still present and readable.
+#[test]
+fn test_contributor_entry_survives_ttl_via_periodic_bump() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "ttl_bump",
+        1000,
+        None,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+
+    let key = crate::types::DataKey::Contributor(contributor.clone());
+
+    let initial_ttl = env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        initial_ttl > 0,
+        "contributor entry must have a positive TTL right after claim_bounty"
+    );
+
+    // Advance close to (but before) the original expiry, then touch the entry.
+    // storage::get_contributor extends the TTL on every successful read.
+    env.ledger().set_sequence_number(6_000_000);
+    let contrib_mid = client.get_contributor(&contributor);
+    assert!(
+        contrib_mid.is_some(),
+        "entry must still be readable while inside its original TTL window"
+    );
+
+    let bumped_ttl = env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        bumped_ttl > initial_ttl,
+        "reading the entry near expiry must extend its TTL rather than leave it decaying"
+    );
+
+    // Advance well past where the *original* TTL window (ledger ~6_307_200)
+    // would have expired the entry had it never been bumped.
+    env.ledger().set_sequence_number(11_500_000);
+    let contrib_late = client.get_contributor(&contributor);
+    assert!(
+        contrib_late.is_some(),
+        "contributor entry must remain readable past the original TTL window because the \
+         mid-window read bumped its TTL"
+    );
+}
+
+// ===========================================================================
+// Issue #650 — Event schema parity with docs/event-schema.md
+// ===========================================================================
+
+/// Every event name documented in `docs/event-schema.md`. Kept in sync by
+/// hand — a mismatch between this table and what a mutation actually emits
+/// below is exactly the drift this test exists to catch.
+const DOCUMENTED_EVENTS: &[&str] = &[
+    "bounty_created",
+    "bounty_claimed",
+    "bounty_disputed",
+    "bounty_completed",
+    "reward_paid",
+    "bounty_cancelled",
+    "bounty_expired",
+    "approval_recorded",
+    "dispute_resolved",
+    "milestone_completed",
+];
+
+/// Table-driven check: trigger every mutation that emits a documented event
+/// and assert the exact topics/data captured by `env.events().all()`
+/// immediately after the call. A final pass confirms every event name listed
+/// in `docs/event-schema.md` was actually exercised below.
+#[test]
+fn test_event_schema_matches_documented_events() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let mut covered = [false; DOCUMENTED_EVENTS.len()];
+    let mut mark_covered = |name: &str| {
+        let idx = DOCUMENTED_EVENTS
+            .iter()
+            .position(|&e| e == name)
+            .unwrap_or_else(|| panic!("{} is not documented in docs/event-schema.md", name));
+        covered[idx] = true;
+    };
+    let reward_amount: i128 = 1000;
+
+    // bounty_created
+    let (bounty_id, _token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "evt_created",
+        reward_amount,
+        None,
+    );
+    let expected: Vec<(Address, Vec<Val>, Val)> = Vec::from_array(
+        &env,
+        [(
+            contract_id.clone(),
+            (Symbol::new(&env, "bounty_created"), creator.clone()).into_val(&env),
+            (bounty_id.clone(), reward_amount).into_val(&env),
+        )],
+    );
+    assert_eq!(env.events().all(), expected);
+    mark_covered("bounty_created");
+
+    // bounty_claimed
+    let contributor = Address::generate(&env);
+    client.claim_bounty(&contributor, &bounty_id);
+    let expected: Vec<(Address, Vec<Val>, Val)> = Vec::from_array(
+        &env,
+        [(
+            contract_id.clone(),
+            (Symbol::new(&env, "bounty_claimed"), contributor.clone()).into_val(&env),
+            bounty_id.clone().into_val(&env),
+        )],
+    );
+    assert_eq!(env.events().all(), expected);
+    mark_covered("bounty_claimed");
+
+    // bounty_disputed
+    client.raise_dispute(&creator, &bounty_id);
+    let expected: Vec<(Address, Vec<Val>, Val)> = Vec::from_array(
+        &env,
+        [(
+            contract_id.clone(),
+            (Symbol::new(&env, "bounty_disputed"), creator.clone()).into_val(&env),
+            bounty_id.clone().into_val(&env),
+        )],
+    );
+    assert_eq!(env.events().all(), expected);
+    mark_covered("bounty_disputed");
+
+    // dispute_resolved ("cancel" branch — refunds escrow, no separate reward_paid)
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+    let expected: Vec<(Address, Vec<Val>, Val)> = Vec::from_array(
+        &env,
+        [(
+            contract_id.clone(),
+            (Symbol::new(&env, "dispute_resolved"), creator.clone()).into_val(&env),
+            (bounty_id.clone(), Symbol::new(&env, "cancel")).into_val(&env),
+        )],
+    );
+    assert_eq!(env.events().all(), expected);
+    mark_covered("dispute_resolved");
+
+    // bounty_cancelled (fresh open bounty, cancelled directly by its creator)
+    let (bounty_id_2, _token_addr_2) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "evt_cancelled",
+        reward_amount,
+        None,
+    );
+    client.cancel_bounty(&creator, &bounty_id_2);
+    let expected: Vec<(Address, Vec<Val>, Val)> = Vec::from_array(
+        &env,
+        [(
+            contract_id.clone(),
+            (Symbol::new(&env, "bounty_cancelled"), creator.clone()).into_val(&env),
+            bounty_id_2.clone().into_val(&env),
+        )],
+    );
+    assert_eq!(env.events().all(), expected);
+    mark_covered("bounty_cancelled");
+
+    // bounty_expired
+    let (bounty_id_3, _token_addr_3) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "evt_expired",
+        reward_amount,
+        Some(10),
+    );
+    env.ledger().set_sequence_number(100);
+    let expiry_caller = Address::generate(&env);
+    client.expire_bounty(&expiry_caller, &bounty_id_3);
+    let expected: Vec<(Address, Vec<Val>, Val)> = Vec::from_array(
+        &env,
+        [(
+            contract_id.clone(),
+            (Symbol::new(&env, "bounty_expired"), creator.clone()).into_val(&env),
+            bounty_id_3.clone().into_val(&env),
+        )],
+    );
+    assert_eq!(env.events().all(), expected);
+    mark_covered("bounty_expired");
+    env.ledger().set_sequence_number(0);
+
+    // reward_paid + bounty_completed (complete_bounty, single full-share assignee)
+    let (bounty_id_4, _token_addr_4) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "evt_completed",
+        reward_amount,
+        None,
+    );
+    let contributor_4 = Address::generate(&env);
+    let verifier_4 = Address::generate(&env);
+    client.claim_bounty(&contributor_4, &bounty_id_4);
+    client.complete_bounty(&verifier_4, &bounty_id_4);
+    let expected: Vec<(Address, Vec<Val>, Val)> = Vec::from_array(
+        &env,
+        [
+            (
+                contract_id.clone(),
+                (Symbol::new(&env, "reward_paid"), contributor_4.clone()).into_val(&env),
+                (bounty_id_4.clone(), reward_amount).into_val(&env),
+            ),
+            (
+                contract_id.clone(),
+                (Symbol::new(&env, "bounty_completed"), contributor_4.clone()).into_val(&env),
+                bounty_id_4.clone().into_val(&env),
+            ),
+        ],
+    );
+    assert_eq!(env.events().all(), expected);
+    mark_covered("reward_paid");
+    mark_covered("bounty_completed");
+
+    // approval_recorded (multi-sig, below threshold — no completion side effects)
+    let (bounty_id_5, _token_addr_5, v1, _v2, _v3) =
+        make_multisig_bounty(&client, &env, &creator, &contract_id, reward_amount, 2);
+    let contributor_5 = Address::generate(&env);
+    client.claim_bounty(&contributor_5, &bounty_id_5);
+    client.approve_completion(&v1, &bounty_id_5);
+    let expected: Vec<(Address, Vec<Val>, Val)> = Vec::from_array(
+        &env,
+        [(
+            contract_id.clone(),
+            (Symbol::new(&env, "approval_recorded"), v1.clone()).into_val(&env),
+            (bounty_id_5.clone(), 1u32).into_val(&env),
+        )],
+    );
+    assert_eq!(env.events().all(), expected);
+    mark_covered("approval_recorded");
+
+    // milestone_completed + reward_paid (complete_milestone, single milestone == full reward)
+    let mut milestones: Vec<crate::types::Milestone> = Vec::new(&env);
+    milestones.push_back(crate::types::Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: reward_amount,
+        completed: false,
+    });
+    let token_addr_6 = create_token_and_mint(&env, &creator, &contract_id, reward_amount);
+    let bounty_id_6 = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "evt_milestone"),
+        &String::from_str(&env, "desc"),
+        &reward_amount,
+        &token_addr_6,
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+    let contributor_6 = Address::generate(&env);
+    let verifier_6 = Address::generate(&env);
+    client.claim_bounty(&contributor_6, &bounty_id_6);
+    client.complete_milestone(&verifier_6, &bounty_id_6, &0);
+    let expected: Vec<(Address, Vec<Val>, Val)> = Vec::from_array(
+        &env,
+        [
+            (
+                contract_id.clone(),
+                (Symbol::new(&env, "reward_paid"), contributor_6.clone()).into_val(&env),
+                (bounty_id_6.clone(), reward_amount).into_val(&env),
+            ),
+            (
+                contract_id.clone(),
+                (Symbol::new(&env, "milestone_completed"), 0u32).into_val(&env),
+                (bounty_id_6.clone(), reward_amount).into_val(&env),
+            ),
+        ],
+    );
+    assert_eq!(env.events().all(), expected);
+    mark_covered("milestone_completed");
+
+    assert!(
+        covered.iter().all(|&c| c),
+        "every event documented in docs/event-schema.md must be exercised by a mutation above"
     );
 }

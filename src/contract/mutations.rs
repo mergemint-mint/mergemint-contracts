@@ -656,8 +656,13 @@ impl MergeMintContract {
             fail(ContractError::NotArbitrator);
         }
 
+        crate::validation::validate_symbol(
+            &env,
+            crate::validation::SymbolKind::Resolution,
+            &resolution,
+        );
+
         let resolve_complete = Symbol::new(&env, "complete");
-        let resolve_cancel = Symbol::new(&env, "cancel");
 
         if resolution == resolve_complete {
             if bounty.assignees.is_empty() {
@@ -696,7 +701,9 @@ impl MergeMintContract {
                 storage::store_bounty(&env, &bounty_id, &bounty);
                 storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
             }
-        } else if resolution == resolve_cancel {
+        } else {
+            // validate_symbol above already guarantees resolution is "complete" or
+            // "cancel" — this branch handles "cancel".
             // Refund escrowed reward to creator before mutating status.
             let token = TokenClient::new(&env, &bounty.reward_token);
             token.transfer(
@@ -709,8 +716,6 @@ impl MergeMintContract {
             bounty.status = Symbol::new(&env, STATUS_CANCELLED);
             storage::store_bounty(&env, &bounty_id, &bounty);
             storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
-        } else {
-            panic!("resolution must be 'complete' or 'cancel'");
         }
 
         events::emit_dispute_resolved(&env, &bounty_id, &arbitrator, &resolution);

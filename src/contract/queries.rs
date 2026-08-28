@@ -93,11 +93,13 @@ impl MergeMintContract {
         cursor: Option<u32>,
         limit: u32,
     ) -> (Vec<BountyId>, Option<u32>) {
+        crate::validation::validate_symbol(&env, crate::validation::SymbolKind::Status, &status);
         let all = storage::get_bounties_by_status(&env, &status);
         paginate(&env, all, cursor, limit)
     }
 
     pub fn get_status_count(env: Env, status: Symbol) -> u32 {
+        crate::validation::validate_symbol(&env, crate::validation::SymbolKind::Status, &status);
         storage::get_status_count(&env, &status)
     }
 

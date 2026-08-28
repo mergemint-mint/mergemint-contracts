@@ -23,3 +23,4 @@ Closes #
 - [ ] `cargo clippy` passes with no warnings
 - [ ] `cargo fmt` applied
 - [ ] PR description includes `Closes #<issue_id>`
+- [ ] If this PR changes `types.rs` struct fields, backward compatibility was checked against `docs/migration.md`

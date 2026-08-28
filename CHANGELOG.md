@@ -11,6 +11,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Changes that have landed on `main` but are not yet associated with a tagged release.
 
+### Changed
+
+- `resolve_dispute`, `get_bounties_by_status`, `get_status_count` — raw `Symbol` inputs (`resolution`, `status`) are now checked against a shared allow-list (`validation::validate_symbol`) and panic with `invalid symbol value for this field` on an unrecognised value, replacing the previous per-call ad-hoc checks.
+
 ---
 
 ## [0.1.0] — 2024-01-01
