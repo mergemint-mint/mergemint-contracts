@@ -1,5 +1,7 @@
+import { xdr } from "@stellar/stellar-sdk";
 import {
   symbolToScVal,
+  bytesNToHex,
   buildNetworkConfig,
   MergeMintSDK,
   MergeMintSdkError,
@@ -105,5 +107,34 @@ describe("buildNetworkConfig", () => {
       networkPassphrase: "Custom Stellar Network ; January 2025",
       contractId: "CABCDEF",
     });
+  });
+});
+
+describe("bytesNToHex", () => {
+  const scvBytes = (bytes: number[]): xdr.ScVal =>
+    xdr.ScVal.scvBytes(Buffer.from(bytes));
+
+  it("returns an empty string for an empty byte array", () => {
+    expect(bytesNToHex(scvBytes([]))).toBe("");
+  });
+
+  it("encodes a single byte as two lowercase hex characters", () => {
+    expect(bytesNToHex(scvBytes([0x00]))).toBe("00");
+    expect(bytesNToHex(scvBytes([0x0a]))).toBe("0a");
+    expect(bytesNToHex(scvBytes([0xff]))).toBe("ff");
+  });
+
+  it("round-trips a typical 32-byte bounty ID", () => {
+    const hex = "a3f1".repeat(16); // 64 hex chars == 32 bytes
+    const bytes = Array.from(Buffer.from(hex, "hex"));
+    expect(bytes).toHaveLength(32);
+    expect(bytesNToHex(scvBytes(bytes))).toBe(hex);
+  });
+
+  it("emits two hex characters per byte, so the output length is always even", () => {
+    for (const length of [1, 3, 7, 31]) {
+      const bytes = Array.from({ length }, (_, i) => i);
+      expect(bytesNToHex(scvBytes(bytes))).toHaveLength(length * 2);
+    }
   });
 });
