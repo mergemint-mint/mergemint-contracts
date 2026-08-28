@@ -530,6 +530,12 @@ impl MergeMintContract {
             fail(ContractError::BountyHasNoAssignee);
         }
 
+        for (assignee, _) in bounty.assignees.iter() {
+            if assignee == verifier {
+                fail(ContractError::VerifierCannotBeAssignee);
+            }
+        }
+
         // If no required_verifiers list is set, fall back to immediate single-verifier completion.
         if bounty.required_verifiers.is_none() {
             complete_bounty_inner(env, bounty_id);

@@ -1911,6 +1911,40 @@ fn test_approve_completion_unauthorized_verifier_rejected() {
     client.approve_completion(&outsider, &bounty_id);
 }
 
+/// Assignee cannot approve their own bounty completion (self-approval guard).
+#[test]
+#[should_panic(expected = "verifier cannot be the assignee")]
+fn test_approve_completion_assignee_cannot_self_approve() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let reward_amount: i128 = 1000;
+    let v2 = Address::generate(&env);
+    let mut verifiers: Vec<Address> = Vec::new(&env);
+    verifiers.push_back(contributor.clone());
+    verifiers.push_back(v2.clone());
+
+    let token_addr = create_token_and_mint(&env, &creator, &contract_id, reward_amount);
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "self_approve"),
+        &String::from_str(&env, "self-approval guard bounty"),
+        &reward_amount,
+        &token_addr,
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &Some(verifiers),
+        &1,
+        &Vec::new(&env),
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.approve_completion(&contributor, &bounty_id);
+}
+
 // ===========================================================================
 // Issue #35/#36/#38 — Token-balance invariant test for escrow
 // ===========================================================================
