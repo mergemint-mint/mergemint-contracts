@@ -1,4 +1,39 @@
 // SPDX-License-Identifier: MIT
+//! Persistent storage layout for the MergeMint contract.
+//!
+//! ## Key namespacing
+//!
+//! Every storage key is a variant of [`DataKey`] (defined in `src/types.rs`).
+//! Soroban's `#[contracttype]` derive serialises each enum variant as a
+//! `(variant_name, fields...)` tuple, so the variant name itself is the
+//! namespace prefix — two variants can never collide on the same ledger
+//! entry no matter what their inner fields contain. This module must not
+//! introduce a second `DataKey` variant that stores the same logical data
+//! under a different name; extend an existing variant's fields instead.
+//!
+//! ## Key families
+//!
+//! - `BountyCount` — singleton `u64` counter, source of new bounty IDs.
+//! - `Bounty(id)` / `BountyMeta(id)` — a bounty's core struct and its
+//!   title/description, keyed by [`BountyId`].
+//! - `Contributor(address)` — a contributor's reputation/earnings record.
+//! - `ContributorBounties(address)` — flat `Vec<BountyId>` of bounties
+//!   created by `address` (see "Creator bounties index" below).
+//! - `StatusIndex(status)` — **legacy**, unpaged; superseded by
+//!   `StatusCount`/`StatusIndexPage`. Kept only so old serialised entries
+//!   remain readable; new code must not write it.
+//! - `StatusCount(status)` / `StatusIndexPage(status, page)` — paged index
+//!   of bounty IDs per status symbol (see "StatusIndex — paged" below).
+//! - `OpenBounties` — **legacy**, unpaged; superseded by
+//!   `OpenBountiesCount`/`OpenBountiesPage`.
+//! - `OpenBountiesCount` / `OpenBountiesPage(page)` — paged index of
+//!   currently-open bounty IDs (see "OpenBounties — paged" below).
+//! - `Approvals(id)` — `Vec<Address>` of verifiers who approved a bounty.
+//!
+//! Paged families (`StatusIndexPage`, `OpenBountiesPage`) share the same
+//! swap-remove-and-shrink strategy so adding a new paged family should
+//! follow the pattern already used for those two rather than inventing a
+//! new one.
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::types::{Bounty, BountyId, BountyMeta, Contributor, DataKey};

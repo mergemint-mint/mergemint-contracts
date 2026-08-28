@@ -289,4 +289,113 @@ mod tests {
         assert_eq!(dec_contrib, 25);
         assert_eq!(dec_claims, 3);
     }
+
+    #[test]
+    fn test_decode_bounty_boundary_values() {
+        let env = Env::default();
+        let creator = Address::generate(&env);
+        let reward_token = Address::generate(&env);
+        let status = Symbol::new(&env, "open");
+
+        // Max/min i128 reward and max/min u32 assignee counts round-trip
+        // without truncation or overflow.
+        let (dec_creator, dec_amount, dec_token, dec_assignees, dec_status) = decode_bounty(
+            &creator,
+            i128::MAX,
+            &reward_token,
+            u32::MAX,
+            &status,
+        );
+        assert_eq!(dec_creator, creator);
+        assert_eq!(dec_amount, i128::MAX);
+        assert_eq!(dec_token, reward_token);
+        assert_eq!(dec_assignees, u32::MAX);
+        assert_eq!(dec_status, status);
+
+        let (_, dec_amount_min, _, dec_assignees_min, _) =
+            decode_bounty(&creator, i128::MIN, &reward_token, 0, &status);
+        assert_eq!(dec_amount_min, i128::MIN);
+        assert_eq!(dec_assignees_min, 0);
+    }
+
+    #[test]
+    fn test_decode_contributor_boundary_values() {
+        let address = Address::generate(&Env::default());
+
+        // Max u32/i128 fields round-trip.
+        let (dec_addr, dec_rep, dec_earned, dec_contrib, dec_claims) =
+            decode_contributor(&address, u32::MAX, i128::MAX, u32::MAX, u32::MAX);
+        assert_eq!(dec_addr, address);
+        assert_eq!(dec_rep, u32::MAX);
+        assert_eq!(dec_earned, i128::MAX);
+        assert_eq!(dec_contrib, u32::MAX);
+        assert_eq!(dec_claims, u32::MAX);
+
+        // All-zero fields (a freshly registered contributor) round-trip too.
+        let (_, dec_rep_zero, dec_earned_zero, dec_contrib_zero, dec_claims_zero) =
+            decode_contributor(&address, 0, 0, 0, 0);
+        assert_eq!(dec_rep_zero, 0);
+        assert_eq!(dec_earned_zero, 0);
+        assert_eq!(dec_contrib_zero, 0);
+        assert_eq!(dec_claims_zero, 0);
+    }
+
+    #[test]
+    fn test_encode_bounty_with_empty_vectors() {
+        let env = Env::default();
+        let creator = Address::generate(&env);
+        let reward_token = Address::generate(&env);
+
+        // A bounty with empty assignees/tags/milestones vectors — the
+        // minimal valid state right after creation — still encodes cleanly.
+        let bounty = Bounty {
+            creator: creator.clone(),
+            reward_amount: 1,
+            reward_token: reward_token.clone(),
+            assignees: Vec::new(&env),
+            max_assignees: 1,
+            status: Symbol::new(&env, "open"),
+            min_reputation: 0,
+            deadline: None,
+            required_verifiers: None,
+            approval_threshold: 0,
+            tags: Vec::new(&env),
+            milestones: Vec::new(&env),
+        };
+
+        let (enc_creator, enc_amount, enc_token, enc_assignees, enc_status) =
+            encode_bounty(&bounty);
+        assert_eq!(enc_creator, creator);
+        assert_eq!(enc_amount, 1);
+        assert_eq!(enc_token, reward_token);
+        assert_eq!(enc_assignees, 1);
+        assert_eq!(enc_status, Symbol::new(&env, "open"));
+        assert!(bounty.assignees.is_empty());
+        assert!(bounty.tags.is_empty());
+        assert!(bounty.milestones.is_empty());
+    }
+
+    #[test]
+    fn test_encode_contributor_zero_values() {
+        let env = Env::default();
+        let address = Address::generate(&env);
+
+        // A freshly-registered contributor has all-zero counters.
+        let contributor = Contributor {
+            address: address.clone(),
+            reputation: 0,
+            total_earned: 0,
+            contribution_count: 0,
+            active_claims: 0,
+            metadata: None,
+        };
+
+        let (enc_addr, enc_rep, enc_earned, enc_contrib, enc_claims) =
+            encode_contributor(&contributor);
+        assert_eq!(enc_addr, address);
+        assert_eq!(enc_rep, 0);
+        assert_eq!(enc_earned, 0);
+        assert_eq!(enc_contrib, 0);
+        assert_eq!(enc_claims, 0);
+    }
 }

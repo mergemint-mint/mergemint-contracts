@@ -21,6 +21,16 @@ Baseline measurements captured by the `benchmark_*` tests in `src/test.rs` using
 | `get_bounty_count` | — | 500,000 |
 
 > Values are populated by running `cargo test benchmark -- --nocapture` and reading the printed output.
+>
+> **2026-08-28 verification:** no `benchmark_*` tests currently exist in
+> `src/test.rs`, so the table above has never been populated — the `—`
+> placeholders are not stale figures, they simply predate any benchmark run.
+> `create_bounty`'s current storage pattern (1 read of `BountyCount`, then
+> writes to `Bounty`, `BountyMeta`, `BountyCount`, the status index, the
+> creator index, and the open-bounties index — 6 writes total) was checked
+> against `src/contract/mutations.rs` and matches what's described here.
+> Populating real `cpuInsns`/CPU-instruction figures still requires adding
+> `benchmark_*` tests per the note above and running them.
 
 ---
 
