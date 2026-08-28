@@ -2,6 +2,7 @@ import {
   symbolToScVal,
   MergeMintSDK,
   MergeMintSdkError,
+  TESTNET,
   MAINNET,
 } from "./index";
 
@@ -41,5 +42,34 @@ describe("MergeMintSdkError", () => {
     }
     expect(caught).toBeInstanceOf(MergeMintSdkError);
     expect((caught as MergeMintSdkError).code).toBe("INVALID_RPC_URL");
+  });
+});
+
+describe("MergeMintSDK contractId validation", () => {
+  it("throws a clear error for an empty contractId", () => {
+    let caught: unknown;
+    try {
+      new MergeMintSDK({ ...TESTNET, contractId: "" });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(MergeMintSdkError);
+    expect((caught as MergeMintSdkError).code).toBe("MISSING_CONTRACT_ID");
+    expect((caught as MergeMintSdkError).message).toMatch(/Invalid contractId/);
+  });
+
+  it("throws for a whitespace-only contractId", () => {
+    expect(() => new MergeMintSDK({ ...TESTNET, contractId: "   " })).toThrow(
+      /Invalid contractId/,
+    );
+  });
+
+  it("throws for a placeholder contractId", () => {
+    expect(
+      () => new MergeMintSDK({ ...TESTNET, contractId: "CXXXXXXXXXXXX" }),
+    ).toThrow(/Invalid contractId/);
+    expect(
+      () => new MergeMintSDK({ ...TESTNET, contractId: "CABC..." }),
+    ).toThrow(/Invalid contractId/);
   });
 });

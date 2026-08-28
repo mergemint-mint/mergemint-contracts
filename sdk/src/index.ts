@@ -58,6 +58,20 @@ export const MAINNET: Omit<NetworkConfig, "contractId"> = {
 
 // === Helpers
 
+/**
+ * Guards against an empty or placeholder `contractId` slipping through at the
+ * JS boundary (e.g. from an untyped consumer) even though `NetworkConfig`
+ * requires it.
+ */
+function isUsableContractId(contractId: unknown): contractId is string {
+  if (typeof contractId !== "string") return false;
+  const trimmed = contractId.trim();
+  if (trimmed.length === 0) return false;
+  if (trimmed.includes("...")) return false;
+  if (/^C?X{3,}/i.test(trimmed)) return false;
+  return true;
+}
+
 function addressToScVal(address: string): xdr.ScVal {
   return new Address(address).toScVal();
 }
@@ -201,6 +215,12 @@ export class MergeMintSDK {
       throw new MergeMintSdkError(
         "INVALID_RPC_URL",
         "Invalid RPC URL: placeholder detected in configuration. Please provide a valid Soroban RPC provider URL."
+      );
+    }
+    if (!isUsableContractId(config.contractId)) {
+      throw new MergeMintSdkError(
+        "MISSING_CONTRACT_ID",
+        "Invalid contractId: expected a deployed Soroban contract ID but received an empty or placeholder value."
       );
     }
     this.rpc = new SorobanRpc.Server(config.rpcUrl);
