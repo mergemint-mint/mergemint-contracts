@@ -2014,3 +2014,84 @@ fn test_escrow_balance_invariant() {
         "after complete b3: contract balance must be zero"
     );
 }
+
+/// Every known bounty status (`mutations.rs` STATUS_* constants) must be
+/// queryable via `get_status_count` / `get_bounties_by_status` without panic,
+/// and counts must match index lengths. Update `KNOWN_STATUSES` when adding a
+/// new lifecycle status so this test forces coverage of status-dependent paths.
+#[test]
+fn test_exhaustive_known_status_query_coverage() {
+    const KNOWN_STATUSES: &[&str] = &["open", "in_progress", "completed", "cancelled", "disputed"];
+
+    let (env, creator, contributor, verifier) = setup_test();
+    let contributor2 = Address::generate(&env);
+    let contributor3 = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let reward: i128 = 1000;
+
+    let _open1 = make_bounty(&client, &env, &creator, "ex_open1", None);
+    let _open2 = make_bounty(&client, &env, &creator, "ex_open2", None);
+
+    let in_progress_id = make_bounty(&client, &env, &creator, "ex_ip", None);
+    client.claim_bounty(&contributor, &in_progress_id);
+
+    let cancelled_id = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "ex_can",
+        reward,
+        None,
+    )
+    .0;
+    client.cancel_bounty(&creator, &cancelled_id);
+
+    let disputed_id = make_bounty(&client, &env, &creator, "ex_disp", None);
+    client.claim_bounty(&contributor2, &disputed_id);
+    client.raise_dispute(&creator, &disputed_id);
+
+    let (completed_id, token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "ex_done",
+        reward,
+        None,
+    );
+    client.claim_bounty(&contributor3, &completed_id);
+    let token_admin = StellarAssetClient::new(&env, &token_addr);
+    token_admin.mint(&verifier, &reward);
+    client.complete_bounty(&verifier, &completed_id);
+
+    for status_str in KNOWN_STATUSES {
+        let status = Symbol::new(&env, status_str);
+        let count = client.get_status_count(&status);
+        let ids = client.get_bounties_by_status(&status, &None, &50).0;
+        assert_eq!(
+            count,
+            ids.len(),
+            "get_status_count must match index length for {status_str}"
+        );
+
+        let expected = match *status_str {
+            "open" => 2,
+            "in_progress" => 1,
+            "completed" => 1,
+            "cancelled" => 1,
+            "disputed" => 1,
+            _ => panic!("update expected counts when adding status {status_str}"),
+        };
+        assert_eq!(count, expected, "unexpected bounty count for {status_str}");
+
+        for id in ids.iter() {
+            let bounty = client.get_bounty(&id).unwrap();
+            assert_eq!(
+                bounty.status, status,
+                "status index {status_str} returned bounty with mismatched status"
+            );
+        }
+    }
+}
