@@ -272,6 +272,38 @@ fn test_get_bounties_by_creator_unknown_address_empty() {
     );
 }
 
+/// Issue #634 — `get_open_bounties_paged` clamps `limit` to 50 (MAX_LIMIT) via `paginate`.
+#[test]
+fn test_get_open_bounties_paged_limit_capped_at_max() {
+    const OPEN_BOUNTY_TAGS: [&str; 55] = [
+        "o00", "o01", "o02", "o03", "o04", "o05", "o06", "o07", "o08", "o09", "o10", "o11", "o12",
+        "o13", "o14", "o15", "o16", "o17", "o18", "o19", "o20", "o21", "o22", "o23", "o24", "o25",
+        "o26", "o27", "o28", "o29", "o30", "o31", "o32", "o33", "o34", "o35", "o36", "o37", "o38",
+        "o39", "o40", "o41", "o42", "o43", "o44", "o45", "o46", "o47", "o48", "o49", "o50", "o51",
+        "o52", "o53", "o54",
+    ];
+
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    for tag in OPEN_BOUNTY_TAGS {
+        make_bounty(&client, &env, &creator, tag, None);
+    }
+
+    assert_eq!(client.get_open_bounties_count(), 55);
+
+    let page = client.get_open_bounties_paged(&0, &1000);
+    assert_eq!(
+        page.len(),
+        50,
+        "limit above cap must return at most 50 items"
+    );
+
+    let page2 = client.get_open_bounties_paged(&50, &1000);
+    assert_eq!(page2.len(), 5, "remaining open bounties after first capped page");
+}
+
 // ===========================================================================
 // Issue 3 — dispute guard in complete_bounty
 // ===========================================================================
