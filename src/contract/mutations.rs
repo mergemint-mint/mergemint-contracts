@@ -7,6 +7,16 @@ const STATUS_DISPUTED: &str = "disputed";
 /// Minimum reward amount enforced at bounty creation.
 const MIN_REWARD_AMOUNT: i128 = 100;
 
+/// Verify a bounty's status is one of `allowed`, failing with `err` otherwise.
+///
+/// Centralizes the status-transition guards that used to be duplicated
+/// across `claim_bounty`, `cancel_bounty`, and `complete_bounty`.
+fn ensure_status(bounty: &Bounty, allowed: &[Symbol], err: ContractError) {
+    if !allowed.iter().any(|s| s == &bounty.status) {
+        fail(err);
+    }
+}
+
 fn generate_bounty_id(env: &Env, count: u64) -> BountyId {
     let mut buf = [0u8; 32];
     let count_bytes = count.to_be_bytes();
@@ -264,12 +274,14 @@ impl MergeMintContract {
         // multi-assignee bounty moves to "in_progress" after its first claim
         // and must remain claimable by further contributors while capacity
         // remains (enforced below by the max_assignees check).
-        if bounty.status == Symbol::new(&env, STATUS_CANCELLED)
-            || bounty.status == Symbol::new(&env, STATUS_COMPLETED)
-            || bounty.status == Symbol::new(&env, STATUS_DISPUTED)
-        {
-            fail(ContractError::BountyNotOpen);
-        }
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_OPEN),
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+            ],
+            ContractError::BountyNotOpen,
+        );
 
         // The creator of a bounty cannot claim their own bounty.
         if contributor == bounty.creator {
@@ -454,9 +466,11 @@ impl MergeMintContract {
         // repeat calls on already-completed bounties and any other terminal state.
         // Depends on claim_bounty having written STATUS_IN_PROGRESS and
         // complete_bounty writing STATUS_COMPLETED below (checks-effects-interactions).
-        if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
-            fail(ContractError::BountyNotInProgress);
-        }
+        ensure_status(
+            &bounty,
+            &[Symbol::new(&env, STATUS_IN_PROGRESS)],
+            ContractError::BountyNotInProgress,
+        );
 
         if bounty.assignees.is_empty() {
             fail(ContractError::BountyHasNoAssignee);
@@ -766,9 +780,11 @@ impl MergeMintContract {
             fail(ContractError::NotBountyCreator);
         }
 
-        if bounty.status != Symbol::new(&env, STATUS_OPEN) {
-            fail(ContractError::BountyNotOpen);
-        }
+        ensure_status(
+            &bounty,
+            &[Symbol::new(&env, STATUS_OPEN)],
+            ContractError::BountyNotOpen,
+        );
 
         // Refund escrowed reward to creator before mutating status.
         let token = TokenClient::new(&env, &bounty.reward_token);

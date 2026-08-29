@@ -3,6 +3,11 @@ use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::types::{Bounty, BountyId, BountyMeta, Contributor, DataKey};
 
+/// Terminal statuses after which a bounty is recorded in a contributor's
+/// history index. Kept in sync with the status literals in `contract/mutations.rs`.
+const STATUS_COMPLETED: &str = "completed";
+const STATUS_CANCELLED: &str = "cancelled";
+
 /// Approximate 1 year in ledger sequences at 5 seconds per ledger.
 const STORAGE_TTL_LEDGERS: u32 = 6_307_200;
 /// Extend TTL when remaining life falls below half a year.
@@ -339,6 +344,16 @@ pub fn move_bounty_status(
     if old_status != new_status {
         remove_bounty_from_status(env, bounty_id, old_status);
         add_bounty_to_status(env, bounty_id, new_status);
+
+        if *new_status == Symbol::new(env, STATUS_COMPLETED)
+            || *new_status == Symbol::new(env, STATUS_CANCELLED)
+        {
+            if let Some(bounty) = get_bounty(env, bounty_id) {
+                for (assignee, _) in bounty.assignees.iter() {
+                    append_contributor_history(env, &assignee, bounty_id);
+                }
+            }
+        }
     }
 }
 
@@ -543,4 +558,25 @@ pub fn append_creator_bounty(env: &Env, creator: &Address, bounty_id: &BountyId)
     env.storage()
         .persistent()
         .set(&DataKey::ContributorBounties(creator.clone()), &list);
+}
+
+// ── Contributor bounty history ───────────────────────────────────────────────
+
+/// Returns every bounty ID `address` was an assignee on when it reached a
+/// terminal status (`"completed"` or `"cancelled"`). Empty if none.
+pub fn get_contributor_history(env: &Env, address: &Address) -> Vec<BountyId> {
+    let key = DataKey::ContributorHistory(address.clone());
+    let list: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
+    if list.is_some() {
+        extend(env, &key);
+    }
+    list.unwrap_or_else(|| Vec::new(env))
+}
+
+fn append_contributor_history(env: &Env, address: &Address, bounty_id: &BountyId) {
+    let mut list = get_contributor_history(env, address);
+    list.push_back(bounty_id.clone());
+    let key = DataKey::ContributorHistory(address.clone());
+    env.storage().persistent().set(&key, &list);
+    extend(env, &key);
 }
