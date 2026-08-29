@@ -39,11 +39,43 @@ pub struct AppError {
     pub message: String,
 }
 
+/// Substrings that mark a message as carrying internal/sensitive detail
+/// (connection strings, credentials, auth headers) rather than a plain
+/// caller-facing description. Any constructor whose input matches one of
+/// these is redacted to a generic fallback before it reaches the client —
+/// the same safety-net principle already applied to 500s below, extended to
+/// 4xx constructors so caller-supplied or interpolated detail can never leak
+/// through `bad_request`/`not_found` either.
+const SENSITIVE_MARKERS: &[&str] = &[
+    "postgres://",
+    "postgresql://",
+    "password",
+    "secret",
+    "authorization:",
+    "bearer ",
+];
+
+/// Replace `msg` with `fallback` if it appears to contain internal detail
+/// that must never be echoed back to a caller (see `SENSITIVE_MARKERS`).
+/// Ordinary caller-facing messages (e.g. "bounty id is required") pass
+/// through unchanged.
+fn redact_if_sensitive(msg: String, fallback: &str) -> String {
+    let lower = msg.to_lowercase();
+    if SENSITIVE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        fallback.to_string()
+    } else {
+        msg
+    }
+}
+
 impl AppError {
     pub fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<AppError>) {
         let err = AppError {
             code: 400,
-            message: msg.into(),
+            message: redact_if_sensitive(msg.into(), "bad request"),
         };
         (StatusCode::BAD_REQUEST, Json(err))
     }
@@ -51,7 +83,7 @@ impl AppError {
     pub fn not_found(msg: impl Into<String>) -> (StatusCode, Json<AppError>) {
         let err = AppError {
             code: 404,
-            message: msg.into(),
+            message: redact_if_sensitive(msg.into(), "not found"),
         };
         (StatusCode::NOT_FOUND, Json(err))
     }
@@ -327,5 +359,58 @@ mod tests {
             body.contains("missing field: bounty_id"),
             "400 body must contain the original message; got: {body}"
         );
+    }
+
+    /// `AppError::bad_request` must redact sensitive detail (e.g. a raw
+    /// connection string) just like `AppError::internal` does, rather than
+    /// echoing caller-supplied/interpolated internal state back to the
+    /// client.
+    #[tokio::test]
+    async fn bad_request_body_does_not_contain_raw_sensitive_detail() {
+        let raw_detail = "invalid config: postgres://internal-host:5432/db";
+
+        let (status, Json(err)) = AppError::bad_request(raw_detail);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let body = body_string(err.into_response()).await;
+
+        assert!(
+            !body.contains(raw_detail),
+            "bad_request body must NOT contain the raw sensitive detail; got: {body}"
+        );
+        assert!(
+            body.contains("bad request"),
+            "bad_request body must contain the generic fallback message; got: {body}"
+        );
+    }
+
+    /// `AppError::not_found` must apply the same redaction rules as
+    /// `bad_request`/`internal` for any sensitive caller-supplied data.
+    #[tokio::test]
+    async fn not_found_body_does_not_contain_raw_sensitive_detail() {
+        let raw_detail = "lookup failed: password=hunter2";
+
+        let (status, Json(err)) = AppError::not_found(raw_detail);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let body = body_string(err.into_response()).await;
+
+        assert!(
+            !body.contains(raw_detail),
+            "not_found body must NOT contain the raw sensitive detail; got: {body}"
+        );
+        assert!(
+            body.contains("not found"),
+            "not_found body must contain the generic fallback message; got: {body}"
+        );
+    }
+
+    /// Ordinary, non-sensitive messages must pass through `not_found`
+    /// unredacted (mirrors `client_errors_preserve_message` for `bad_request`).
+    #[tokio::test]
+    async fn not_found_preserves_ordinary_message() {
+        let (status, Json(err)) = AppError::not_found("bounty not found");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(err.message, "bounty not found");
     }
 }
