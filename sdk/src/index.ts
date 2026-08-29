@@ -24,13 +24,6 @@ export const MAINNET: Omit<NetworkConfig, "contractId"> = {
   rpcUrl: "https://mainnet.stellar.validationcloud.io/v1/XCa...",
   networkPassphrase: Networks.PUBLIC,
 };
-  rewardToken: string;
-  minReputation: number;
-  deadline: number | null;
-  tags: string[];
-  requiredVerifiers?: string[];
-  approvalThreshold?: number;
-}
 
 // === Helpers
 
