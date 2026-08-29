@@ -11,7 +11,14 @@ import {
 } from "@stellar/stellar-sdk";
 
 export * from "./types";
-import { NetworkConfig, Bounty, BountyMeta, Contributor, CreateBountyParams } from "./types";
+import {
+  NetworkConfig,
+  Bounty,
+  BountyMeta,
+  Contributor,
+  CreateBountyParams,
+  RetryOptions,
+} from "./types";
 
 export const TESTNET: Omit<NetworkConfig, "contractId"> = {
   rpcUrl: "https://soroban-testnet.stellar.org",
@@ -31,7 +38,7 @@ function addressToScVal(address: string): xdr.ScVal {
   return new Address(address).toScVal();
 }
 
-function symbolToScVal(value: string): xdr.ScVal {
+export function symbolToScVal(value: string): xdr.ScVal {
   if (value.length > 32) {
     throw new Error(`value exceeds 32-character Symbol limit: ${value}`);
   }
@@ -154,6 +161,30 @@ function parseContributor(raw: unknown): Contributor {
   };
 }
 
+// === Retry
+
+const NO_RETRY: RetryOptions = { attempts: 1, backoffMs: 0 };
+
+function normalizeRetry(retry: RetryOptions | undefined): RetryOptions {
+  if (!retry) return NO_RETRY;
+  if (!Number.isInteger(retry.attempts) || retry.attempts < 1) {
+    throw new Error(
+      `Invalid retry.attempts: expected an integer >= 1, got ${retry.attempts}`
+    );
+  }
+  if (!Number.isFinite(retry.backoffMs) || retry.backoffMs < 0) {
+    throw new Error(
+      `Invalid retry.backoffMs: expected a number >= 0, got ${retry.backoffMs}`
+    );
+  }
+  return { attempts: retry.attempts, backoffMs: retry.backoffMs };
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // === SDK
 
 export class MergeMintSDK {
@@ -161,6 +192,7 @@ export class MergeMintSDK {
   private readonly contract: Contract;
   private readonly networkPassphrase: string;
   private readonly contractId: string;
+  private readonly retry: RetryOptions;
 
   constructor(config: NetworkConfig) {
     if (config.rpcUrl.includes("XCa...") || config.rpcUrl.includes("...")) {
@@ -170,6 +202,7 @@ export class MergeMintSDK {
     this.contract = new Contract(config.contractId);
     this.networkPassphrase = config.networkPassphrase;
     this.contractId = config.contractId;
+    this.retry = normalizeRetry(config.retry);
   }
 
   // === Read methods (no transaction needed)
@@ -278,11 +311,36 @@ export class MergeMintSDK {
 
   // === Internals
 
+  /**
+   * Runs a single RPC round-trip under the configured retry policy, doubling the
+   * backoff after every failed attempt. Rethrows the last error once the
+   * attempt budget is exhausted.
+   */
+  private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
+    const { attempts, backoffMs } = this.retry;
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        return await operation();
+      } catch (err) {
+        lastError = err;
+        if (attempt < attempts - 1) {
+          await sleep(backoffMs * 2 ** attempt);
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
   private async simulateReadCall(
     method: string,
     args: xdr.ScVal[]
   ): Promise<xdr.ScVal | null> {
-    const account = await this.rpc.getAccount(this.contractId).catch(() => null);
+    const account = await this.withRetry(() =>
+      this.rpc.getAccount(this.contractId)
+    ).catch(() => null);
     if (!account) return null;
 
     const tx = new TransactionBuilder(account, {
@@ -293,7 +351,7 @@ export class MergeMintSDK {
       .setTimeout(30)
       .build();
 
-    const sim = await this.rpc.simulateTransaction(tx);
+    const sim = await this.withRetry(() => this.rpc.simulateTransaction(tx));
     if (SorobanRpc.Api.isSimulationError(sim)) return null;
 
     const result = (sim as SorobanRpc.Api.SimulateTransactionSuccessResponse)
@@ -306,7 +364,9 @@ export class MergeMintSDK {
     args: xdr.ScVal[],
     sourceAccount: string
   ): Promise<string> {
-    const account = await this.rpc.getAccount(sourceAccount);
+    const account = await this.withRetry(() =>
+      this.rpc.getAccount(sourceAccount)
+    );
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase: this.networkPassphrase,
@@ -315,7 +375,7 @@ export class MergeMintSDK {
       .setTimeout(30)
       .build();
 
-    const sim = await this.rpc.simulateTransaction(tx);
+    const sim = await this.withRetry(() => this.rpc.simulateTransaction(tx));
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
     }
