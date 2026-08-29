@@ -88,3 +88,20 @@ Update this table once measurements are taken against both the old and new WASM:
 | Before  | —         | —          |
 | After   | —         | —          |
 | Delta   | —         | —          |
+
+---
+
+## mergemint-backend HTTP load baseline
+
+Baseline concurrent-request latency and error rate for `mergemint-backend`'s HTTP routes, captured with `scripts/load_test.sh`. Complements `scripts/smoke_test.sh` (single happy-path request) by exercising the server under concurrency.
+
+**Environment:** `cargo run --bin mergemint-backend` (debug build, in-memory store, no seeded records — every request resolves to a 404, so these numbers reflect HTTP/middleware overhead rather than business logic).
+
+**Command:** `REQUESTS=200 CONCURRENCY=20 ./scripts/load_test.sh`
+
+| Route | Requests | Errors | Error rate | min (ms) | avg (ms) | p95 (ms) | max (ms) |
+|-------|---------:|-------:|-----------:|---------:|---------:|---------:|---------:|
+| `POST /tx/self-claim` | 200 | 0 | 0.00% | 1.09 | 26.28 | 93.34 | 260.28 |
+| `POST /tx/resolve-dispute` | 200 | 0 | 0.00% | 1.56 | 36.90 | 170.46 | 261.56 |
+
+> Reproduce with `cargo build --bin mergemint-backend && ./target/debug/mergemint-backend &` then run the command above. See `scripts/load_test.sh` for `HOST`/`CONCURRENCY`/`REQUESTS` overrides.
