@@ -35,3 +35,6 @@ Changes that have landed on `main` but are not yet associated with a tagged rele
 
 [Unreleased]: https://github.com/mergemint-mint/mergemint-contracts/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/mergemint-mint/mergemint-contracts/releases/tag/v0.1.0
+
+## [Unreleased]
+- Reconcile duplicate backend directories (#668): the orphaned TypeScript `backend/` (no Dockerfile, unreferenced by the build) has been removed; `docker-compose.yml` now builds the canonical Rust `mergemint-backend/`, and the doc reference in `docs/shared-type-generation.md` was updated.
