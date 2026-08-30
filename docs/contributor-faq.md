@@ -43,3 +43,48 @@ Each time a verifier calls `complete_bounty` for a bounty you completed, your re
 **How do I dispute a completion decision?**
 
 There is currently no on-chain dispute mechanism. If you believe a completion was handled incorrectly — for example, a reward was not paid after work was accepted — raise the issue with the project maintainers. On-chain dispute resolution is a planned future feature.
+
+---
+
+## Troubleshooting
+
+**`cargo build --target wasm32-unknown-unknown` fails, or produces no `.wasm` file where a doc/script expects it**
+
+`rust-toolchain.toml` pins the `wasm32v1-none` target, and that's also the target CI actually builds and inspects (`.github/workflows/build.yml`, `.github/workflows/interface-check.yml`). Some setup docs and scripts still reference the older `wasm32-unknown-unknown` target. If a build command from a doc or script doesn't produce a binary where you expect it, try the toolchain-pinned target instead:
+
+```bash
+rustup target add wasm32v1-none
+cargo build --release --target wasm32v1-none
+```
+
+The resulting `.wasm` will be under `target/wasm32v1-none/release/`, not `target/wasm32-unknown-unknown/release/`.
+
+---
+
+**`stellar` command not found, or behaves differently than expected**
+
+Install (or reinstall) a pinned version of the CLI:
+
+```bash
+cargo install stellar-cli --locked
+```
+
+If you already have `stellar-cli` installed from a while back, an outdated version is a common source of flags or subcommands not matching what a script expects. Reinstalling with `--locked` gets you a consistent, reproducible build.
+
+---
+
+**`stellar account fund` / Friendbot fails, or a testnet transaction fails with an unfunded-account error**
+
+Friendbot (the testnet funding faucet) is occasionally rate-limited or briefly unavailable. Wait a minute and retry the fund command. If it keeps failing, confirm you're targeting `--network testnet` and not `futurenet` or `local` by mistake.
+
+---
+
+**`scripts/integration_test.sh` hangs or fails to reach the sandbox**
+
+This script needs a local Soroban sandbox running via Docker. Make sure Docker is installed and running before invoking the script — see `docs/testing.md` for the full prerequisites and what each test script actually covers.
+
+---
+
+**A contract invocation fails with an "unrecognized argument" or similar CLI error**
+
+Double-check the flag names against the contract's actual current entrypoint signature (in `src/contract/mutations.rs`), not just an example in a doc or script — entrypoint parameters have changed over time, and not every doc/script has been kept in sync. `docs/testing.md` calls out at least one known case of this drift.

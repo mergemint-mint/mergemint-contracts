@@ -1,6 +1,6 @@
 # Escrow Implementation Plan
 
-**Status:** Design — follow-up tickets required before writing code.
+**Status:** Partially implemented — Phases 2, 3, and 4 are complete; Phase 1 (deposit on create) is not yet implemented.
 **Date:** 2026-07-29
 
 ## Problem
@@ -9,25 +9,34 @@
 `create_bounty` never transfers tokens in; `complete_bounty` pays from the verifier's
 wallet. The contract never holds a token balance.
 
+## Implementation Status
+
+| Phase | Title | Status |
+|-------|-------|--------|
+| 1 | Deposit on create | ⬜ Not Started |
+| 2 | Refund on cancel/expire/dispute-cancel | ✅ Done |
+| 3 | Payout from contract on complete | ✅ Done |
+| 4 | Balance invariant tests | ✅ Done |
+
 ## Phased Plan
 
-### Phase 1 — Deposit on create (ticket #35)
+### Phase 1 — Deposit on create (ticket #35) <!-- STATUS: NOT STARTED -->
 
 - `create_bounty` calls `token.transfer(&creator, &env.current_contract_address(), &reward_amount)` after `creator.require_auth()` and all validation, before writing storage.
 - Checks-effects-interactions: storage is written **before** the transfer.
 - Testnet-only feature flag: gate behind `#[cfg(feature = "escrow")]` until audited.
 
-### Phase 2 — Refund on cancel / expire / dispute-cancel (ticket #36)
+### Phase 2 — Refund on cancel / expire / dispute-cancel (ticket #36) <!-- STATUS: DONE -->
 
 - `cancel_bounty`, `expire_bounty`, and the `"cancel"` branch of `resolve_dispute` call `token.transfer(&env.current_contract_address(), &bounty.creator, &reward_amount)`.
 - Status is written to `cancelled` **before** the transfer (checks-effects-interactions).
 
-### Phase 3 — Payout from contract on complete (ticket #37)
+### Phase 3 — Payout from contract on complete (ticket #37) <!-- STATUS: DONE -->
 
 - `complete_bounty` and `approve_completion` replace `token.transfer(&verifier, &assignee, &payout)` with `token.transfer(&env.current_contract_address(), &assignee, &payout)`.
 - The `verifier` parameter no longer needs a token balance.
 
-### Phase 4 — Balance invariant tests (ticket #38)
+### Phase 4 — Balance invariant tests (ticket #38) <!-- STATUS: DONE -->
 
 - Add property-style test: create/claim/cancel/complete a mix of bounties and after every transition assert `contract_balance == sum(reward_amount for bounties in open|in_progress)`.
 - See `docs/security.md:211` checklist item.

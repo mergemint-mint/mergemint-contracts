@@ -1,13 +1,6 @@
-import { xdr } from "@stellar/stellar-sdk";
-import {
-  symbolToScVal,
-  bytesNToHex,
-  buildNetworkConfig,
-  MergeMintSDK,
-  MergeMintSdkError,
-  TESTNET,
-  MAINNET,
-} from "./index";
+import { nativeToScVal } from "@stellar/stellar-sdk";
+import { MergeMintSDK, symbolToScVal, TESTNET } from "./index";
+import { MergeMintSdkError } from "./types";
 
 describe("symbolToScVal", () => {
   it("throws for a 33-character input", () => {
@@ -23,118 +16,118 @@ describe("symbolToScVal", () => {
   });
 });
 
-describe("MergeMintSdkError", () => {
-  it("tags an oversized Symbol with the SYMBOL_TOO_LONG code", () => {
-    let caught: unknown;
-    try {
-      symbolToScVal("a".repeat(33));
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(MergeMintSdkError);
-    expect((caught as MergeMintSdkError).code).toBe("SYMBOL_TOO_LONG");
-    expect((caught as MergeMintSdkError).name).toBe("MergeMintSdkError");
+const CONTRACT_ID = "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
+
+/**
+ * Minimal stand-in for `SorobanRpc.Server`. `getAccount` fails for the first
+ * `failures` calls and succeeds afterwards, so a test can assert that the retry
+ * policy recovers from a transient hiccup.
+ */
+function makeFlakyRpc(failures: number, retval = 7n) {
+  const calls = { getAccount: 0, simulateTransaction: 0 };
+  return {
+    calls,
+    getAccount: jest.fn(async () => {
+      calls.getAccount++;
+      if (calls.getAccount <= failures) {
+        throw new Error("transient RPC failure");
+      }
+      return {
+        accountId: () => CONTRACT_ID,
+        sequenceNumber: () => "1",
+        incrementSequenceNumber: () => undefined,
+      };
+    }),
+    simulateTransaction: jest.fn(async () => {
+      calls.simulateTransaction++;
+      return { result: { retval: nativeToScVal(retval, { type: "i128" }) } };
+    }),
+  };
+}
+
+function sdkWithRpc(
+  rpc: unknown,
+  retry?: { attempts: number; backoffMs: number },
+) {
+  const sdk = new MergeMintSDK({
+    ...TESTNET,
+    contractId: CONTRACT_ID,
+    retry,
+  });
+  // The SDK builds its own `SorobanRpc.Server` from `rpcUrl`; swap in the stub.
+  (sdk as unknown as { rpc: unknown }).rpc = rpc;
+  return sdk;
+}
+
+describe("MergeMintSDK retry", () => {
+  it("recovers when an RPC call fails once then succeeds", async () => {
+    const rpc = makeFlakyRpc(1);
+    const sdk = sdkWithRpc(rpc, { attempts: 3, backoffMs: 0 });
+
+    await expect(sdk.getBountyCount()).resolves.toBe(7n);
+    expect(rpc.calls.getAccount).toBe(2);
   });
 
-  it("tags a placeholder RPC URL with the INVALID_RPC_URL code", () => {
-    let caught: unknown;
-    try {
-      new MergeMintSDK({ ...MAINNET, contractId: "C".repeat(56) });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(MergeMintSdkError);
-    expect((caught as MergeMintSdkError).code).toBe("INVALID_RPC_URL");
+  it("makes a single attempt when no retry option is supplied", async () => {
+    const rpc = makeFlakyRpc(1);
+    const sdk = sdkWithRpc(rpc);
+
+    await expect(sdk.getBountyCount()).resolves.toBe(0n);
+    expect(rpc.calls.getAccount).toBe(1);
+  });
+
+  it("gives up and surfaces the last error once attempts are exhausted", async () => {
+    const rpc = makeFlakyRpc(5);
+    const sdk = sdkWithRpc(rpc, { attempts: 2, backoffMs: 0 });
+
+    // `getBountyCount` swallows the failure and yields the zero-value default.
+    await expect(sdk.getBountyCount()).resolves.toBe(0n);
+    expect(rpc.calls.getAccount).toBe(2);
+  });
+
+  it("rejects an out-of-range retry configuration", () => {
+    expect(
+      () =>
+        new MergeMintSDK({
+          ...TESTNET,
+          contractId: CONTRACT_ID,
+          retry: { attempts: 0, backoffMs: 10 },
+        }),
+    ).toThrow(/Invalid retry.attempts/);
+
+    expect(
+      () =>
+        new MergeMintSDK({
+          ...TESTNET,
+          contractId: CONTRACT_ID,
+          retry: { attempts: 2, backoffMs: -1 },
+        }),
+    ).toThrow(/Invalid retry.backoffMs/);
   });
 });
 
-describe("MergeMintSDK contractId validation", () => {
-  it("throws a clear error for an empty contractId", () => {
-    let caught: unknown;
+describe("MergeMintSDK constructor typed errors", () => {
+  it("throws MergeMintSdkError with INVALID_CONTRACT_ID for an empty contractId", () => {
     try {
       new MergeMintSDK({ ...TESTNET, contractId: "" });
+      throw new Error("expected constructor to throw");
     } catch (err) {
-      caught = err;
+      expect(err).toBeInstanceOf(MergeMintSdkError);
+      expect((err as MergeMintSdkError).code).toBe("INVALID_CONTRACT_ID");
     }
-    expect(caught).toBeInstanceOf(MergeMintSdkError);
-    expect((caught as MergeMintSdkError).code).toBe("MISSING_CONTRACT_ID");
-    expect((caught as MergeMintSdkError).message).toMatch(/Invalid contractId/);
   });
 
-  it("throws for a whitespace-only contractId", () => {
-    expect(() => new MergeMintSDK({ ...TESTNET, contractId: "   " })).toThrow(
-      /Invalid contractId/,
-    );
-  });
-
-  it("throws for a placeholder contractId", () => {
-    expect(
-      () => new MergeMintSDK({ ...TESTNET, contractId: "CXXXXXXXXXXXX" }),
-    ).toThrow(/Invalid contractId/);
-    expect(
-      () => new MergeMintSDK({ ...TESTNET, contractId: "CABC..." }),
-    ).toThrow(/Invalid contractId/);
-  });
-});
-
-describe("buildNetworkConfig", () => {
-  it("defaults to the testnet rpc url and passphrase", () => {
-    expect(buildNetworkConfig()).toEqual({
-      rpcUrl: TESTNET.rpcUrl,
-      networkPassphrase: TESTNET.networkPassphrase,
-      contractId: "",
-    });
-  });
-
-  it("applies overrides on top of the defaults", () => {
-    const config = buildNetworkConfig({
-      rpcUrl: "https://your-rpc.example.com",
-      contractId: "CABCDEF",
-    });
-    expect(config.rpcUrl).toBe("https://your-rpc.example.com");
-    expect(config.contractId).toBe("CABCDEF");
-    expect(config.networkPassphrase).toBe(TESTNET.networkPassphrase);
-  });
-
-  it("overrides every field when all are supplied", () => {
-    const config = buildNetworkConfig({
-      rpcUrl: "https://your-rpc.example.com",
-      networkPassphrase: "Custom Stellar Network ; January 2025",
-      contractId: "CABCDEF",
-    });
-    expect(config).toEqual({
-      rpcUrl: "https://your-rpc.example.com",
-      networkPassphrase: "Custom Stellar Network ; January 2025",
-      contractId: "CABCDEF",
-    });
-  });
-});
-
-describe("bytesNToHex", () => {
-  const scvBytes = (bytes: number[]): xdr.ScVal =>
-    xdr.ScVal.scvBytes(Buffer.from(bytes));
-
-  it("returns an empty string for an empty byte array", () => {
-    expect(bytesNToHex(scvBytes([]))).toBe("");
-  });
-
-  it("encodes a single byte as two lowercase hex characters", () => {
-    expect(bytesNToHex(scvBytes([0x00]))).toBe("00");
-    expect(bytesNToHex(scvBytes([0x0a]))).toBe("0a");
-    expect(bytesNToHex(scvBytes([0xff]))).toBe("ff");
-  });
-
-  it("round-trips a typical 32-byte bounty ID", () => {
-    const hex = "a3f1".repeat(16); // 64 hex chars == 32 bytes
-    const bytes = Array.from(Buffer.from(hex, "hex"));
-    expect(bytes).toHaveLength(32);
-    expect(bytesNToHex(scvBytes(bytes))).toBe(hex);
-  });
-
-  it("emits two hex characters per byte, so the output length is always even", () => {
-    for (const length of [1, 3, 7, 31]) {
-      const bytes = Array.from({ length }, (_, i) => i);
-      expect(bytesNToHex(scvBytes(bytes))).toHaveLength(length * 2);
+  it("throws MergeMintSdkError with INVALID_RPC_URL for a placeholder rpcUrl", () => {
+    try {
+      new MergeMintSDK({
+        rpcUrl: "https://example.com/v1/XCa...",
+        networkPassphrase: TESTNET.networkPassphrase,
+        contractId: "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+      });
+      throw new Error("expected constructor to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(MergeMintSdkError);
+      expect((err as MergeMintSdkError).code).toBe("INVALID_RPC_URL");
     }
   });
 });

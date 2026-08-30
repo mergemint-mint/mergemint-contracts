@@ -28,7 +28,7 @@ import { SorobanRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
 const CONTRACT_ID = "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
 const RPC_URL = "https://soroban-testnet.stellar.org";
 
-const server = new SorobanRpc.Server(RPC_URL);
+const server = new SorobanRpc.Server(RPC_URL, { timeout: 30000 });
 
 interface BountyCreatedEvent {
   bountyId: string;
@@ -257,6 +257,38 @@ async function getLatestLedger(): Promise<number> {
 ## Testnet contract address
 
 Deploy the MergeMint contract to testnet using the instructions in [getting-started.md](./getting-started.md) and replace `CONTRACT_ID` above with the resulting contract address.
+
+## Timeouts
+
+Without an explicit timeout, a slow or unresponsive RPC node will cause `server.getEvents()` to hang indefinitely, blocking the entire indexer loop. Always pass a `timeout` (in milliseconds) to the `SorobanRpc.Server` constructor:
+
+```ts
+// 30-second timeout on every request — prevents the indexer loop from
+// hanging when the RPC node is slow or temporarily unreachable.
+const server = new SorobanRpc.Server(RPC_URL, { timeout: 30000 });
+```
+
+The `timeout` option applies to every HTTP request made by the server instance. If the RPC node does not respond within the configured window the SDK will reject the promise with a network error, which your retry/back-off logic can then handle rather than waiting forever.
+
+For production deployments, pair the timeout with a catch-and-retry loop around `server.getEvents()`:
+
+```ts
+async function fetchWithRetry(
+  params: SorobanRpc.Server.GetEventsRequest,
+  retries = 3
+) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await server.getEvents(params);
+    } catch (err) {
+      if (attempt === retries) throw err;
+      const backoff = attempt * 2000;
+      console.warn(`RPC request failed (attempt ${attempt}), retrying in ${backoff}ms`, err);
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+    }
+  }
+}
+```
 
 ## Notes
 

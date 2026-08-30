@@ -1,7 +1,52 @@
 // SPDX-License-Identifier: MIT
+//!
+//! Persistent storage accessors for the MergeMint contract.
+//!
+//! # Key namespacing
+//!
+//! Every ledger entry is addressed by a typed [`DataKey`] variant defined in
+//! `crate::types`. Soroban serialises each enum variant to a distinct XDR
+//! discriminant, so **new data must be added as a new `DataKey` variant** —
+//! never by overloading an existing variant or inventing ad-hoc byte prefixes.
+//!
+//! All functions in this module use **persistent** storage and call [`extend`]
+//! after reads/writes to keep TTL fresh (~1 year; see constants below).
+//!
+//! # Key families
+//!
+//! | Family | `DataKey` variant | Value type | Role |
+//! |--------|-------------------|------------|------|
+//! | Global counter | `BountyCount` | `u64` | Monotonic bounty ID sequence |
+//! | Bounty body | `Bounty(BountyId)` | `Bounty` | Canonical bounty state |
+//! | Bounty metadata | `BountyMeta(BountyId)` | `BountyMeta` | Title/description sidecar |
+//! | Contributor profile | `Contributor(Address)` | `Contributor` | Reputation, earnings, claims |
+//! | Creator index | `ContributorBounties(Address)` | `Vec<BountyId>` | Bounties created by address |
+//! | Status totals | `StatusCount(Symbol)` | `u32` | Item count per status label |
+//! | Status index page | `StatusIndexPage(Symbol, u32)` | `Vec<BountyId>` | Paged shard (`PAGE_SIZE` IDs) |
+//! | Open-bounty totals | `OpenBountiesCount` | `u32` | Count of claimable bounties |
+//! | Open-bounty page | `OpenBountiesPage(u32)` | `Vec<BountyId>` | Paged open-bounty shard |
+//! | Multi-sig votes | `Approvals(BountyId)` | `Vec<Address>` | Per-bounty verifier approvals |
+//!
+//! ## Legacy variants (read-only)
+//!
+//! - `StatusIndex(Symbol)` — pre-pagination status blob; do not write.
+//! - `OpenBounties` — pre-pagination open list; do not write.
+//!
+//! ## Paged indexes
+//!
+//! `StatusIndexPage` and `OpenBountiesPage` shard large lists into pages of at
+//! most [`PAGE_SIZE`] entries to stay within Soroban's per-entry size limit.
+//! Each index also maintains a companion count key (`StatusCount` /
+//! `OpenBountiesCount`). See the inline layout comments in this file for
+//! append and swap-remove semantics.
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::types::{Bounty, BountyId, BountyMeta, Contributor, DataKey};
+
+/// Terminal statuses after which a bounty is recorded in a contributor's
+/// history index. Kept in sync with the status literals in `contract/mutations.rs`.
+const STATUS_COMPLETED: &str = "completed";
+const STATUS_CANCELLED: &str = "cancelled";
 
 /// Approximate 1 year in ledger sequences at 5 seconds per ledger.
 const STORAGE_TTL_LEDGERS: u32 = 6_307_200;
@@ -48,6 +93,24 @@ pub fn set_bounty_count(env: &Env, count: &u64) {
     let key = DataKey::BountyCount;
     env.storage().persistent().set(&key, count);
     extend(env, &key);
+}
+
+/// Decode the monotonic creation sequence embedded in a `BountyId`.
+///
+/// IDs are minted by `generate_bounty_id`, which writes the current
+/// `get_bounty_count()` into the last eight bytes (big-endian).
+pub fn bounty_id_sequence(id: &BountyId) -> u64 {
+    let mut seq_bytes = [0u8; 8];
+    for i in 0u32..8 {
+        seq_bytes[i as usize] = id.0.get(24 + i).unwrap_or(0);
+    }
+    u64::from_be_bytes(seq_bytes)
+}
+
+/// Returns `true` when `id`'s embedded sequence is strictly less than the
+/// number of bounties ever created (i.e. the ID was allocated at some point).
+pub fn bounty_id_was_allocated(env: &Env, id: &BountyId) -> bool {
+    bounty_id_sequence(id) < get_bounty_count(env)
 }
 
 // ── Bounty ────────────────────────────────────────────────────────────────────
@@ -339,6 +402,16 @@ pub fn move_bounty_status(
     if old_status != new_status {
         remove_bounty_from_status(env, bounty_id, old_status);
         add_bounty_to_status(env, bounty_id, new_status);
+
+        if *new_status == Symbol::new(env, STATUS_COMPLETED)
+            || *new_status == Symbol::new(env, STATUS_CANCELLED)
+        {
+            if let Some(bounty) = get_bounty(env, bounty_id) {
+                for (assignee, _) in bounty.assignees.iter() {
+                    append_contributor_history(env, &assignee, bounty_id);
+                }
+            }
+        }
     }
 }
 
@@ -543,4 +616,25 @@ pub fn append_creator_bounty(env: &Env, creator: &Address, bounty_id: &BountyId)
     env.storage()
         .persistent()
         .set(&DataKey::ContributorBounties(creator.clone()), &list);
+}
+
+// ── Contributor bounty history ───────────────────────────────────────────────
+
+/// Returns every bounty ID `address` was an assignee on when it reached a
+/// terminal status (`"completed"` or `"cancelled"`). Empty if none.
+pub fn get_contributor_history(env: &Env, address: &Address) -> Vec<BountyId> {
+    let key = DataKey::ContributorHistory(address.clone());
+    let list: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
+    if list.is_some() {
+        extend(env, &key);
+    }
+    list.unwrap_or_else(|| Vec::new(env))
+}
+
+fn append_contributor_history(env: &Env, address: &Address, bounty_id: &BountyId) {
+    let mut list = get_contributor_history(env, address);
+    list.push_back(bounty_id.clone());
+    let key = DataKey::ContributorHistory(address.clone());
+    env.storage().persistent().set(&key, &list);
+    extend(env, &key);
 }

@@ -4,14 +4,18 @@
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 
-use crate::db::{read_db, SharedDb};
+use crate::db::{
+    acquire_idempotency, read_db, read_idempotency, IdempotencyEntry, SharedDb,
+    SharedIdempotencyStore,
+};
 
 // ---------------------------------------------------------------------------
 // Shared application state
@@ -19,7 +23,112 @@ use crate::db::{read_db, SharedDb};
 
 pub struct AppState {
     pub db: SharedDb,
+    pub idempotency: SharedIdempotencyStore,
 }
+
+// ---------------------------------------------------------------------------
+// Idempotency-Key handling (claim_bounty double-submit guard)
+// ---------------------------------------------------------------------------
+
+/// The header clients set to make a transaction-submitting request safe to
+/// retry after a timeout.
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+
+/// Outcome of checking an inbound `Idempotency-Key` before doing any work.
+enum IdempotencyCheck {
+    /// No key was supplied; proceed without dedup (back-compat default).
+    NotRequested,
+    /// A fresh key was reserved as in-flight; the caller must finalize it
+    /// via `finalize_idempotency_key` once the request completes.
+    Proceed(String),
+    /// A prior request with this key already completed; replay its response
+    /// instead of resubmitting the transaction.
+    Replay(Response),
+    /// A prior request with this key is still being processed.
+    Conflict(Response),
+}
+
+/// Looks up `Idempotency-Key` in `headers` against `store` and either
+/// reserves the key as in-flight or short-circuits with a replayed /
+/// conflict response.
+///
+/// ## Why dedup here (double-submit guard)
+///
+/// `resolve_dispute` and `self_claim` both submit a chain transaction. If a
+/// client's connection drops after the transaction was built but before the
+/// response arrived, a naive retry would submit it a second time. Callers
+/// that pass an `Idempotency-Key` header get exactly-once handling: the
+/// first request wins and every retry with the same key gets that same
+/// result back instead of re-triggering the transaction build.
+fn check_idempotency_key(headers: &HeaderMap, store: &SharedIdempotencyStore) -> IdempotencyCheck {
+    let Some(key) = headers
+        .get(IDEMPOTENCY_KEY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+    else {
+        return IdempotencyCheck::NotRequested;
+    };
+
+    // Fast path: a read lock is enough to detect an already-completed or
+    // already-in-flight key without taking the write lock.
+    if let Some(entry) = read_idempotency(store).entries.get(key) {
+        return idempotency_check_from_entry(entry);
+    }
+
+    let mut guard = acquire_idempotency(store);
+    // Re-check under the write lock in case another request reserved the
+    // key between our read above and acquiring the write lock.
+    match guard.entries.get(key) {
+        Some(entry) => idempotency_check_from_entry(entry),
+        None => {
+            guard
+                .entries
+                .insert(key.to_string(), IdempotencyEntry::InFlight);
+            IdempotencyCheck::Proceed(key.to_string())
+        }
+    }
+}
+
+fn idempotency_check_from_entry(entry: &IdempotencyEntry) -> IdempotencyCheck {
+    match entry {
+        IdempotencyEntry::Completed(body) => IdempotencyCheck::Replay(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body.clone()))
+                .expect("static response parts always build a valid response"),
+        ),
+        IdempotencyEntry::InFlight => IdempotencyCheck::Conflict(
+            AppError {
+                code: 409,
+                message: "a request with this Idempotency-Key is already in progress".to_string(),
+            }
+            .into_response(),
+        ),
+    }
+}
+
+/// Records the final outcome of a request that reserved `key` via
+/// `check_idempotency_key`.
+///
+/// On success the response body is cached so retries replay it. On failure
+/// the reservation is removed entirely -- no transaction was submitted, so
+/// the key is free to be reused once the client fixes the request.
+fn finalize_idempotency_key(store: &SharedIdempotencyStore, key: String, result: Option<String>) {
+    let mut guard = acquire_idempotency(store);
+    match result {
+        Some(body) => {
+            guard.entries.insert(key, IdempotencyEntry::Completed(body));
+        }
+        None => {
+            guard.entries.remove(&key);
+        }
+    }
+}
+
+/// Default self-claim rate limit: 5 relay submissions per claimant per minute.
+pub const SELF_CLAIM_RATE_LIMIT: u32 = 5;
+pub const SELF_CLAIM_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Error helpers
@@ -54,6 +163,14 @@ impl AppError {
             message: msg.into(),
         };
         (StatusCode::NOT_FOUND, Json(err))
+    }
+
+    pub fn too_many_requests(msg: impl Into<String>) -> (StatusCode, Json<AppError>) {
+        let err = AppError {
+            code: 429,
+            message: msg.into(),
+        };
+        (StatusCode::TOO_MANY_REQUESTS, Json(err))
     }
 
     /// Construct an internal server error.
@@ -129,7 +246,7 @@ pub struct ResolveDisputeResponse {
     pub xdr: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SelfClaimRequest {
     pub bounty_id: String,
     pub claimant: String,
@@ -203,10 +320,47 @@ fn build_payout_xdr(bounty: &Bounty, winner: &str) -> String {
 /// The window is set by the bounty creator at creation time and is stored
 /// on-chain; this server-side check is an optimistic guard only — the contract
 /// enforces the same rule authoritatively.
+///
+/// ## Idempotency-Key double-submit guard
+///
+/// This handler submits a chain transaction, so a client retry after a
+/// timeout could double-submit without protection. Callers may pass an
+/// `Idempotency-Key` header; see `check_idempotency_key` /
+/// `finalize_idempotency_key` above. The header is optional so existing
+/// callers keep working unchanged.
 pub async fn self_claim(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<SelfClaimRequest>,
-) -> Result<Json<ResolveDisputeResponse>, (StatusCode, Json<AppError>)> {
+) -> Result<Response, (StatusCode, Json<AppError>)> {
+    let idempotency_key = match check_idempotency_key(&headers, &state.idempotency) {
+        IdempotencyCheck::NotRequested => None,
+        IdempotencyCheck::Proceed(key) => Some(key),
+        IdempotencyCheck::Replay(response) | IdempotencyCheck::Conflict(response) => {
+            return Ok(response)
+        }
+    };
+
+    let result = self_claim_inner(&state, &req).await;
+
+    if let Some(key) = idempotency_key {
+        let cached_body = result
+            .as_ref()
+            .ok()
+            .and_then(|resp| serde_json::to_string(resp).ok());
+        finalize_idempotency_key(&state.idempotency, key, cached_body);
+    }
+
+    result.map(|resp| Json(resp).into_response())
+}
+
+/// The actual self-claim business logic, factored out of the handler so the
+/// idempotency wrapper in `self_claim` can call it without duplicating the
+/// staleness check or XDR-building steps.
+async fn self_claim_inner(
+    state: &AppState,
+    req: &SelfClaimRequest,
+) -> Result<ResolveDisputeResponse, (StatusCode, Json<AppError>)> {
     let bounty = {
         let db = read_db(&state.db);
         let raw = db
@@ -235,10 +389,10 @@ pub async fn self_claim(
 
     let xdr = build_payout_xdr(&bounty, &req.claimant);
 
-    Ok(Json(ResolveDisputeResponse {
+    Ok(ResolveDisputeResponse {
         ok: true,
         xdr: Some(xdr),
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -248,8 +402,11 @@ pub async fn self_claim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rate_limit::TokenBucketLimiter;
     use axum::body::to_bytes;
+    use axum::extract::State;
     use axum::response::IntoResponse;
+    use std::time::Duration;
 
     /// Helper: convert a Response body to a String.
     async fn body_string(response: axum::response::Response) -> String {
@@ -326,6 +483,161 @@ mod tests {
         assert!(
             body.contains("missing field: bounty_id"),
             "400 body must contain the original message; got: {body}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Tests — Idempotency-Key double-submit guard for self_claim
+    // ---------------------------------------------------------------------
+
+    /// A bounty whose staleness window has already elapsed, so `self_claim`
+    /// succeeds without any extra setup.
+    fn claimable_state(bounty_id: &str) -> Arc<AppState> {
+        let db = crate::db::new_shared_db();
+        {
+            let mut guard = crate::db::acquire_db(&db);
+            let bounty = Bounty {
+                id: bounty_id.to_string(),
+                creator: "creator-address".to_string(),
+                amount: 100,
+                expires_at: 0, // already in the past
+            };
+            guard.records.insert(
+                bounty_id.to_string(),
+                serde_json::to_string(&bounty).unwrap(),
+            );
+        }
+        Arc::new(AppState {
+            db,
+            idempotency: crate::db::new_shared_idempotency_store(),
+        })
+    }
+
+    fn idempotency_headers(key: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::HeaderName::from_static(IDEMPOTENCY_KEY_HEADER),
+            axum::http::HeaderValue::from_str(key).unwrap(),
+        );
+        headers
+    }
+
+    /// Without an Idempotency-Key header, self_claim behaves exactly as
+    /// before (no dedup) — the default must stay backward compatible.
+    #[tokio::test]
+    async fn self_claim_without_idempotency_key_works_as_before() {
+        let state = claimable_state("bounty-1");
+        let response = self_claim(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(SelfClaimRequest {
+                bounty_id: "bounty-1".to_string(),
+                claimant: "claimant-address".to_string(),
+            }),
+        )
+        .await
+        .expect("self_claim should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// A second request with the same Idempotency-Key must replay the first
+    /// request's response instead of re-running the claim logic. We prove
+    /// this by deleting the bounty record after the first call: if the
+    /// second call actually re-executed, it would 404 instead of matching
+    /// the first response's body.
+    #[tokio::test]
+    async fn self_claim_replays_cached_response_for_repeated_key() {
+        let state = claimable_state("bounty-2");
+        let req = SelfClaimRequest {
+            bounty_id: "bounty-2".to_string(),
+            claimant: "claimant-address".to_string(),
+        };
+
+        let first = self_claim(
+            State(Arc::clone(&state)),
+            idempotency_headers("retry-key-1"),
+            Json(SelfClaimRequest {
+                bounty_id: req.bounty_id.clone(),
+                claimant: req.claimant.clone(),
+            }),
+        )
+        .await
+        .expect("first call should succeed");
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = body_string(first).await;
+
+        // Remove the bounty so a re-executed claim would fail with 404 —
+        // proving the second response below came from the idempotency cache.
+        crate::db::acquire_db(&state.db).records.remove("bounty-2");
+
+        let second = self_claim(
+            State(Arc::clone(&state)),
+            idempotency_headers("retry-key-1"),
+            Json(req),
+        )
+        .await
+        .expect("replayed call must not error even though the bounty is now gone");
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body = body_string(second).await;
+
+        assert_eq!(
+            first_body, second_body,
+            "retry with the same Idempotency-Key must replay the original response"
+        );
+    }
+
+    /// A request that arrives while another request with the same key is
+    /// still in flight must be rejected with 409 rather than racing the
+    /// same transaction submission a second time.
+    #[tokio::test]
+    async fn self_claim_returns_409_for_in_flight_key() {
+        let state = claimable_state("bounty-3");
+        crate::db::acquire_idempotency(&state.idempotency)
+            .entries
+            .insert(
+                "concurrent-key".to_string(),
+                crate::db::IdempotencyEntry::InFlight,
+            );
+
+        let response = self_claim(
+            State(Arc::clone(&state)),
+            idempotency_headers("concurrent-key"),
+            Json(SelfClaimRequest {
+                bounty_id: "bounty-3".to_string(),
+                claimant: "claimant-address".to_string(),
+            }),
+        )
+        .await
+        .expect("an in-flight key must short-circuit with a response, not an error");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    /// A failed claim (e.g. unknown bounty id) must not leave a stale
+    /// reservation behind — the client should be able to retry the same key
+    /// once it fixes the request.
+    #[tokio::test]
+    async fn self_claim_error_releases_the_idempotency_key() {
+        let state = claimable_state("bounty-4");
+
+        let err = self_claim(
+            State(Arc::clone(&state)),
+            idempotency_headers("error-key"),
+            Json(SelfClaimRequest {
+                bounty_id: "does-not-exist".to_string(),
+                claimant: "claimant-address".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unknown bounty id must error");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+        assert!(
+            !crate::db::read_idempotency(&state.idempotency)
+                .entries
+                .contains_key("error-key"),
+            "a failed request must not leave the key reserved"
         );
     }
 }

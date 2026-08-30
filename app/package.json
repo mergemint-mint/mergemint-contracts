@@ -4,7 +4,8 @@
   "private": true,
   "description": "Frontend form components for the MergeMint bounty and contributor flows",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types src/lib/validation.test.ts"
   },
   "dependencies": {
     "react": "^18.3.0"

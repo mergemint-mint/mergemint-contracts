@@ -39,5 +39,5 @@ jobs:
             relevant, please reopen it or open a new PR with updated changes.
 
           # Exempt labels
-          exempt-issue-labels: 'pinned,security,in-progress'
+          exempt-issue-labels: 'pinned,security,in-progress,Stellar Wave'
           exempt-pr-labels: 'pinned,security,in-progress'

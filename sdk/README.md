@@ -118,23 +118,25 @@ const sdk = new MergeMintSDK({
 });
 ```
 
-`buildNetworkConfig` fills in the testnet defaults so you only pass what differs:
+## Retries
+
+Transient RPC failures — a dropped connection, a provider rate limit — surface
+directly to the caller by default. Pass `retry` to have every RPC round-trip
+retried with exponential backoff:
 
 ```ts
-import { MergeMintSDK, buildNetworkConfig } from "@mergemint/sdk";
-
-// Testnet defaults, custom contract
-const sdk = new MergeMintSDK(buildNetworkConfig({ contractId: "C..." }));
-
-// Custom network
-const custom = new MergeMintSDK(
-  buildNetworkConfig({
-    rpcUrl: "https://your-rpc.example.com",
-    networkPassphrase: "Custom Stellar Network ; January 2025",
-    contractId: "C...",
-  })
-);
+const sdk = new MergeMintSDK({
+  ...TESTNET,
+  contractId: "C...",
+  retry: { attempts: 3, backoffMs: 200 },
+});
 ```
+
+`attempts` counts the first call, so `3` means one call plus two retries.
+`backoffMs` is the base delay and doubles after each failed attempt (200ms, then
+400ms). Omitting `retry` keeps the previous single-attempt behaviour. The
+constructor throws if `attempts` is not an integer `>= 1` or `backoffMs` is
+negative.
 
 ## Bounty ID format
 
