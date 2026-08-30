@@ -118,6 +118,26 @@ const sdk = new MergeMintSDK({
 });
 ```
 
+## Retries
+
+Transient RPC failures — a dropped connection, a provider rate limit — surface
+directly to the caller by default. Pass `retry` to have every RPC round-trip
+retried with exponential backoff:
+
+```ts
+const sdk = new MergeMintSDK({
+  ...TESTNET,
+  contractId: "C...",
+  retry: { attempts: 3, backoffMs: 200 },
+});
+```
+
+`attempts` counts the first call, so `3` means one call plus two retries.
+`backoffMs` is the base delay and doubles after each failed attempt (200ms, then
+400ms). Omitting `retry` keeps the previous single-attempt behaviour. The
+constructor throws if `attempts` is not an integer `>= 1` or `backoffMs` is
+negative.
+
 ## Bounty ID format
 
 Bounty IDs are 32-byte values returned from `createBounty` and stored on-chain. The SDK represents them as lowercase hex strings (64 characters). Pass them directly to any method that accepts a `bountyId`.

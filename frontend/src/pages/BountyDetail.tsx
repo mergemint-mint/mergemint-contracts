@@ -2,21 +2,25 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Bounty } from '../types';
-import { mapErrorMessage } from '../lib/format';
+import { mapErrorMessage } from '../utils/format';
 import { StatusBadge } from '../components/StatusBadge';
+import { BountyDetailSkeleton } from '../components/BountyDetailSkeleton';
 
-export function BountyDetail() {
+function BountyDetailInner() {
   const { id } = useParams<{ id: string }>();
   const [bounty, setBounty] = useState<Bounty | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [claiming, setClaiming] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!id) return;
+    setLoading(true);
     api
       .getBounty(id)
       .then(setBounty)
-      .catch((err) => setError(mapErrorMessage(err instanceof Error ? err.message : String(err))));
+      .catch((err) => setError(mapErrorMessage(err instanceof Error ? err.message : String(err))))
+      .finally(() => setLoading(false));
   }, [id]);
 
   const handleClaim = useCallback(async () => {
@@ -33,6 +37,7 @@ export function BountyDetail() {
     }
   }, [id]);
 
+  if (loading && !bounty) return <BountyDetailSkeleton />;
   if (error && !bounty) return <p role="alert">{error}</p>;
   if (!bounty) return <p>Loading...</p>;
 
@@ -46,5 +51,13 @@ export function BountyDetail() {
         {claiming ? 'Claiming...' : 'Claim Bounty'}
       </button>
     </div>
+  );
+}
+
+export function BountyDetail() {
+  return (
+    <BountyErrorBoundary>
+      <BountyDetailInner />
+    </BountyErrorBoundary>
   );
 }

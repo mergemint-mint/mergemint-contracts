@@ -1,4 +1,44 @@
 // SPDX-License-Identifier: MIT
+//!
+//! Persistent storage accessors for the MergeMint contract.
+//!
+//! # Key namespacing
+//!
+//! Every ledger entry is addressed by a typed [`DataKey`] variant defined in
+//! `crate::types`. Soroban serialises each enum variant to a distinct XDR
+//! discriminant, so **new data must be added as a new `DataKey` variant** —
+//! never by overloading an existing variant or inventing ad-hoc byte prefixes.
+//!
+//! All functions in this module use **persistent** storage and call [`extend`]
+//! after reads/writes to keep TTL fresh (~1 year; see constants below).
+//!
+//! # Key families
+//!
+//! | Family | `DataKey` variant | Value type | Role |
+//! |--------|-------------------|------------|------|
+//! | Global counter | `BountyCount` | `u64` | Monotonic bounty ID sequence |
+//! | Bounty body | `Bounty(BountyId)` | `Bounty` | Canonical bounty state |
+//! | Bounty metadata | `BountyMeta(BountyId)` | `BountyMeta` | Title/description sidecar |
+//! | Contributor profile | `Contributor(Address)` | `Contributor` | Reputation, earnings, claims |
+//! | Creator index | `ContributorBounties(Address)` | `Vec<BountyId>` | Bounties created by address |
+//! | Status totals | `StatusCount(Symbol)` | `u32` | Item count per status label |
+//! | Status index page | `StatusIndexPage(Symbol, u32)` | `Vec<BountyId>` | Paged shard (`PAGE_SIZE` IDs) |
+//! | Open-bounty totals | `OpenBountiesCount` | `u32` | Count of claimable bounties |
+//! | Open-bounty page | `OpenBountiesPage(u32)` | `Vec<BountyId>` | Paged open-bounty shard |
+//! | Multi-sig votes | `Approvals(BountyId)` | `Vec<Address>` | Per-bounty verifier approvals |
+//!
+//! ## Legacy variants (read-only)
+//!
+//! - `StatusIndex(Symbol)` — pre-pagination status blob; do not write.
+//! - `OpenBounties` — pre-pagination open list; do not write.
+//!
+//! ## Paged indexes
+//!
+//! `StatusIndexPage` and `OpenBountiesPage` shard large lists into pages of at
+//! most [`PAGE_SIZE`] entries to stay within Soroban's per-entry size limit.
+//! Each index also maintains a companion count key (`StatusCount` /
+//! `OpenBountiesCount`). See the inline layout comments in this file for
+//! append and swap-remove semantics.
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::types::{Bounty, BountyId, BountyMeta, Contributor, DataKey};
