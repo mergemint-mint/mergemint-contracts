@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
 import { isFreighterInstalled, requestAccess } from './wallet';
-import { mapErrorMessage } from './format';
+import { mapErrorMessage } from '../utils/format';
 
 interface WalletState {
   address: string | null;

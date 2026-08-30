@@ -15,3 +15,32 @@ Thumbs.db
 
 # Misc
 somzilla.md
+
+# JavaScript / Node
+node_modules/
+dist/
+*.log
+
+# Test snapshots (Jest / Vitest)
+*.snap
+__snapshots__/
+
+# Code coverage
+coverage/
+.nyc_output/
+
+# End-to-end test artefacts
+playwright-report/
+test-results/
+
+# WebAssembly build output
+*.wasm
+pkg/
+
+# Monorepo / bundler caches
+.turbo/
+.next/
+.parcel-cache/
+
+# Environment secrets (keep .env.example tracked)
+.env

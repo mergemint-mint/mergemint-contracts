@@ -1,0 +1,164 @@
+/*
+ * Dark-mode audit (frontend/src/components).
+ *
+ * This repo has no Tailwind config, so there is no `dark:` variant to add to
+ * — every component in frontend/src/components renders with plain,
+ * unstyled class names and no colors defined anywhere, which is itself the
+ * "low contrast" failure mode: unstyled text inherits the user agent's
+ * default foreground/background, which does not track the OS/browser color
+ * scheme and can end up low-contrast or invisible depending on the host
+ * page. This stylesheet gives every one of those components an explicit
+ * light AND dark palette via CSS custom properties, switched automatically
+ * with `prefers-color-scheme` (the CSS equivalent of Tailwind's `dark:`
+ * variant) so none of them fall back to browser defaults.
+ */
+
+:root {
+  --mm-bg: #ffffff;
+  --mm-bg-subtle: #f4f5f7;
+  --mm-fg: #1a1d21;
+  --mm-fg-muted: #5a6270;
+  --mm-border: #d7dbe0;
+  --mm-accent: #2f5fd8;
+  --mm-error-bg: #fdecec;
+  --mm-error-fg: #a31515;
+  --mm-success-bg: #e8f6ec;
+  --mm-success-fg: #1f7a3d;
+  --mm-warning-bg: #fff6e0;
+  --mm-warning-fg: #8a5a00;
+  --mm-disputed-bg: #fdecec;
+  --mm-disputed-fg: #a31515;
+  --mm-cancelled-bg: #eef0f3;
+  --mm-cancelled-fg: #5a6270;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --mm-bg: #17191c;
+    --mm-bg-subtle: #212428;
+    --mm-fg: #e7e9ec;
+    --mm-fg-muted: #9aa2ad;
+    --mm-border: #3a3f46;
+    --mm-accent: #7fa4f5;
+    --mm-error-bg: #3a1f1f;
+    --mm-error-fg: #f2a6a6;
+    --mm-success-bg: #1d3324;
+    --mm-success-fg: #8fd6a6;
+    --mm-warning-bg: #3a2e10;
+    --mm-warning-fg: #f0c673;
+    --mm-disputed-bg: #3a1f1f;
+    --mm-disputed-fg: #f2a6a6;
+    --mm-cancelled-bg: #2a2d31;
+    --mm-cancelled-fg: #9aa2ad;
+  }
+}
+
+/* BountyCard.tsx */
+.bounty-card {
+  background: var(--mm-bg);
+  color: var(--mm-fg);
+  border: 1px solid var(--mm-border);
+}
+.bounty-card__id,
+.bounty-card__creator {
+  color: var(--mm-fg-muted);
+}
+.bounty-card__reward {
+  color: var(--mm-fg);
+}
+.bounty-card__status {
+  color: var(--mm-accent);
+}
+
+/* CreateBounty.tsx (frontend/src/components) */
+.create-bounty {
+  background: var(--mm-bg);
+  color: var(--mm-fg);
+}
+.create-bounty__hint {
+  color: var(--mm-fg-muted);
+}
+.create-bounty__advanced {
+  border: 1px solid var(--mm-border);
+  background: var(--mm-bg-subtle);
+}
+.verifier-row {
+  color: var(--mm-fg);
+}
+
+/* StatusBadge.tsx */
+.status-badge {
+  color: var(--mm-fg);
+  background: var(--mm-bg-subtle);
+  border: 1px solid var(--mm-border);
+}
+.status-badge--open {
+  background: var(--mm-success-bg);
+  color: var(--mm-success-fg);
+}
+.status-badge--claimed {
+  background: var(--mm-warning-bg);
+  color: var(--mm-warning-fg);
+}
+.status-badge--disputed {
+  background: var(--mm-disputed-bg);
+  color: var(--mm-disputed-fg);
+}
+.status-badge--completed {
+  background: var(--mm-success-bg);
+  color: var(--mm-success-fg);
+}
+.status-badge--cancelled {
+  background: var(--mm-cancelled-bg);
+  color: var(--mm-cancelled-fg);
+}
+
+/* CopyButton.tsx */
+.copy-button {
+  color: var(--mm-fg-muted);
+  background: transparent;
+  border: 1px solid var(--mm-border);
+}
+.copy-button:hover {
+  color: var(--mm-fg);
+  border-color: var(--mm-accent);
+}
+
+/* TxResultBanner.tsx */
+.tx-result-banner {
+  background: var(--mm-success-bg);
+  color: var(--mm-success-fg);
+  border: 1px solid var(--mm-border);
+}
+.tx-result-banner a {
+  color: var(--mm-accent);
+}
+
+/* WalletConnectButton.tsx */
+.wallet-connect {
+  color: var(--mm-fg);
+  background: var(--mm-bg-subtle);
+  border: 1px solid var(--mm-border);
+}
+.wallet-connect--connected {
+  color: var(--mm-fg-muted);
+}
+
+/* BountyDetail.tsx (frontend/src/components) */
+.bounty-detail {
+  background: var(--mm-bg);
+  color: var(--mm-fg);
+}
+.bounty-detail__multisig-note {
+  color: var(--mm-fg-muted);
+}
+.assignee-list,
+.milestone-list {
+  color: var(--mm-fg);
+}
+
+/* Shared across CreateBounty.tsx and BountyDetail.tsx */
+.error {
+  background: var(--mm-error-bg);
+  color: var(--mm-error-fg);
+}
