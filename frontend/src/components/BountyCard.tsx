@@ -1,5 +1,5 @@
 import { Bounty } from "../lib/types";
-import { shortenAddress } from "../lib/format";
+import { shortenAddress } from "../utils/format";
 import { CopyButton } from "./CopyButton";
 
 export function BountyCard({ bounty }: { bounty: Bounty }) {

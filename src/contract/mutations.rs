@@ -1,17 +1,44 @@
-const STATUS_OPEN: &str = "open";
-const STATUS_IN_PROGRESS: &str = "in_progress";
-const STATUS_COMPLETED: &str = "completed";
-const STATUS_CANCELLED: &str = "cancelled";
-const STATUS_DISPUTED: &str = "disputed";
+use crate::symbols::{
+    self, SymbolKind, STATUS_CANCELLED, STATUS_COMPLETED, STATUS_DISPUTED, STATUS_IN_PROGRESS,
+    STATUS_OPEN,
+};
 
 /// Minimum reward amount enforced at bounty creation.
 const MIN_REWARD_AMOUNT: i128 = 100;
+
+/// Verify a bounty's status is one of `allowed`, failing with `err` otherwise.
+///
+/// Centralizes the status-transition guards that used to be duplicated
+/// across `claim_bounty`, `cancel_bounty`, and `complete_bounty`.
+fn ensure_status(bounty: &Bounty, allowed: &[Symbol], err: ContractError) {
+    if !allowed.iter().any(|s| s == &bounty.status) {
+        fail(err);
+    }
+}
 
 fn generate_bounty_id(env: &Env, count: u64) -> BountyId {
     let mut buf = [0u8; 32];
     let count_bytes = count.to_be_bytes();
     buf[24..32].copy_from_slice(&count_bytes);
     BountyId(BytesN::from_array(env, &buf))
+}
+
+/// Probe `reward_token` by invoking the SEP-41 `balance` method. Non-token
+/// addresses must fail closed with `InvalidRewardToken` instead of trapping.
+fn validate_reward_token(env: &Env, reward_token: &Address) {
+    use soroban_sdk::{IntoVal, InvokeError, Val, Vec as SorobanVec};
+
+    let mut args: SorobanVec<Val> = SorobanVec::new(env);
+    args.push_back(env.current_contract_address().into_val(env));
+
+    match env.try_invoke_contract::<i128, InvokeError>(
+        reward_token,
+        &Symbol::new(env, "balance"),
+        args,
+    ) {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) | Err(_) => fail(ContractError::InvalidRewardToken),
+    }
 }
 
 /// Shared payout loop used by `complete_bounty`, `approve_completion`,
@@ -57,13 +84,11 @@ fn decrement_active_claims(contrib: &mut Contributor) {
 }
 
 /// Complete a bounty by marking it as completed and distributing payout.
-/// Used as a helper by both complete_bounty and approve_completion.
-fn complete_bounty_inner(env: Env, bounty_id: BountyId) {
-    let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-        Some(b) => b,
-        None => fail(ContractError::BountyNotFound),
-    };
-
+/// Used as a helper by both `complete_bounty` and `approve_completion`.
+///
+/// Takes the already-loaded `bounty` rather than re-reading it from storage —
+/// the caller has already fetched it (avoids a redundant read).
+fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
     if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
         fail(ContractError::BountyNotInProgress);
     }
@@ -140,6 +165,7 @@ impl MergeMintContract {
     /// * If `approval_threshold` exceeds `required_verifiers.len()` when set
     ///   (`ContractError::ApprovalThresholdExceedsVerifiers`).
     /// * If `reward_token` is not a valid Soroban token contract.
+    /// * If milestone reward summation overflows (`ContractError::RewardAmountOverflow`).
     /// * If `milestones` is non-empty and their rewards do not sum to `reward_amount`.
     ///
     /// # Authorization
@@ -171,6 +197,10 @@ impl MergeMintContract {
             fail(ContractError::TooManyTags);
         }
 
+        for tag in tags.iter() {
+            symbols::validate_symbol_or_fail(&env, SymbolKind::Tag, &tag);
+        }
+
         if max_assignees < 1 {
             fail(ContractError::MaxAssigneesMustBePositive);
         }
@@ -181,13 +211,15 @@ impl MergeMintContract {
             }
         }
 
-        let token = TokenClient::new(&env, &reward_token);
-        token.balance(&env.current_contract_address());
+        validate_reward_token(&env, &reward_token);
 
         if !milestones.is_empty() {
             let mut total: i128 = 0;
             for m in milestones.iter() {
-                total += m.reward;
+                total = match total.checked_add(m.reward) {
+                    Some(sum) => sum,
+                    None => fail(ContractError::RewardAmountOverflow),
+                };
             }
             if total != reward_amount {
                 fail(ContractError::MilestoneRewardsMismatch);
@@ -259,17 +291,27 @@ impl MergeMintContract {
             None => fail(ContractError::BountyNotFound),
         };
 
+        // Idempotency: reject a duplicate claim by the same contributor before
+        // any other state checks or storage mutations.
+        for (addr, _) in bounty.assignees.iter() {
+            if addr == contributor {
+                fail(ContractError::AlreadyClaimed);
+            }
+        }
+
         // GUARD: a bounty in a terminal/blocked state can never be claimed.
         // Note this is intentionally broader than `status == STATUS_OPEN`: a
         // multi-assignee bounty moves to "in_progress" after its first claim
         // and must remain claimable by further contributors while capacity
         // remains (enforced below by the max_assignees check).
-        if bounty.status == Symbol::new(&env, STATUS_CANCELLED)
-            || bounty.status == Symbol::new(&env, STATUS_COMPLETED)
-            || bounty.status == Symbol::new(&env, STATUS_DISPUTED)
-        {
-            fail(ContractError::BountyNotOpen);
-        }
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_OPEN),
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+            ],
+            ContractError::BountyNotOpen,
+        );
 
         // The creator of a bounty cannot claim their own bounty.
         if contributor == bounty.creator {
@@ -278,12 +320,6 @@ impl MergeMintContract {
 
         if bounty.assignees.len() >= bounty.max_assignees {
             fail(ContractError::BountyAlreadyAssigned);
-        }
-
-        for (addr, _) in bounty.assignees.iter() {
-            if addr == contributor {
-                fail(ContractError::BountyAlreadyAssigned);
-            }
         }
 
         // #275: use Contributor::new for default construction (DONE - all call sites updated)
@@ -437,7 +473,7 @@ impl MergeMintContract {
         // AUTH: must be first — no storage reads or side-effects before this line.
         verifier.require_auth();
 
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+        let bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
             None => fail(ContractError::BountyNotFound),
         };
@@ -454,9 +490,11 @@ impl MergeMintContract {
         // repeat calls on already-completed bounties and any other terminal state.
         // Depends on claim_bounty having written STATUS_IN_PROGRESS and
         // complete_bounty writing STATUS_COMPLETED below (checks-effects-interactions).
-        if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
-            fail(ContractError::BountyNotInProgress);
-        }
+        ensure_status(
+            &bounty,
+            &[Symbol::new(&env, STATUS_IN_PROGRESS)],
+            ContractError::BountyNotInProgress,
+        );
 
         if bounty.assignees.is_empty() {
             fail(ContractError::BountyHasNoAssignee);
@@ -472,43 +510,7 @@ impl MergeMintContract {
             }
         }
 
-        if !bounty.milestones.is_empty() {
-            if !bounty.milestones.iter().all(|m| m.completed) {
-                fail(ContractError::NotAllMilestonesCompleted);
-            }
-            let previous_status = bounty.status.clone();
-            bounty.status = Symbol::new(&env, STATUS_COMPLETED);
-            storage::store_bounty(&env, &bounty_id, &bounty);
-            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
-            let (primary_assignee, _) = bounty.assignees.get(0).unwrap();
-            events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
-            return;
-        }
-
-        // Checks-effects-interactions pattern:
-        // 1. Compute all payouts and update contributor state in memory.
-        // 2. Persist the status change (marking the bounty completed) BEFORE any
-        //    cross-contract token transfer. This ensures that a reentrant call back
-        //    into complete_bounty would be rejected by GUARD 2 above.
-        // 3. Execute token transfers via the shared helper.
-        let (primary_assignee, _) = bounty.assignees.get(0).unwrap();
-        let previous_status = bounty.status.clone();
-        bounty.status = Symbol::new(&env, STATUS_COMPLETED);
-        storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
-
-        // Now safe to execute token transfers — bounty is already marked completed.
-        let token = TokenClient::new(&env, &bounty.reward_token);
-        distribute_payout(
-            &env,
-            &bounty_id,
-            &bounty.assignees,
-            &env.current_contract_address(),
-            &token,
-            bounty.reward_amount,
-        );
-
-        events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
+        complete_bounty_inner(env, bounty_id, bounty);
     }
 
     /// Record one verifier's approval for a multi-sig bounty completion.
@@ -530,9 +532,15 @@ impl MergeMintContract {
             fail(ContractError::BountyHasNoAssignee);
         }
 
+        for (assignee, _) in bounty.assignees.iter() {
+            if assignee == verifier {
+                fail(ContractError::VerifierCannotBeAssignee);
+            }
+        }
+
         // If no required_verifiers list is set, fall back to immediate single-verifier completion.
         if bounty.required_verifiers.is_none() {
-            complete_bounty_inner(env, bounty_id);
+            complete_bounty_inner(env, bounty_id, bounty);
             return;
         }
 
@@ -611,6 +619,10 @@ impl MergeMintContract {
             None => fail(ContractError::BountyNotFound),
         };
 
+        if bounty.status == Symbol::new(&env, STATUS_DISPUTED) {
+            fail(ContractError::BountyIsDisputed);
+        }
+
         if bounty.status != Symbol::new(&env, STATUS_OPEN)
             && bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS)
         {
@@ -656,8 +668,18 @@ impl MergeMintContract {
             fail(ContractError::NotArbitrator);
         }
 
+        symbols::validate_symbol_or_fail(&env, SymbolKind::Resolution, &resolution);
+
+        // GUARD: arbitrator (creator) must meet the bounty's own min_reputation threshold.
+        // This reflects the security/minimum-reputation-enforcement.md recommendation
+        // that dispute resolvers are subject to a reputation floor.
+        let arbitrator_contrib = storage::get_contributor(&env, &arbitrator)
+            .unwrap_or_else(|| Contributor::new(arbitrator.clone()));
+        if bounty.min_reputation > 0 && arbitrator_contrib.reputation < bounty.min_reputation {
+            fail(ContractError::ReputationTooLow);
+        }
+
         let resolve_complete = Symbol::new(&env, "complete");
-        let resolve_cancel = Symbol::new(&env, "cancel");
 
         if resolution == resolve_complete {
             if bounty.assignees.is_empty() {
@@ -696,7 +718,9 @@ impl MergeMintContract {
                 storage::store_bounty(&env, &bounty_id, &bounty);
                 storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
             }
-        } else if resolution == resolve_cancel {
+        } else {
+            // validate_symbol above already guarantees resolution is "complete" or
+            // "cancel" — this branch handles "cancel".
             // Refund escrowed reward to creator before mutating status.
             let token = TokenClient::new(&env, &bounty.reward_token);
             token.transfer(
@@ -709,8 +733,6 @@ impl MergeMintContract {
             bounty.status = Symbol::new(&env, STATUS_CANCELLED);
             storage::store_bounty(&env, &bounty_id, &bounty);
             storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
-        } else {
-            panic!("resolution must be 'complete' or 'cancel'");
         }
 
         events::emit_dispute_resolved(&env, &bounty_id, &arbitrator, &resolution);
@@ -729,6 +751,10 @@ impl MergeMintContract {
     /// Requires auth from `contributor`. No other address may modify this field.
     pub fn update_contributor_metadata(env: Env, contributor: Address, metadata: Symbol) {
         contributor.require_auth();
+
+        if metadata == Symbol::new(&env, "") {
+            fail(ContractError::MetadataEmpty);
+        }
 
         // #275: use Contributor::new for default construction (DONE - all call sites updated)
         let mut contrib = storage::get_contributor(&env, &contributor)
@@ -766,9 +792,18 @@ impl MergeMintContract {
             fail(ContractError::NotBountyCreator);
         }
 
-        if bounty.status != Symbol::new(&env, STATUS_OPEN) {
+        // Terminal statuses must never be cancelled (or re-cancelled).
+        if bounty.status == Symbol::new(&env, STATUS_COMPLETED)
+            || bounty.status == Symbol::new(&env, STATUS_CANCELLED)
+        {
             fail(ContractError::BountyNotOpen);
         }
+
+        ensure_status(
+            &bounty,
+            &[Symbol::new(&env, STATUS_OPEN)],
+            ContractError::BountyNotOpen,
+        );
 
         // Refund escrowed reward to creator before mutating status.
         let token = TokenClient::new(&env, &bounty.reward_token);

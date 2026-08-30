@@ -3,6 +3,14 @@
 **Status:** Proposal — follow-up implementation ticket required before merging any code.
 **Date:** 2026-07-29
 
+**Implementation status (confirmed against current source):** Nothing in this
+document has been implemented yet. There is no `DataKey::Admin`, `DataKey::Paused`,
+`init`/`pause`/`unpause`/`upgrade` function, or `assert_not_paused` guard anywhere
+in `src/`. Every mutating entrypoint in `src/contract/mutations.rs` runs
+unconditionally once `require_auth` passes. This remains a design proposal only —
+none of Phase 1 (Option A) or Phase 2 (Option B) below has landed, and none of the
+three follow-up tickets listed at the bottom of this doc has been opened yet.
+
 ---
 
 ## Problem
