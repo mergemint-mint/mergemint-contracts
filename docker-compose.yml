@@ -3,7 +3,7 @@ version: '3.8'
 services:
   mergemint-backend:
     build:
-      context: ./backend
+      context: ./mergemint-backend
       dockerfile: Dockerfile
     ports:
       - "8080:8080"

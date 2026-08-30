@@ -3,7 +3,7 @@ import { api } from '../lib/api';
 import { Bounty, BountyStatus } from '../types';
 import { BountyCard } from '../components/BountyCard';
 import { useWallet } from '../lib/WalletContext';
-import { mapErrorMessage } from '../lib/format';
+import { mapErrorMessage } from '../utils/format';
 
 const STATUSES: Array<BountyStatus | 'all'> = ['all', 'open', 'claimed', 'disputed', 'completed', 'cancelled'];
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatTokenAmount, toRawTokenAmount } from "./format";
+import { formatTokenAmount, toRawTokenAmount, shortenAddress, mapErrorMessage } from "./format";
 
 describe("formatTokenAmount / toRawTokenAmount round-trip", () => {
   const cases: Array<{ raw: string; formatted: string }> = [
@@ -24,5 +24,40 @@ describe("formatTokenAmount / toRawTokenAmount round-trip", () => {
     for (const raw of rawValues) {
       expect(toRawTokenAmount(formatTokenAmount(raw))).toBe(raw);
     }
+  });
+});
+
+describe("shortenAddress", () => {
+  it("returns the address unchanged when it fits within lead + trail", () => {
+    expect(shortenAddress("GABCDEFGH")).toBe("GABCDEFGH");
+  });
+
+  it("shortens a long address using the default 4/4 split", () => {
+    expect(shortenAddress("GABCDEFGHIJKLMNOPQRSTUVWXYZ1234")).toBe("GABC…1234");
+  });
+
+  it("honors custom lead/trail lengths", () => {
+    expect(shortenAddress("GABCDEFGHIJKLMNOPQRSTUVWXYZ1234", 6, 2)).toBe("GABCDE…34");
+  });
+});
+
+describe("mapErrorMessage", () => {
+  it("falls back to a generic message for empty input", () => {
+    expect(mapErrorMessage("")).toBe("Something went wrong. Please try again.");
+  });
+
+  it("maps known contract error substrings to friendly copy", () => {
+    expect(mapErrorMessage("Error: bounty already claimed by another user")).toBe(
+      "This bounty has already been claimed by someone else."
+    );
+    expect(mapErrorMessage("insufficient balance for transfer")).toBe(
+      "You don't have enough balance to complete this action."
+    );
+  });
+
+  it("returns the raw message unchanged when nothing matches", () => {
+    expect(mapErrorMessage("some totally unrecognized error")).toBe(
+      "some totally unrecognized error"
+    );
   });
 });
