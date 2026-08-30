@@ -1,8 +1,9 @@
 import { useTxFlow } from "../hooks/useTxFlow";
 import { TxResultBanner } from "./TxResultBanner";
 import { CopyButton } from "./CopyButton";
+import { TxButton } from "./TxButton";
 import { Bounty, NetworkName } from "../lib/types";
-import { shortenAddress } from "../lib/format";
+import { shortenAddress } from "../utils/format";
 
 interface BountyDetailProps {
   bounty: Bounty;
@@ -11,10 +12,12 @@ interface BountyDetailProps {
 }
 
 export function BountyDetail({ bounty, network, onClaim }: BountyDetailProps) {
-  const { pending, error, result, run } = useTxFlow(network);
+  const { pending, error, result, optimistic, run, retry } = useTxFlow(network);
 
   async function perform() {
-    await run(() => onClaim(bounty.id));
+    // Optimistically assume the claim will succeed so the UI updates right
+    // away; useTxFlow rolls this back automatically if the transaction fails.
+    await run(() => onClaim(bounty.id), { hash: "pending" });
   }
 
   return (
@@ -58,12 +61,16 @@ export function BountyDetail({ bounty, network, onClaim }: BountyDetailProps) {
         </div>
       )}
 
-      <button onClick={perform} disabled={pending}>
-        {pending ? "Submitting…" : "Claim"}
-      </button>
+      <TxButton onClick={perform} pending={pending} pendingLabel="Submitting…">
+        Claim
+      </TxButton>
 
-      {error && <p className="error">{error}</p>}
-      <TxResultBanner result={result} />
+      {optimistic && (
+        <p className="tx-optimistic-note">Claim submitted — confirming on-chain…</p>
+      )}
+      {!optimistic && (
+        <TxResultBanner result={result} error={error} onRetry={retry} retrying={pending} />
+      )}
     </div>
   );
 }

@@ -39,10 +39,10 @@ This is required to build the contract for Soroban deployment.
 ### 3. Stellar CLI
 
 ```bash
-cargo install stellar-cli
+cargo install stellar-cli --version 23.0.1 --locked
 ```
 
-Verify with `stellar --version`. Used for building, deploying, and inspecting contracts.
+Verify with `stellar --version`. Used for building, deploying, and inspecting contracts. CI pins this exact version in `interface-check.yml` so `stellar contract inspect` output stays stable across runs — install the same version locally to avoid false-positive interface diffs.
 
 ---
 
@@ -257,6 +257,31 @@ one of the standard categories: `Added`, `Changed`, `Deprecated`, `Removed`,
 `Fixed`, or `Security`.
 
 ## Code Style
+
+---
+
+## CI & Required Status Checks
+
+All of the following GitHub Actions workflows must pass before a pull request can be merged to `main`:
+
+| Workflow file             | Status check name               | Required |
+| ------------------------- | ------------------------------- | -------- |
+| `interface-check.yml`     | Interface Compatibility Check   | ✅ Yes   |
+| `ci.yml` (Backend CI)     | Backend CI                      | ✅ Yes   |
+| `lint.yml`                | Lint                            | ✅ Yes   |
+| `security.yml`            | Security Audit (`cargo-audit`)  | ✅ Yes   |
+| `frontend-ci.yml`         | Frontend CI                     | ✅ Yes   |
+
+> **`interface-check.yml` is the critical gate.** It detects breaking changes to the public contract interface by comparing the current ABI against the last recorded snapshot. A failure here means a public function signature, parameter type, or event payload has changed in a backwards-incompatible way. This check **must pass** before merging to `main`.
+
+### Configuring branch protection rules
+
+If the required status checks are not yet enforced on `main`, set them up via **Settings → Branches → Branch protection rules** for the `main` branch:
+
+1. Enable **Require status checks to pass before merging**.
+2. Search for and add each status check name from the table above.
+3. Enable **Require branches to be up to date before merging** to prevent stale-branch bypasses.
+4. Save the rule.
 
 ---
 

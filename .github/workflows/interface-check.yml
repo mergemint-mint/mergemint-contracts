@@ -3,6 +3,11 @@ name: Interface Compatibility Check
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   interface-check:
@@ -19,7 +24,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Stellar CLI
-        run: cargo install stellar-cli
+        run: cargo install stellar-cli --version 23.0.1 --locked
 
       - name: Build contract
         run: cargo build --release --target wasm32v1-none
@@ -39,10 +44,21 @@ jobs:
         run: |
           if diff -q interface-baseline.json current-interface.json > /dev/null 2>&1; then
             echo "✓ Interface compatible"
+            echo "✓ Contract interface matches \`interface-baseline.json\`." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "✗ Interface has changed!"
             echo ""
             echo "Changes:"
             diff interface-baseline.json current-interface.json || true
+            {
+              echo "## ✗ Contract interface changed"
+              echo ""
+              echo "The generated interface differs from \`interface-baseline.json\`."
+              echo "Update the baseline intentionally if this change is expected."
+              echo ""
+              echo '```diff'
+              diff interface-baseline.json current-interface.json || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
