@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
-import {
+import BountyDetail, {
   Bounty,
   canCancel,
   canClaim,
@@ -172,5 +173,37 @@ describe("canVerify", () => {
     expect(canVerify({ bounty: makeBounty({ status: "submitted" }), walletAddress: null })).toBe(
       false
     );
+  });
+});
+
+describe("BountyDetail interactions", () => {
+  it("calls onClaim when the claim button is clicked", () => {
+    const onClaim = vi.fn();
+    render(
+      <BountyDetail
+        bounty={makeBounty({ status: "open" })}
+        walletAddress={OUTSIDER}
+        onClaim={onClaim}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Claim" }));
+
+    expect(onClaim).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onDispute when the dispute button is clicked", () => {
+    const onDispute = vi.fn();
+    render(
+      <BountyDetail
+        bounty={makeBounty({ status: "submitted" })}
+        walletAddress={CREATOR}
+        onDispute={onDispute}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Dispute" }));
+
+    expect(onDispute).toHaveBeenCalledTimes(1);
   });
 });
