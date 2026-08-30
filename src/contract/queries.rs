@@ -48,6 +48,11 @@ fn paginate(
 impl MergeMintContract {
     /// Return a single bounty by its ID, or `None` if it does not exist.
     pub fn get_bounty(env: Env, bounty_id: BountyId) -> Option<Bounty> {
+        // Never-allocated IDs (sequence >= count) and pruned entries (sequence
+        // < count but missing from storage) both return None without panicking.
+        if !storage::bounty_id_was_allocated(&env, &bounty_id) {
+            return None;
+        }
         storage::get_bounty(&env, &bounty_id)
     }
 
@@ -100,12 +105,14 @@ impl MergeMintContract {
         cursor: Option<u32>,
         limit: u32,
     ) -> (Vec<BountyId>, Option<u32>) {
+        crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Status, &status);
         let all = storage::get_bounties_by_status(&env, &status);
         paginate(&env, all, cursor, limit)
     }
 
     /// Return the total number of bounties currently in `status`.
     pub fn get_status_count(env: Env, status: Symbol) -> u32 {
+        crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Status, &status);
         storage::get_status_count(&env, &status)
     }
 
@@ -145,6 +152,7 @@ impl MergeMintContract {
     /// result with `get_open_bounties` first and apply filtering client-side
     /// for large lists.
     pub fn get_bounties_by_tag(env: Env, tag: Symbol) -> Vec<BountyId> {
+        crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Tag, &tag);
         let open_ids = storage::get_open_bounties(&env);
         let mut result = Vec::new(&env);
         for id in open_ids.iter() {

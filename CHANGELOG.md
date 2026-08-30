@@ -11,6 +11,21 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Changes that have landed on `main` but are not yet associated with a tagged release.
 
+### Added
+
+- `sdk`: optional `retry: { attempts, backoffMs }` constructor option that retries
+  every Soroban RPC round-trip with exponential backoff (#665).
+- `sdk`: JSDoc on every public `MergeMintSDK` method, documenting parameters,
+  return values, and thrown errors (#663).
+- CI: `SDK CI` workflow gating `sdk/` on `tsc --noEmit` and the jest suite (#667).
+- CI: `SDK CI` job requiring a `CHANGELOG.md` entry whenever `sdk/package.json`
+  changes version (#664).
+
+### Fixed
+
+- `sdk`: removed an orphaned `CreateBountyParams` fragment left in
+  `sdk/src/index.ts` by an earlier merge, which made the module unparseable.
+
 ---
 
 ## [0.1.0] — 2024-01-01
@@ -35,3 +50,6 @@ Changes that have landed on `main` but are not yet associated with a tagged rele
 
 [Unreleased]: https://github.com/mergemint-mint/mergemint-contracts/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/mergemint-mint/mergemint-contracts/releases/tag/v0.1.0
+
+## [Unreleased]
+- Reconcile duplicate backend directories (#668): the orphaned TypeScript `backend/` (no Dockerfile, unreferenced by the build) has been removed; `docker-compose.yml` now builds the canonical Rust `mergemint-backend/`, and the doc reference in `docs/shared-type-generation.md` was updated.

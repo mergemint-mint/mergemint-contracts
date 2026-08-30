@@ -1,0 +1,49 @@
+# .github/workflows/solidity-static-analysis.yml
+#
+# Static analysis for the Solidity contracts under contracts/bounty.
+#
+# None of the other workflows in this directory run a Solidity analyzer,
+# so vulnerability classes that cargo/clippy (Rust-focused) can't see —
+# reentrancy, unchecked external calls, unsafe delegatecall, etc. — were
+# going unchecked for contracts/bounty/*.sol. This job runs Slither and
+# fails the build on any High-severity finding.
+#
+# Scoped to changes under contracts/bounty/ so it does not fire on
+# unrelated commits (mirrors the path-scoping used in backend-ci.yml).
+
+name: Solidity Static Analysis
+
+on:
+  push:
+    branches: [main, "feat/**", "fix/**", "test/**"]
+    paths:
+      - "contracts/bounty/**"
+      - ".github/workflows/solidity-static-analysis.yml"
+  pull_request:
+    paths:
+      - "contracts/bounty/**"
+      - ".github/workflows/solidity-static-analysis.yml"
+
+jobs:
+  slither:
+    name: Slither
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Slither
+        run: pip install slither-analyzer
+
+      - name: Install Solidity dependencies
+        run: npm install --no-save @openzeppelin/contracts@^4.9.0
+
+      - name: Run Slither against contracts/bounty
+        run: |
+          slither contracts/bounty \
+            --filter-paths "node_modules" \
+            --fail-high
