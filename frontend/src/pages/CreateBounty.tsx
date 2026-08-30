@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
-import { mapErrorMessage } from '../lib/format';
+import { mapErrorMessage } from '../utils/format';
 
 export function CreateBounty() {
   const navigate = useNavigate();

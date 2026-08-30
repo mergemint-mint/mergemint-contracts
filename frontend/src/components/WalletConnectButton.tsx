@@ -1,4 +1,4 @@
-import { shortenAddress } from "../lib/format";
+import { shortenAddress } from "../utils/format";
 import { CopyButton } from "./CopyButton";
 
 interface WalletConnectButtonProps {
