@@ -24,6 +24,23 @@ export const MAINNET: Omit<NetworkConfig, "contractId"> = {
   rpcUrl: "https://mainnet.stellar.validationcloud.io/v1/XCa...",
   networkPassphrase: Networks.PUBLIC,
 };
+
+/**
+ * Builds a full `NetworkConfig` by combining a base template (e.g. `TESTNET` or `MAINNET`)
+ * with a specific `contractId` and optional overrides.
+ */
+export function createNetworkConfig(
+  base: Omit<NetworkConfig, "contractId">,
+  contractId: string,
+  overrides?: Partial<Omit<NetworkConfig, "contractId">>
+): NetworkConfig {
+  return {
+    ...base,
+    contractId,
+    ...overrides,
+  };
+}
+
   rewardToken: string;
   minReputation: number;
   deadline: number | null;
