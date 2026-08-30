@@ -1,39 +1,44 @@
 // SPDX-License-Identifier: MIT
-//! Persistent storage layout for the MergeMint contract.
 //!
-//! ## Key namespacing
+//! Persistent storage accessors for the MergeMint contract.
 //!
-//! Every storage key is a variant of [`DataKey`] (defined in `src/types.rs`).
-//! Soroban's `#[contracttype]` derive serialises each enum variant as a
-//! `(variant_name, fields...)` tuple, so the variant name itself is the
-//! namespace prefix — two variants can never collide on the same ledger
-//! entry no matter what their inner fields contain. This module must not
-//! introduce a second `DataKey` variant that stores the same logical data
-//! under a different name; extend an existing variant's fields instead.
+//! # Key namespacing
 //!
-//! ## Key families
+//! Every ledger entry is addressed by a typed [`DataKey`] variant defined in
+//! `crate::types`. Soroban serialises each enum variant to a distinct XDR
+//! discriminant, so **new data must be added as a new `DataKey` variant** —
+//! never by overloading an existing variant or inventing ad-hoc byte prefixes.
 //!
-//! - `BountyCount` — singleton `u64` counter, source of new bounty IDs.
-//! - `Bounty(id)` / `BountyMeta(id)` — a bounty's core struct and its
-//!   title/description, keyed by [`BountyId`].
-//! - `Contributor(address)` — a contributor's reputation/earnings record.
-//! - `ContributorBounties(address)` — flat `Vec<BountyId>` of bounties
-//!   created by `address` (see "Creator bounties index" below).
-//! - `StatusIndex(status)` — **legacy**, unpaged; superseded by
-//!   `StatusCount`/`StatusIndexPage`. Kept only so old serialised entries
-//!   remain readable; new code must not write it.
-//! - `StatusCount(status)` / `StatusIndexPage(status, page)` — paged index
-//!   of bounty IDs per status symbol (see "StatusIndex — paged" below).
-//! - `OpenBounties` — **legacy**, unpaged; superseded by
-//!   `OpenBountiesCount`/`OpenBountiesPage`.
-//! - `OpenBountiesCount` / `OpenBountiesPage(page)` — paged index of
-//!   currently-open bounty IDs (see "OpenBounties — paged" below).
-//! - `Approvals(id)` — `Vec<Address>` of verifiers who approved a bounty.
+//! All functions in this module use **persistent** storage and call [`extend`]
+//! after reads/writes to keep TTL fresh (~1 year; see constants below).
 //!
-//! Paged families (`StatusIndexPage`, `OpenBountiesPage`) share the same
-//! swap-remove-and-shrink strategy so adding a new paged family should
-//! follow the pattern already used for those two rather than inventing a
-//! new one.
+//! # Key families
+//!
+//! | Family | `DataKey` variant | Value type | Role |
+//! |--------|-------------------|------------|------|
+//! | Global counter | `BountyCount` | `u64` | Monotonic bounty ID sequence |
+//! | Bounty body | `Bounty(BountyId)` | `Bounty` | Canonical bounty state |
+//! | Bounty metadata | `BountyMeta(BountyId)` | `BountyMeta` | Title/description sidecar |
+//! | Contributor profile | `Contributor(Address)` | `Contributor` | Reputation, earnings, claims |
+//! | Creator index | `ContributorBounties(Address)` | `Vec<BountyId>` | Bounties created by address |
+//! | Status totals | `StatusCount(Symbol)` | `u32` | Item count per status label |
+//! | Status index page | `StatusIndexPage(Symbol, u32)` | `Vec<BountyId>` | Paged shard (`PAGE_SIZE` IDs) |
+//! | Open-bounty totals | `OpenBountiesCount` | `u32` | Count of claimable bounties |
+//! | Open-bounty page | `OpenBountiesPage(u32)` | `Vec<BountyId>` | Paged open-bounty shard |
+//! | Multi-sig votes | `Approvals(BountyId)` | `Vec<Address>` | Per-bounty verifier approvals |
+//!
+//! ## Legacy variants (read-only)
+//!
+//! - `StatusIndex(Symbol)` — pre-pagination status blob; do not write.
+//! - `OpenBounties` — pre-pagination open list; do not write.
+//!
+//! ## Paged indexes
+//!
+//! `StatusIndexPage` and `OpenBountiesPage` shard large lists into pages of at
+//! most [`PAGE_SIZE`] entries to stay within Soroban's per-entry size limit.
+//! Each index also maintains a companion count key (`StatusCount` /
+//! `OpenBountiesCount`). See the inline layout comments in this file for
+//! append and swap-remove semantics.
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::types::{Bounty, BountyId, BountyMeta, Contributor, DataKey};
@@ -83,6 +88,24 @@ pub fn set_bounty_count(env: &Env, count: &u64) {
     let key = DataKey::BountyCount;
     env.storage().persistent().set(&key, count);
     extend(env, &key);
+}
+
+/// Decode the monotonic creation sequence embedded in a `BountyId`.
+///
+/// IDs are minted by `generate_bounty_id`, which writes the current
+/// `get_bounty_count()` into the last eight bytes (big-endian).
+pub fn bounty_id_sequence(id: &BountyId) -> u64 {
+    let mut seq_bytes = [0u8; 8];
+    for i in 0u32..8 {
+        seq_bytes[i as usize] = id.0.get(24 + i).unwrap_or(0);
+    }
+    u64::from_be_bytes(seq_bytes)
+}
+
+/// Returns `true` when `id`'s embedded sequence is strictly less than the
+/// number of bounties ever created (i.e. the ID was allocated at some point).
+pub fn bounty_id_was_allocated(env: &Env, id: &BountyId) -> bool {
+    bounty_id_sequence(id) < get_bounty_count(env)
 }
 
 // ── Bounty ────────────────────────────────────────────────────────────────────

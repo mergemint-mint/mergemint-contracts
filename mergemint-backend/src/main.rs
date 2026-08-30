@@ -25,12 +25,26 @@
 // when absent.  `TraceLayer` then opens a tracing span for each request that
 // includes the correlation ID, making it trivial to grep logs for a single
 // user's flow even when requests are interleaved.
+//
+// ## Graceful shutdown
+//
+// `axum::serve` is wired to `shutdown_signal`, which waits for SIGINT
+// (Ctrl+C) or, on Unix, SIGTERM. Once either fires, Axum stops accepting new
+// connections but lets in-flight requests finish — including a `self_claim`
+// / `resolve_dispute` call that has already reached the point of submitting
+// a chain transaction — instead of dropping them mid-flight when a deploy
+// sends SIGTERM.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::post, Router};
+use axum::{
+    http::{header::CONTENT_TYPE, HeaderValue, Method},
+    routing::{get, post},
+    Router,
+};
 use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     timeout::TimeoutLayer,
@@ -40,9 +54,10 @@ use tracing::Level;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod db;
+mod rate_limit;
 mod routes;
 
-use db::new_shared_db;
+use db::{new_shared_db, new_shared_idempotency_store};
 use routes::tx::{resolve_dispute, self_claim, AppState};
 
 /// Maximum allowed request body size (1 MiB).
@@ -59,6 +74,11 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Reward-token allowlist env var consumed by create-bounty flows.
 const ALLOWLISTED_REWARD_TOKENS_ENV: &str = "ALLOWLISTED_REWARD_TOKENS";
+
+/// Env var holding a comma-separated allow-list of origins permitted to make
+/// cross-origin requests, e.g.
+/// "https://app.mergemint.xyz,https://staging.mergemint.xyz".
+const CORS_ALLOWED_ORIGINS_ENV: &str = "CORS_ALLOWED_ORIGINS";
 
 #[tokio::main]
 async fn main() {
@@ -84,11 +104,20 @@ async fn main() {
     warn_if_reward_token_allowlist_empty();
 
     let shared_db = new_shared_db();
-    let state = Arc::new(AppState { db: shared_db });
+    let idempotency = new_shared_idempotency_store();
+    let state = Arc::new(AppState {
+        db: shared_db,
+        idempotency,
+    });
 
     let app = Router::new()
         .route("/tx/resolve-dispute", post(resolve_dispute))
         .route("/tx/self-claim", post(self_claim))
+        .route("/bounties", get(list_bounties))
+        .route(
+            "/bounties/assignee/:address",
+            get(list_bounties_by_assignee),
+        )
         .with_state(state)
         // ── Correlation-ID middleware stack (#486) ──────────────────────────
         //
@@ -128,7 +157,11 @@ async fn main() {
         // Guard against slow-loris / oversized-body attacks (#476).
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         // Cancel requests that exceed the wall-clock budget (#476).
-        .layer(TimeoutLayer::new(REQUEST_TIMEOUT));
+        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
+        // Restrict cross-origin browser requests to the configured allow-list.
+        .layer(build_cors_layer(
+            &std::env::var(CORS_ALLOWED_ORIGINS_ENV).unwrap_or_default(),
+        ));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
         .await
@@ -139,7 +172,45 @@ async fn main() {
         "mergemint-backend listening"
     );
 
-    axum::serve(listener, app).await.expect("server error");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("server error");
+}
+
+/// Waits for SIGINT (Ctrl+C) or, on Unix, SIGTERM.
+///
+/// Passed to `with_graceful_shutdown` so the server stops accepting new
+/// connections but lets in-flight requests — most importantly a
+/// transaction-submission handler that has already started talking to
+/// Horizon — finish instead of being dropped mid-flight when a deploy sends
+/// SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("received SIGINT, starting graceful shutdown");
+        }
+        _ = terminate => {
+            tracing::info!("received SIGTERM, starting graceful shutdown");
+        }
+    }
 }
 
 fn warn_if_reward_token_allowlist_empty() {
@@ -151,8 +222,39 @@ fn warn_if_reward_token_allowlist_empty() {
     }
 }
 
+/// Build the CORS layer from an explicit, comma-separated origin allow-list
+/// string (see `CORS_ALLOWED_ORIGINS_ENV`). Kept separate from the env var
+/// lookup so it's trivially testable with a fixed input.
+fn build_cors_layer(allowed_origins: &str) -> CorsLayer {
+    let origins: Vec<HeaderValue> = allowed_origins
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|origin| match origin.parse::<HeaderValue>() {
+            Ok(value) => Some(value),
+            Err(_) => {
+                tracing::warn!(origin, "ignoring invalid CORS_ALLOWED_ORIGINS entry");
+                None
+            }
+        })
+        .collect();
+
+    if origins.is_empty() {
+        tracing::warn!(
+            "CORS_ALLOWED_ORIGINS is empty — no cross-origin browser requests will be permitted"
+        );
+    }
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([CONTENT_TYPE])
+}
+
 #[cfg(test)]
 mod tests {
+    use super::shutdown_signal;
+
     #[test]
     fn empty_allowlist_detection_handles_unset_empty_and_commas() {
         fn is_empty(value: &str) -> bool {
@@ -163,5 +265,20 @@ mod tests {
         assert!(is_empty(" , , "));
         assert!(!is_empty("native"));
         assert!(!is_empty(" , native , "));
+    }
+
+    /// `shutdown_signal` must keep waiting until an actual SIGINT/SIGTERM
+    /// arrives rather than resolving immediately. This guards against a
+    /// regression (e.g. an errant `now_or_never`, or a select branch that
+    /// completes on its own) that would make `with_graceful_shutdown` fire
+    /// on every request cycle instead of only on a real shutdown signal.
+    #[tokio::test]
+    async fn shutdown_signal_does_not_resolve_without_a_real_signal() {
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), shutdown_signal()).await;
+        assert!(
+            result.is_err(),
+            "shutdown_signal resolved without SIGINT/SIGTERM ever being sent"
+        );
     }
 }

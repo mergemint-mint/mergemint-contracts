@@ -1,40 +1,98 @@
 # Contract Architecture
 
+## Two Contract Codebases: Soroban (Rust) vs. Solidity
+
+This repository contains contract code for **two different chains**. A new
+contributor browsing the tree will find both `src/contract/` (Rust) and
+`contracts/bounty/` (Solidity) and could reasonably assume only one is
+actually live. This section clarifies the relationship and current status
+of each.
+
+| | `src/contract/` | `contracts/bounty/` |
+|---|---|---|
+| Language | Rust (`#[contracttype]`, `#[contractimpl]`) | Solidity `^0.8.0` |
+| Target chain | Stellar, via the Soroban VM | EVM-compatible chains |
+| Role | **Primary contract.** Owns bounty creation, claiming, completion, cancellation, and expiry — the full lifecycle documented below. | Standalone batch-refresh utility (`BountyRefresh.sol`) that calls out to an external `IBountyManager` to bulk-update contributor metrics. It does not create, claim, or pay out bounties itself. |
+| Status | **Live / actively developed.** This is the contract MergeMint deploys and the one the rest of this document (data flow, state machine, storage/TTL) describes. | **Not deployed.** No `hardhat.config.*` exists in this repo yet, and `IBountyManager` has no production implementation — only the `MockBountyManager` test double under `test/bounty/mocks/`. Treat it as an EVM-side prototype/utility contract, exercised solely by its own Hardhat test suite (`test/bounty/BountyRefresh.test.js`). |
+| Build/test tooling | `cargo build` / `cargo test` (see [CONTRIBUTING.md](../CONTRIBUTING.md)) | `npx hardhat test` |
+
+**Why both exist:** MergeMint's production bounty logic lives on Stellar
+via Soroban (`src/contract/`). The Solidity code under `contracts/bounty/`
+was added to explore a companion, permissioned batch-refresh mechanism for
+a possible future EVM-side integration (e.g. syncing contributor metrics
+into an EVM-based `IBountyManager`). It is intentionally decoupled from the
+Soroban contract — the two do not call each other and do not share state.
+
+If you're modifying bounty *lifecycle* behavior (create/claim/complete/
+cancel/expire), you want `src/contract/`. If you're modifying the
+EVM-side batch refresh mechanism or its mock/test harness, you want
+`contracts/bounty/` and `test/bounty/`.
+
+---
+
+## Module Layout
+
+`MergeMintContract` lives in `src/contract/` as a directory module rather than a
+single file. `mod.rs` declares the `#[contract]` struct and pulls the other
+files in via `include!`, so all three still compile as one `impl` block:
+
+```
+src/contract/
+├── mod.rs           — contract struct definition; include!()s the files below
+├── mutations.rs      — state-changing entry points (create_bounty, claim_bounty,
+│                       complete_milestone, complete_bounty, approve_completion,
+│                       raise_dispute, resolve_dispute, update_contributor_metadata,
+│                       cancel_bounty, expire_bounty)
+├── queries.rs         — read-only entry points (get_bounty, get_contributor,
+│                       get_bounty_count, get_bounties_by_status, get_status_count,
+│                       get_open_bounties, get_bounties_by_tag,
+│                       get_contributor_active_bounty, get_bounties_by_creator, ...)
+│                       plus the shared `paginate()` helper
+└── queries_test.rs    — unit tests for the query helpers (`mod tests`)
+```
+
 ## Data Flow
 
 ```
 User (Frontend)
     │
     ▼
-MergeMintContract
+MergeMintContract (src/contract/mod.rs)
     │
-    ├── create_bounty()
-    │   ├── Validates creator auth
-    │   ├── Stores bounty in persistent storage
-    │   └── Emits bounty_created event
+    ├── mutations.rs
+    │   ├── create_bounty()
+    │   │   ├── Validates creator auth
+    │   │   ├── Stores bounty in persistent storage
+    │   │   └── Emits bounty_created event
+    │   │
+    │   ├── claim_bounty()
+    │   │   ├── Validates contributor auth
+    │   │   ├── Assigns contributor to bounty
+    │   │   └── Emits bounty_claimed event
+    │   │
+    │   ├── complete_bounty()
+    │   │   ├── Validates verifier auth
+    │   │   ├── Transfers tokens via TokenClient
+    │   │   ├── Updates contributor reputation
+    │   │   ├── Emits bounty_completed event
+    │   │   └── Emits reward_paid event
+    │   │
+    │   ├── cancel_bounty()
+    │   │   ├── Validates creator auth
+    │   │   ├── Sets status to "cancelled"
+    │   │   └── Emits bounty_cancelled event
+    │   │
+    │   └── expire_bounty()
+    │       ├── Validates caller auth (permissionless)
+    │       ├── Checks deadline has passed
+    │       ├── Sets status to "cancelled"
+    │       └── Emits bounty_expired event
     │
-    ├── claim_bounty()
-    │   ├── Validates contributor auth
-    │   ├── Assigns contributor to bounty
-    │   └── Emits bounty_claimed event
-    │
-    ├── complete_bounty()
-    │   ├── Validates verifier auth
-    │   ├── Transfers tokens via TokenClient
-    │   ├── Updates contributor reputation
-    │   ├── Emits bounty_completed event
-    │   └── Emits reward_paid event
-    │
-    ├── cancel_bounty()
-    │   ├── Validates creator auth
-    │   ├── Sets status to "cancelled"
-    │   └── Emits bounty_cancelled event
-    │
-    └── expire_bounty()
-        ├── Validates caller auth (permissionless)
-        ├── Checks deadline has passed
-        ├── Sets status to "cancelled"
-        └── Emits bounty_expired event
+    └── queries.rs
+        └── get_bounty(), get_contributor(), get_bounty_count(),
+            get_bounties_by_status(), get_status_count(),
+            get_open_bounties(), get_bounties_by_tag(), ... (read-only,
+            no auth, no storage writes)
 ```
 
 ## Storage Layout
@@ -191,6 +249,72 @@ The two paths into `cancelled` emit different events to let off-chain indexers d
 
 ---
 
+## Solidity / Soroban Lifecycle Parity
+
+This section reconciles the two contracts named in issue #713 — the Solidity
+`BountyRefresh` contract (`contracts/bounty/BountyRefresh.sol`) and the Soroban
+`MergeMintContract` (`src/contract/`) — to confirm whether their bounty-lifecycle
+status transitions match, and to record any intentional divergence.
+
+### Finding: one bounty-lifecycle state machine, two different operational models
+
+Soroban is the **only** place a bounty's lifecycle `status` field is defined and
+transitioned. Its state machine (`open → in_progress → completed | cancelled`, plus
+the `disputed` sub-state) is the canonical bounty lifecycle and is documented in the
+previous section.
+
+The Solidity `BountyRefresh` contract does **not** model a bounty lifecycle at all.
+Its state is a batch/refresh *orchestration* model, scoped to re-computing contributor
+metrics in bulk. It never reads or writes a bounty `status`; it has no `open`,
+`in_progress`, `completed`, `cancelled`, or `disputed` bounty state and no transition
+functions resembling `claim_bounty` / `complete_bounty` / `cancel_bounty` /
+`expire_bounty`. `IBountyManager.sol` likewise exposes only
+`updateContributorMetrics`, `getBountyContributors`, and `getContributorCount`.
+
+This separation is **intentional**: `BountyRefresh` is an off-path operational tool
+for refreshing contributor metrics, not a second implementation of the bounty
+lifecycle. There is therefore no lifecycle to "keep in parity" beyond the Soroban
+machine.
+
+### State-model comparison
+
+| Concern | Solidity `BountyRefresh.sol` | Soroban `MergeMintContract` |
+|---------|------------------------------|-----------------------------|
+| What is modelled | Refresh task / batch run progress | Bounty lifecycle `status` |
+| States | `BountyRefreshTask.completed`, `BountyRefreshTask.failed`; `RefreshBatch.isProcessing`, `RefreshBatch.isCompleted`; `Pausable` | `open`, `in_progress`, `completed`, `cancelled`, `disputed` |
+| Transitions on | `createBatch` → `processBatchParallel` → `finalizeBatch` | `create_bounty` → `claim_bounty` → `complete_bounty` / `cancel_bounty` / `expire_bounty` / `raise_dispute` |
+| Touches bounty `status`? | No | Yes |
+| Auth model | `onlyOwner` + `nonReentrant` + `whenNotPaused` | `require_auth()` per role (creator / contributor / verifier) |
+
+### Lexical overlap with divergent meaning (documented so reviewers don't conflate them)
+
+The token `completed` appears in both contracts but means different things:
+
+- In Soroban, `completed` is a **terminal bounty state**: the reward was paid and
+  reputation updated; no transitions out.
+- In `BountyRefresh`, `RefreshBatch.isCompleted` (and `BountyRefreshTask.completed`)
+  means the **refresh run finished** (success or failure counted), independent of any
+  bounty status. It is an operational flag, not a bounty lifecycle state.
+
+Because the two `completed` values live in unrelated structs and are never bridged,
+there is no shared transition to keep consistent.
+
+### `disputed` state
+
+`disputed` is implemented in Soroban via `raise_dispute` / `resolve_dispute`
+(`src/contract/mutations.rs`). It has no counterpart and no relevance in
+`BountyRefresh`, which has no bounty-lifecycle states to dispute. This is expected
+given the contracts model different concerns.
+
+### Recommended follow-up (out of scope for this PR)
+
+If a future change introduces bounty-lifecycle logic into the Solidity side (e.g. a
+real `BountyManager` that mutates bounty `status`), that is the point at which the two
+state machines must be reconciled for parity. Until then, parity is satisfied by the
+single-sourced Soroban machine.
+
+---
+
 ## Security Model
 
 - All state-changing functions require caller authentication via `require_auth()`
@@ -251,3 +375,65 @@ The following entries are covered:
 | `DataKey::OpenBounties` | `get_open_bounties`, `set_open_bounties` |
 
 `DataKey::BountyMeta` uses **temporary** storage (metadata is only needed during the bounty creation window) and does not require TTL extension.
+
+---
+
+## Solidity / Soroban Bounty Lifecycle Parity
+
+This section compares the bounty state machine modeled by the Soroban
+contract (`src/contract/`, documented above) against the state machine
+modeled by the Solidity contract `contracts/bounty/BountyRefresh.sol`, and
+records why they intentionally diverge.
+
+### Summary
+
+**They are not the same state machine, and are not meant to be.** The
+Soroban contract owns the canonical bounty lifecycle (`open` →
+`in_progress` → `completed` / `cancelled`). `BountyRefresh.sol` does not
+read or write that lifecycle at all — it manages an orthogonal, secondary
+lifecycle for **batching and retrying contributor-metrics refresh work**
+against an `IBountyManager` implementation. A bounty's core status field is
+never touched by anything in `BountyRefresh.sol`.
+
+### Side-by-side state comparison
+
+| | Soroban (`src/contract/`) | Solidity (`BountyRefresh.sol`) |
+|---|---|---|
+| What the states represent | Lifecycle of a single bounty | Lifecycle of a refresh **task**/**batch** operation |
+| States | `open`, `in_progress`, `completed`, `cancelled` | Task: pending → `completed` \| `failed`. Batch: created → `isProcessing` → `isCompleted` |
+| Terminal states | `completed`, `cancelled` | Task: `completed` or `failed` (both terminal). Batch: `isCompleted` |
+| Who triggers transitions | Creator, contributor, verifier, or any caller (for `expire_bounty`) | Contract owner only (`onlyOwner` on every state-changing entry point) |
+| Re-entrant transitions allowed? | No — each function guards against re-entering its own precondition (e.g. "bounty already assigned") | No — `processBatchParallel` uses `nonReentrant` and batch/task completion flags are one-way |
+| Failure handling | Guards `require`/panic before any state mutation; no partial-failure state | Per-task `try/catch` records `failed` + `errorMessage` without reverting the whole batch |
+| Persistence | Bounty struct keyed by `bounty_{id}` in Soroban persistent storage, subject to TTL extension | Task/batch structs keyed by `taskCounter`/`batchCounter` in EVM contract storage (no TTL concept) |
+
+### Why the divergence is intentional
+
+- **Different problem domains.** The Soroban contract is the source of
+  truth for "what state is this bounty in from the product's perspective."
+  `BountyRefresh.sol` exists purely to amortize the cost of pushing
+  contributor metric updates to an `IBountyManager` implementation in
+  batches, and to make that work resumable/parallelizable. It has no
+  concept of "open" or "claimed" — it only knows "this contributor's
+  metrics need a refresh" and "did that refresh succeed or fail."
+- **Different failure semantics on purpose.** The Soroban lifecycle treats
+  an invalid transition as a hard panic (nothing should ever observe a
+  bounty in an inconsistent state). `BountyRefresh.sol`'s task lifecycle
+  treats an individual refresh failure as data (`TaskFailed`) rather than a
+  revert, because one contributor's metrics update failing should not block
+  the rest of the batch.
+- **Different authorization models on purpose.** Every bounty-lifecycle
+  transition in Soroban is driven by the relevant party's own
+  `require_auth()` (creator, contributor, verifier, or anyone for the
+  permissionless `expire_bounty`). Every state-changing entry point in
+  `BountyRefresh.sol` is restricted to the contract owner, because refresh
+  batching is an operational/maintenance action, not a bounty-participant
+  action.
+
+### Follow-up
+
+No behavioral changes are proposed here. If a future requirement ties
+`BountyRefresh.sol` batch outcomes back into the Soroban bounty status
+(e.g. auto-flagging a bounty when metric refresh repeatedly fails), that
+should be scoped as its own issue rather than folded into this
+documentation pass.
