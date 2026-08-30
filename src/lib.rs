@@ -7,8 +7,8 @@ mod errors;
 mod events;
 mod scval;
 mod storage;
+mod symbols;
 mod types;
-mod validation;
 
 pub use crate::errors::*;
 

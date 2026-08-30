@@ -23,4 +23,8 @@ Closes #
 - [ ] `cargo clippy` passes with no warnings
 - [ ] `cargo fmt` applied
 - [ ] PR description includes `Closes #<issue_id>`
-- [ ] If this PR changes `types.rs` struct fields, backward compatibility was checked against `docs/migration.md`
+
+## Storage schema changes (only if `src/types.rs` was modified)
+
+- [ ] Reviewed [docs/migration.md](docs/migration.md) backward-compatibility rules before adding, removing, or reordering fields on `Bounty`, `Contributor`, or other `#[contracttype]` structs
+- [ ] Chose the migration strategy from the versioning policy table (versioned struct, lazy write-back, or admin migration) and documented it in the PR description

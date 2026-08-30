@@ -18,3 +18,17 @@ describe("shortenAddress boundary cases", () => {
     expect(shortenAddress(address)).toBe("GABCDE…4567");
   });
 });
+
+describe("shortenAddress Stellar address formats", () => {
+  it("shortens a full Stellar account address (G..., 56 chars)", () => {
+    const address = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI";
+    expect(address).toHaveLength(56);
+    expect(shortenAddress(address)).toBe("GBZXN7…MADI");
+  });
+
+  it("shortens a full Stellar/Soroban contract address (C..., 56 chars)", () => {
+    const address = "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJNDDXV3CHKICUQIJQ3M";
+    expect(address).toHaveLength(56);
+    expect(shortenAddress(address)).toBe(`${address.slice(0, 6)}…${address.slice(-4)}`);
+  });
+});

@@ -6,7 +6,12 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    - cron: '0 6 * * 1'  # Weekly on Monday at 06:00 UTC
+    - cron: '0 6 * * 1'  # Weekly on Monday at 06:00 UTC, catches new advisories against unchanged deps
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   security:
@@ -23,6 +28,19 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Run cargo audit
-        # RUSTSEC-2024-0436: paste is unmaintained — it is a transitive dep of
-        # soroban-sdk that we cannot remove or replace.
+        # RUSTSEC-2024-0436: the `paste` crate is unmaintained (advisory
+        # RUSTSEC-2024-0436).  `paste` is pulled in transitively by
+        # `soroban-sdk` — it is not a direct dependency of this project, so
+        # we cannot remove or replace it ourselves.
+        #
+        # Remove this --ignore flag once soroban-sdk drops or replaces its
+        # dependency on `paste` (track upstream:
+        # https://github.com/stellar/rs-soroban-sdk).
         run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436
+
+      - name: Report audit trigger
+        if: always()
+        run: |
+          echo "### Security Audit" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Runs weekly via schedule in addition to push/pull_request, so new advisories against unchanged dependencies are still caught." >> $GITHUB_STEP_SUMMARY
