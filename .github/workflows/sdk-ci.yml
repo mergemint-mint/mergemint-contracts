@@ -1,0 +1,124 @@
+# .github/workflows/sdk-ci.yml
+#
+# CI pipeline for the TypeScript SDK (`sdk/`).
+#
+# Implements issue #667 — "add a `tsc --noEmit` gate for `sdk/` to CI" — and
+# issue #664 — "add a CI check that `sdk/` version bumps are reflected in
+# `CHANGELOG.md`". Before this workflow only the Rust jobs were gated, so a
+# type error in `sdk/` could land on `main` unnoticed.
+#
+# Jobs:
+#   typecheck  — `tsc --noEmit` over `sdk/src`
+#   test       — the sdk package's jest suite
+#   changelog  — a version bump in `sdk/package.json` must ship a CHANGELOG entry
+#
+# All jobs are scoped to changes under `sdk/` so they do not fire on unrelated
+# commits.
+
+name: SDK CI
+
+on:
+  push:
+    branches: [main, "feat/**", "fix/**", "docs/**", "ci/**"]
+    paths:
+      - "sdk/**"
+      - ".github/workflows/sdk-ci.yml"
+  pull_request:
+    paths:
+      - "sdk/**"
+      - "CHANGELOG.md"
+      - ".github/workflows/sdk-ci.yml"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. Typecheck
+  # --------------------------------------------------------------------------
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run typecheck
+
+  # --------------------------------------------------------------------------
+  # 2. Tests
+  # --------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test
+
+  # --------------------------------------------------------------------------
+  # 3. Changelog gate
+  # --------------------------------------------------------------------------
+  #
+  # A release is only discoverable if the version bump is documented, so when a
+  # PR changes the `version` field of `sdk/package.json` it must also touch
+  # `CHANGELOG.md`. PRs that leave the version alone are unaffected.
+  changelog:
+    name: Changelog entry for version bump
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require a CHANGELOG entry when sdk/package.json version changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # A brand-new sdk/package.json has no base revision; treat that as "no version".
+          base_json=$(git show "$BASE_SHA:sdk/package.json" 2>/dev/null || echo '{}')
+          base_version=$(printf '%s' "$base_json" \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).version??"")}catch{console.log("")}})')
+          head_version=$(node -p 'require("./sdk/package.json").version')
+
+          echo "base sdk version: ${base_version:-<none>}"
+          echo "head sdk version: $head_version"
+
+          if [ "$base_version" = "$head_version" ]; then
+            echo "✓ sdk/package.json version unchanged — no CHANGELOG entry required"
+            exit 0
+          fi
+
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -qx 'CHANGELOG.md'; then
+            echo "✓ sdk version bumped to $head_version and CHANGELOG.md was updated"
+            exit 0
+          fi
+
+          echo "✗ sdk/package.json version changed (${base_version:-<none>} -> $head_version) but CHANGELOG.md was not updated."
+          echo ""
+          echo "Add an entry describing the release under the appropriate heading in CHANGELOG.md."
+          exit 1

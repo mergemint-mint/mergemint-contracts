@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router-dom';
 import { WalletProvider, useWallet } from './lib/WalletContext';
 import { WalletConnectButton } from './components/WalletConnectButton';
+import { NetworkMismatchBanner } from './components/NetworkMismatchBanner';
 import { BountyList } from './pages/BountyList';
 import { BountyDetail } from './pages/BountyDetail';
 import { CreateBounty } from './pages/CreateBounty';
@@ -31,6 +32,7 @@ export default function App() {
     <WalletProvider>
       <BrowserRouter>
         <Nav />
+        <NetworkMismatchBanner />
         <Routes>
           <Route path="/" element={<BountyList />} />
           <Route path="/bounties/:id" element={<BountyDetail />} />

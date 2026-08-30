@@ -52,3 +52,30 @@ This is a design note only. Given the cross-repo scope (contracts, backend,
 frontend, and SDK all need coordinated changes), implementation should be
 tracked as a separate follow-up ticket with its own plan and tests
 (round-trip type checks wired into CI).
+
+## Decision record
+
+**What actually landed:** [#523](https://github.com/mergemint-mint/mergemint-contracts/issues/523)
+(PR [#544](https://github.com/mergemint-mint/mergemint-contracts/pull/544)) took
+a much narrower approach than either option above: it consolidated the `Bounty`/
+`Contributor` interfaces that were previously duplicated *within the SDK package*
+into a single `sdk/src/types.ts`. It did not implement contract-to-TypeScript
+codegen (Option 1) or a shared schema (Option 2), and it did not touch the
+backend or frontend.
+
+[#111](https://github.com/mergemint-mint/mergemint-contracts/issues/111) (a
+related but distinct ask — a storage-migration strategy for `Bounty` struct
+changes, not type-duplication itself) was closed without an associated
+implementation; that topic remains undocumented.
+
+**Remaining follow-up (not yet done):**
+- `mergemint-backend/src/scval.rs` and `mergemint-backend/src/dto.rs` still
+  hand-write their own shapes, independently of both the contract's
+  `src/types.rs` and `sdk/src/types.ts`.
+- `frontend/src/types.ts` and `frontend/src/lib/types.ts` still hand-write two
+  *different* shapes of `Bounty`/`Contributor` (e.g. `reward: string` vs.
+  `rewardAmount: bigint`), neither of which imports from `sdk/src/types.ts`.
+- The original problem this doc set out to solve — a contract field rename
+  silently going out of sync with the mergemint-backend/frontend/SDK — is therefore
+  still open outside the SDK package itself. The codegen-from-Rust approach
+  recommended above has not been attempted.
