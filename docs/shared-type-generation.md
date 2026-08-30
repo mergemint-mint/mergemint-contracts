@@ -76,6 +76,6 @@ implementation; that topic remains undocumented.
   *different* shapes of `Bounty`/`Contributor` (e.g. `reward: string` vs.
   `rewardAmount: bigint`), neither of which imports from `sdk/src/types.ts`.
 - The original problem this doc set out to solve — a contract field rename
-  silently going out of sync with the backend/frontend/SDK — is therefore
+  silently going out of sync with the mergemint-backend/frontend/SDK — is therefore
   still open outside the SDK package itself. The codegen-from-Rust approach
   recommended above has not been attempted.

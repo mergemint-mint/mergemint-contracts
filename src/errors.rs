@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT
 
-/// All contract error conditions in one place.
+//! Canonical contract error conditions.
+//!
+//! Each variant must be referenced from contract logic (`fail(ContractError::…)`)
+//! and have a unique panic message. `InvalidRewardToken` is enforced during
+//! `create_bounty` via a non-trapping token `balance` probe.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ContractError {
     BountyNotFound,
     BountyAlreadyAssigned,
+    AlreadyClaimed,
     BountyNotOpen,
     BountyNotInProgress,
     BountyHasNoAssignee,
@@ -27,11 +32,11 @@ pub enum ContractError {
     BountyNotDisputed,
     NotArbitrator,
     ApprovalThresholdExceedsVerifiers,
-    InvalidRewardToken,
     MilestoneAlreadyCompleted,
     NotAllMilestonesCompleted,
     InvalidMilestoneIndex,
     MilestoneRewardsMismatch,
+    RewardAmountOverflow,
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
@@ -44,6 +49,7 @@ pub const fn message(e: ContractError) -> &'static str {
     match e {
         ContractError::BountyNotFound => "bounty not found",
         ContractError::BountyAlreadyAssigned => "bounty already assigned",
+        ContractError::AlreadyClaimed => "bounty already claimed by contributor",
         ContractError::BountyNotOpen => "bounty not open",
         ContractError::BountyNotInProgress => "bounty is not in progress",
         ContractError::BountyHasNoAssignee => "bounty has no assignee",
@@ -70,10 +76,10 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::ApprovalThresholdExceedsVerifiers => {
             "approval_threshold cannot exceed the number of required_verifiers"
         }
-        ContractError::InvalidRewardToken => "invalid reward_token address",
         ContractError::MilestoneAlreadyCompleted => "milestone is already completed",
         ContractError::NotAllMilestonesCompleted => "not all milestones are completed",
         ContractError::InvalidMilestoneIndex => "invalid milestone index",
         ContractError::MilestoneRewardsMismatch => "milestone rewards do not sum to reward_amount",
+        ContractError::RewardAmountOverflow => "reward amount arithmetic overflow",
     }
 }
