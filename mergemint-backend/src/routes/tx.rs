@@ -9,8 +9,9 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::{
     acquire_idempotency, read_db, read_idempotency, IdempotencyEntry, SharedDb,
@@ -25,9 +26,62 @@ use crate::db::{
 pub struct AppState {
     pub db: SharedDb,
     pub idempotency: SharedIdempotencyStore,
+    /// In-memory fixed-window rate limiter for expensive, on-chain-submitting
+    /// routes such as `self_claim` (issue #670). Keyed by an opaque client
+    /// identifier (the claimant address). A production deployment should back
+    /// this with a shared store (Redis) so the limit holds across replicas;
+    /// the in-process map is sufficient for a single-instance stub backend.
+    pub rate_limiter: SharedRateLimiter,
     /// Fan-out channel for bounty state-change notifications, consumed by the
     /// `GET /bounties/stream` SSE handler (see `routes::bounties`).
     pub bounty_broadcast: tokio::sync::broadcast::Sender<String>,
+}
+
+/// Maximum `self_claim` calls allowed per `SELF_CLAIM_RATE_WINDOW_SECS` window,
+/// per claimant.
+pub const SELF_CLAIM_RATE_LIMIT: u32 = 10;
+/// Sliding-reset window length (seconds) for the `self_claim` rate limiter.
+const SELF_CLAIM_RATE_WINDOW_SECS: u64 = 60;
+
+#[doc(hidden)]
+pub struct RateBucket {
+    count: u32,
+    window_start: u64,
+}
+
+pub type SharedRateLimiter = Arc<Mutex<HashMap<String, RateBucket>>>;
+
+/// Construct a new in-process rate-limiter handle.
+pub fn new_shared_rate_limiter() -> SharedRateLimiter {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+impl AppState {
+    /// Fixed-window rate limiter for `self_claim`, keyed by `key` (the claimant
+    /// address). Returns `true` if the request is allowed, `false` if the limit
+    /// for the current window is already exhausted.
+    pub fn allow_self_claim(&self, key: &str) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut buckets = self.rate_limiter.lock().unwrap();
+        let bucket = buckets
+            .entry(key.to_string())
+            .or_insert(RateBucket {
+                count: 0,
+                window_start: now,
+            });
+        if now.saturating_sub(bucket.window_start) >= SELF_CLAIM_RATE_WINDOW_SECS {
+            bucket.window_start = now;
+            bucket.count = 0;
+        }
+        if bucket.count >= SELF_CLAIM_RATE_LIMIT {
+            return false;
+        }
+        bucket.count += 1;
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,13 +184,6 @@ fn finalize_idempotency_key(store: &SharedIdempotencyStore, key: String, result:
     }
 }
 
-/// Default self-claim rate limit: 5 relay submissions per claimant per minute.
-/// Staged for wiring into `self_claim` alongside `crate::rate_limit`.
-#[allow(dead_code)]
-pub const SELF_CLAIM_RATE_LIMIT: u32 = 5;
-#[allow(dead_code)]
-pub const SELF_CLAIM_RATE_WINDOW: Duration = Duration::from_secs(60);
-
 // ---------------------------------------------------------------------------
 // Error helpers
 // ---------------------------------------------------------------------------
@@ -204,7 +251,6 @@ impl AppError {
         (StatusCode::NOT_FOUND, Json(err))
     }
 
-    #[allow(dead_code)]
     pub fn too_many_requests(msg: impl Into<String>) -> (StatusCode, Json<AppError>) {
         let err = AppError {
             code: 429,
@@ -380,6 +426,15 @@ pub async fn self_claim(
             return Ok(response)
         }
     };
+
+    // Rate-limit expensive on-chain-submitting routes (#670). Keyed by the
+    // claimant so one user cannot hammer `self_claim`; a 429 is returned once
+    // the per-window allowance is exhausted.
+    if !state.allow_self_claim(&req.claimant) {
+        return Err(AppError::too_many_requests(
+            "rate limit exceeded for self_claim; retry after the window resets",
+        ));
+    }
 
     let result = self_claim_inner(&state, &req).await;
 
@@ -603,6 +658,7 @@ mod tests {
         Arc::new(AppState {
             db,
             idempotency: crate::db::new_shared_idempotency_store(),
+            rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
         })
     }
