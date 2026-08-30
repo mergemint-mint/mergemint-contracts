@@ -289,4 +289,133 @@ mod tests {
         assert_eq!(dec_contrib, 25);
         assert_eq!(dec_claims, 3);
     }
+
+    // ===========================================================================
+    // Issue 753 — boundary-value coverage for the scval conversion helpers.
+    //
+    // Note: `scval.rs` exposes custom encode/decode conversion helpers (not
+    // `TryFrom`/`Into` impls); these tests exercise the extreme values of each
+    // helper pair so the XDR boundary is covered at both ends.
+    // ===========================================================================
+
+    /// `encode_bounty`/`decode_bounty` round-trip at i128 min/max reward
+    /// amounts and u32::MAX max_assignees.
+    #[test]
+    fn test_encode_decode_bounty_boundaries() {
+        let env = Env::default();
+        let creator = Address::generate(&env);
+        let reward_token = Address::generate(&env);
+
+        let extremes: [i128; 4] = [i128::MIN, i128::MIN + 1, i128::MAX - 1, i128::MAX];
+        for amount in extremes {
+            let bounty = Bounty {
+                creator: creator.clone(),
+                reward_amount: amount,
+                reward_token: reward_token.clone(),
+                assignees: Vec::new(&env),
+                max_assignees: u32::MAX,
+                status: Symbol::new(&env, "open"),
+                min_reputation: 0,
+                deadline: None,
+                required_verifiers: None,
+                approval_threshold: 1,
+                tags: Vec::new(&env),
+                milestones: Vec::new(&env),
+            };
+
+            let (enc_creator, enc_amount, enc_token, enc_assignees, enc_status) =
+                encode_bounty(&bounty);
+            let (dec_creator, dec_amount, dec_token, dec_assignees, dec_status) = decode_bounty(
+                &enc_creator,
+                enc_amount,
+                &enc_token,
+                enc_assignees,
+                &enc_status,
+            );
+
+            assert_eq!(dec_creator, creator);
+            assert_eq!(dec_amount, amount, "reward_amount boundary must round-trip");
+            assert_eq!(dec_token, reward_token);
+            assert_eq!(dec_assignees, u32::MAX);
+            assert_eq!(dec_status, Symbol::new(&env, "open"));
+        }
+    }
+
+    /// `encode_contributor`/`decode_contributor` round-trip at u32::MAX and
+    /// i128 min/max for the numeric fields.
+    #[test]
+    fn test_encode_decode_contributor_boundaries() {
+        let env = Env::default();
+        let address = Address::generate(&env);
+
+        for total_earned in [i128::MIN, i128::MAX] {
+            let contributor = Contributor {
+                address: address.clone(),
+                reputation: u32::MAX,
+                total_earned,
+                contribution_count: u32::MAX,
+                active_claims: u32::MAX,
+                metadata: None,
+            };
+
+            let (enc_addr, enc_rep, enc_earned, enc_contrib, enc_claims) =
+                encode_contributor(&contributor);
+            let (dec_addr, dec_rep, dec_earned, dec_contrib, dec_claims) =
+                decode_contributor(&enc_addr, enc_rep, enc_earned, enc_contrib, enc_claims);
+
+            assert_eq!(dec_addr, address);
+            assert_eq!(dec_rep, u32::MAX);
+            assert_eq!(dec_earned, total_earned, "total_earned boundary must round-trip");
+            assert_eq!(dec_contrib, u32::MAX);
+            assert_eq!(dec_claims, u32::MAX);
+        }
+    }
+
+    /// `encode_bounty_meta`/`decode_bounty_meta` round-trip with an empty
+    /// description string (empty-vector/string boundary).
+    #[test]
+    fn test_encode_decode_bounty_meta_empty_string_boundary() {
+        let env = Env::default();
+        let title = Symbol::new(&env, "empty_desc");
+        let description = String::from_str(&env, "");
+
+        let (enc_title, enc_desc) = encode_bounty_meta(&crate::types::BountyMeta {
+            title: title.clone(),
+            description: description.clone(),
+        });
+        let (dec_title, dec_desc) = decode_bounty_meta(&enc_title, &enc_desc);
+
+        assert_eq!(dec_title, title);
+        assert_eq!(dec_desc, description);
+        assert_eq!(dec_desc.len(), 0, "empty description must survive the round-trip");
+    }
+
+    /// `address_scval`/`decode_address` round-trip: the encoded form must
+    /// decode back to the identical address (valid encoding boundary).
+    #[test]
+    fn test_address_scval_decode_roundtrip() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+
+        let encoded = address_scval(&addr);
+        assert!(!encoded.is_empty());
+
+        // `encoded` is already the XDR display string; decode via the same
+        // path decode_address uses internally (String -> Address).
+        let decoded = Address::from_string(&encoded);
+        assert_eq!(decoded, addr, "encoded address must decode to the same address");
+    }
+
+    /// `symbol_scval`/`decode_symbol` round-trip with an empty symbol name
+    /// (minimum-length boundary).
+    #[test]
+    fn test_symbol_scval_empty_boundary() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "");
+
+        let encoded = symbol_scval(&sym);
+        let decoded = decode_symbol(&encoded);
+
+        assert_eq!(decoded, sym);
+    }
 }

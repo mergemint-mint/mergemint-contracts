@@ -36,7 +36,10 @@ Save the contract ID from output.
 
 ## Test Contract
 
+> **Note:** Soroban contract tests run against the compiled WASM. Build the contract before running tests so the test harness picks up the latest binary.
+
 ```bash
+cargo build --release --target wasm32-unknown-unknown
 cargo test
 ```
 
@@ -57,3 +60,26 @@ stellar contract invoke \
 ```
 
 Replace `<CONTRACT_ID>` with your deployed contract ID and `<USDC_ADDRESS>` with actual token address.
+
+---
+
+## Sub-projects
+
+This repository contains more than just the Soroban contract. Two additional sub-projects live alongside it, each with their own dependencies and setup instructions:
+
+- **`mergemint-frontend/`** — React/TypeScript frontend. See `mergemint-frontend/package.json` for scripts (`npm install && npm run dev`).
+- **`mergemint-backend/`** — Rust/Axum backend service. See `mergemint-backend/Cargo.toml` and its own `README` or `CHANGELOG.md` for setup.
+
+---
+
+## Full Stack (Docker)
+
+A `docker-compose.yml` at the repo root orchestrates the contract node, backend, and frontend together. To bring up the full stack locally:
+
+```bash
+docker compose up --build
+```
+
+This is the recommended approach for integration testing and local end-to-end development. Refer to `docker-compose.yml` for service names, ports, and environment variable overrides.
+
+A `Makefile` is also provided with convenience targets — run `make help` (or just `make`) to see available commands.

@@ -93,11 +93,13 @@ impl MergeMintContract {
         cursor: Option<u32>,
         limit: u32,
     ) -> (Vec<BountyId>, Option<u32>) {
+        crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Status, &status);
         let all = storage::get_bounties_by_status(&env, &status);
         paginate(&env, all, cursor, limit)
     }
 
     pub fn get_status_count(env: Env, status: Symbol) -> u32 {
+        crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Status, &status);
         storage::get_status_count(&env, &status)
     }
 
@@ -137,6 +139,7 @@ impl MergeMintContract {
     /// result with `get_open_bounties` first and apply filtering client-side
     /// for large lists.
     pub fn get_bounties_by_tag(env: Env, tag: Symbol) -> Vec<BountyId> {
+        crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Tag, &tag);
         let open_ids = storage::get_open_bounties(&env);
         let mut result = Vec::new(&env);
         for id in open_ids.iter() {

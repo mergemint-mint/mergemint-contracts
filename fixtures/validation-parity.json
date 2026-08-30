@@ -1,0 +1,25 @@
+{
+  "$comment": "Shared fixture asserting app/src/lib/validation.ts and mergemint-backend agree on the reward-amount and description-length rules. Edit both consumers (app/src/lib/validation.test.ts, mergemint-backend/src/validation.rs) if you change a case here.",
+  "rewardAmount": [
+    { "value": "10", "valid": true, "reason": "plain positive integer" },
+    { "value": "10.5", "valid": true, "reason": "one decimal place" },
+    { "value": "0.0000001", "valid": true, "reason": "max 7 decimal places" },
+    { "value": "1000000", "valid": true, "reason": "large positive integer" },
+    { "value": "0", "valid": false, "reason": "must be strictly positive" },
+    { "value": "-5", "valid": false, "reason": "negative amounts are rejected" },
+    { "value": "10.12345678", "valid": false, "reason": "more than 7 decimal places" },
+    { "value": "", "valid": false, "reason": "empty string is not a number" },
+    { "value": "abc", "valid": false, "reason": "non-numeric input" },
+    { "value": "1e10", "valid": false, "reason": "scientific notation is not accepted" },
+    { "value": "10.", "valid": false, "reason": "trailing decimal point with no digits" }
+  ],
+  "descriptionLength": [
+    { "value": "Fix the payout bug", "valid": true, "reason": "well under the limit" },
+    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": true, "reason": "32 chars, at the Symbol limit" },
+    { "value": "a", "valid": true, "reason": "single character is still valid" },
+    { "value": "", "valid": false, "reason": "empty description is rejected" },
+    { "value": "   ", "valid": false, "reason": "whitespace-only description is rejected" },
+    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": false, "reason": "33 chars, one over the Symbol limit" },
+    { "value": "this description is far too long to be stored on-chain as a Soroban Symbol", "valid": false, "reason": "well over the 32-char Symbol limit" }
+  ]
+}
