@@ -47,3 +47,26 @@ export interface CreateBountyParams {
   approvalThreshold?: number;
   milestones?: Array<{ description: string; reward: bigint; completed: boolean }>;
 }
+
+export type MergeMintErrorCode =
+  | 'INVALID_CONFIG'
+  | 'INVALID_CONTRACT_ID'
+  | 'INVALID_RPC_URL'
+  | 'INVALID_ARGUMENT'
+  | 'SIMULATION_FAILED'
+  | 'TRANSACTION_FAILED'
+  | 'UNAUTHORIZED'
+  | 'NOT_FOUND';
+
+export class MergeMintSdkError extends Error {
+  public readonly code: MergeMintErrorCode;
+  public readonly details?: unknown;
+
+  constructor(message: string, code: MergeMintErrorCode = 'INVALID_ARGUMENT', details?: unknown) {
+    super(message);
+    this.name = 'MergeMintSdkError';
+    this.code = code;
+    this.details = details;
+    Object.setPrototypeOf(this, MergeMintSdkError.prototype);
+  }
+}
