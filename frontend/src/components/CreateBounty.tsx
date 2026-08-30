@@ -1,8 +1,17 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTxFlow } from "../hooks/useTxFlow";
 import { TxResultBanner } from "./TxResultBanner";
 import { TxButton } from "./TxButton";
 import { NetworkName } from "../lib/types";
+import { SYMBOL_MAX_LENGTH } from "../lib/validation";
+
+const VALIDATION_DEBOUNCE_MS = 200;
+
+function validateForm(title: string, description: string): string | null {
+  if (title.trim() === "") return "Title is required.";
+  if (description.trim() === "") return "Description is required.";
+  return null;
+}
 
 interface CreateBountyProps {
   network: NetworkName;
@@ -24,7 +33,15 @@ export function CreateBounty({ network, onSubmit }: CreateBountyProps) {
   const [verifiers, setVerifiers] = useState<string[]>([""]);
   const [threshold, setThreshold] = useState(1);
   const [maxAssignees, setMaxAssignees] = useState(1);
+  const [validationError, setValidationError] = useState<string | null>(null);
   const { pending, error, result, run } = useTxFlow(network);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setValidationError(validateForm(title, description));
+    }, VALIDATION_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [title, description]);
 
   async function perform() {
     await run(() =>
@@ -49,11 +66,21 @@ export function CreateBounty({ network, onSubmit }: CreateBountyProps) {
     >
       <label>
         Title
-        <input value={title} onChange={(e) => setTitle(e.target.value)} />
+        <input
+          value={title}
+          maxLength={SYMBOL_MAX_LENGTH}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+        <CharCounter length={title.length} max={SYMBOL_MAX_LENGTH} />
       </label>
       <label>
         Description
-        <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
+        <textarea
+          value={description}
+          maxLength={SYMBOL_MAX_LENGTH}
+          onChange={(e) => setDescription(e.target.value)}
+        />
+        <CharCounter length={description.length} max={SYMBOL_MAX_LENGTH} />
       </label>
       <label>
         Reward amount
@@ -115,6 +142,8 @@ export function CreateBounty({ network, onSubmit }: CreateBountyProps) {
           </select>
         </label>
       </details>
+
+      {validationError && <p className="error">{validationError}</p>}
 
       <TxButton type="submit" pending={pending} pendingLabel="Submitting…">
         Create bounty

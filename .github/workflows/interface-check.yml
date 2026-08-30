@@ -44,10 +44,21 @@ jobs:
         run: |
           if diff -q interface-baseline.json current-interface.json > /dev/null 2>&1; then
             echo "✓ Interface compatible"
+            echo "✓ Contract interface matches \`interface-baseline.json\`." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "✗ Interface has changed!"
             echo ""
             echo "Changes:"
             diff interface-baseline.json current-interface.json || true
+            {
+              echo "## ✗ Contract interface changed"
+              echo ""
+              echo "The generated interface differs from \`interface-baseline.json\`."
+              echo "Update the baseline intentionally if this change is expected."
+              echo ""
+              echo '```diff'
+              diff interface-baseline.json current-interface.json || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi

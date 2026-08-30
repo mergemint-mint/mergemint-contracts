@@ -172,7 +172,7 @@ pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: b
         // were silently skipped.  A future contract upgrade emitting a new
         // event kind would be invisible in production logs.  The warn! here
         // makes that immediately observable.
-        if extract_bounty_id_hex(&[event_name.clone()], &event.value_hex).is_none() {
+        if extract_bounty_id_hex(std::slice::from_ref(&event_name), &event.value_hex).is_none() {
             warn!("unrecognized contract event: {event_name}");
             // Still track the ledger so unrecognised events don't stall progress.
         }
@@ -371,6 +371,107 @@ mod tests {
         poll_once(&mut state, &events, true);
         // highest_ledger never advanced past 50 because every event was skipped.
         assert_eq!(state.last_ledger, 50);
+    }
+
+    // ── Event-schema drift test (docs/event-schema.md) ─────────────────────
+    //
+    // `docs/event-schema.md` is the source of truth for which events the
+    // contract emits; SINGLE_VALUE_EVENTS / TUPLE_EVENTS above encode how the
+    // indexer expects to parse each one. Nothing previously verified the two
+    // stayed in sync — this section adds that check, end-to-end parsing
+    // coverage for a synthetic event of each documented shape, and a check
+    // that an event carrying an undocumented field is still handled
+    // gracefully.
+
+    /// Event names as documented in `docs/event-schema.md`. Kept in sync by
+    /// hand: if this list and `SINGLE_VALUE_EVENTS`/`TUPLE_EVENTS` diverge,
+    /// `test_indexer_event_lists_match_documented_schema` fails, flagging
+    /// that either the doc or the indexer needs updating.
+    const DOCUMENTED_EVENTS: &[&str] = &[
+        "bounty_created",
+        "bounty_claimed",
+        "bounty_disputed",
+        "bounty_completed",
+        "reward_paid",
+        "bounty_cancelled",
+        "bounty_expired",
+        "approval_recorded",
+        "dispute_resolved",
+    ];
+
+    /// The indexer's own event-name lists must contain exactly the events
+    /// documented in `docs/event-schema.md` — no more, no less. This is the
+    /// drift check: a contract event added to the doc but not to
+    /// `SINGLE_VALUE_EVENTS`/`TUPLE_EVENTS` (or vice versa) fails here.
+    #[test]
+    fn test_indexer_event_lists_match_documented_schema() {
+        let mut indexer_events: Vec<&str> = SINGLE_VALUE_EVENTS
+            .iter()
+            .chain(TUPLE_EVENTS.iter())
+            .copied()
+            .collect();
+        indexer_events.sort_unstable();
+
+        let mut documented: Vec<&str> = DOCUMENTED_EVENTS.to_vec();
+        documented.sort_unstable();
+
+        assert_eq!(
+            indexer_events, documented,
+            "SINGLE_VALUE_EVENTS + TUPLE_EVENTS in indexer.rs must match the \
+             event names documented in docs/event-schema.md exactly"
+        );
+    }
+
+    /// Feed the indexer a synthetic event for every event kind documented in
+    /// `docs/event-schema.md`, confirming each one parses to a bounty id and
+    /// advances `last_ledger` — i.e. the indexer's parsing logic actually
+    /// matches the documented schema, not just the constant lists above.
+    #[test]
+    fn test_all_documented_events_parse_correctly() {
+        for &name in DOCUMENTED_EVENTS {
+            let mut state = IndexerState { last_ledger: 0 };
+            let events = vec![ok_event(name, 1)];
+
+            poll_once(&mut state, &events, true);
+
+            assert_eq!(
+                state.last_ledger, 1,
+                "documented event '{name}' should advance last_ledger on a complete page"
+            );
+            assert!(
+                extract_bounty_id_hex(&[name.to_owned()], "aabbccdd").is_some(),
+                "documented event '{name}' should extract a bounty id"
+            );
+        }
+    }
+
+    /// An event carrying a field the documented schema doesn't describe (an
+    /// extra topic beyond the `(event_name, address)` shape every event in
+    /// `docs/event-schema.md` uses) must be handled gracefully: the indexer
+    /// only inspects `topics[0]`, so an undocumented extra topic is ignored
+    /// rather than causing a panic or parse failure.
+    #[test]
+    fn test_event_with_unexpected_extra_topic_handled_gracefully() {
+        let mut state = IndexerState { last_ledger: 0 };
+        let events = vec![RawEvent {
+            topics: vec![
+                TopicDecodeResult::Ok("bounty_created".to_owned()),
+                TopicDecodeResult::Ok("some_address".to_owned()),
+                // Extra, undocumented topic — schema drift on the contract
+                // side must not break parsing.
+                TopicDecodeResult::Ok("unexpected_extra_field".to_owned()),
+            ],
+            value_hex: "aabbccdd".to_owned(),
+            ledger: 5,
+        }];
+
+        poll_once(&mut state, &events, true);
+
+        assert_eq!(
+            state.last_ledger, 5,
+            "an event with an extra, undocumented topic should still be parsed \
+             using topics[0] and must not block ledger advancement"
+        );
     }
 
     // ── Crash-resume: cursor correctness after a crash mid-batch ──────────

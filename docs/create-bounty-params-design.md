@@ -29,7 +29,7 @@ pub fn create_bounty(
 - **Creator through tags** follow the existing order, preserving backward compatibility for callers that do not use multi-assignee/multi-sig.
 - **`max_assignees`** comes after tags because it is required and affects claim behavior.
 - **`required_verifiers`** comes after `max_assignees` because it is optional (`Option<Vec<Address>>`) and groups the multi-sig feature together.
-- **`approval_threshold`** comes last; it is relevant only when `required_verifiers` is `Some`, but always supplied (default `1`).
+- **`approval_threshold`** comes after `required_verifiers`; it is relevant only when `required_verifiers` is `Some`, but always supplied (default `1`).
 - **`milestones`** comes last; it is optional and represents staged payouts.
 
 ## Backend JSON Field Names
@@ -81,8 +81,9 @@ interface CreateBountyParams {
 | `tags.len() > 5` | Panic `TooManyTags` |
 | `max_assignees < 1` | Panic `MaxAssigneesMustBePositive` |
 | `required_verifiers` is `Some` and `approval_threshold > required_verifiers.len()` | Panic `ApprovalThresholdExceedsVerifiers` |
+| `reward_token` is not a valid Soroban token contract | The `TokenClient::balance` probe traps with a host error. `create_bounty` does not raise the dedicated `InvalidRewardToken` variant today — it relies on the token call itself failing. |
 | `milestones` non-empty and sum of rewards != `reward_amount` | Panic `MilestoneRewardsMismatch` |
-| `reward_token` is not a valid Soroban token contract | Panic `InvalidRewardToken` |
+| `deadline` is `Some` and already `< ledger().sequence()` | Panic `BountyDeadlinePassed` |
 | `required_verifiers` is `None` | `approval_threshold` is stored but unused; `approve_completion` falls back to single-verifier completion |
 
 ## Consuming Repos

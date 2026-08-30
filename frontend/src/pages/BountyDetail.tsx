@@ -6,7 +6,7 @@ import { mapErrorMessage } from '../utils/format';
 import { StatusBadge } from '../components/StatusBadge';
 import { BountyDetailSkeleton } from '../components/BountyDetailSkeleton';
 
-export function BountyDetail() {
+function BountyDetailInner() {
   const { id } = useParams<{ id: string }>();
   const [bounty, setBounty] = useState<Bounty | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -51,5 +51,13 @@ export function BountyDetail() {
         {claiming ? 'Claiming...' : 'Claim Bounty'}
       </button>
     </div>
+  );
+}
+
+export function BountyDetail() {
+  return (
+    <BountyErrorBoundary>
+      <BountyDetailInner />
+    </BountyErrorBoundary>
   );
 }

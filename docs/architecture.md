@@ -30,41 +30,69 @@ EVM-side batch refresh mechanism or its mock/test harness, you want
 
 ---
 
+## Module Layout
+
+`MergeMintContract` lives in `src/contract/` as a directory module rather than a
+single file. `mod.rs` declares the `#[contract]` struct and pulls the other
+files in via `include!`, so all three still compile as one `impl` block:
+
+```
+src/contract/
+├── mod.rs           — contract struct definition; include!()s the files below
+├── mutations.rs      — state-changing entry points (create_bounty, claim_bounty,
+│                       complete_milestone, complete_bounty, approve_completion,
+│                       raise_dispute, resolve_dispute, update_contributor_metadata,
+│                       cancel_bounty, expire_bounty)
+├── queries.rs         — read-only entry points (get_bounty, get_contributor,
+│                       get_bounty_count, get_bounties_by_status, get_status_count,
+│                       get_open_bounties, get_bounties_by_tag,
+│                       get_contributor_active_bounty, get_bounties_by_creator, ...)
+│                       plus the shared `paginate()` helper
+└── queries_test.rs    — unit tests for the query helpers (`mod tests`)
+```
+
 ## Data Flow
 
 ```
 User (Frontend)
     │
     ▼
-MergeMintContract
+MergeMintContract (src/contract/mod.rs)
     │
-    ├── create_bounty()
-    │   ├── Validates creator auth
-    │   ├── Stores bounty in persistent storage
-    │   └── Emits bounty_created event
+    ├── mutations.rs
+    │   ├── create_bounty()
+    │   │   ├── Validates creator auth
+    │   │   ├── Stores bounty in persistent storage
+    │   │   └── Emits bounty_created event
+    │   │
+    │   ├── claim_bounty()
+    │   │   ├── Validates contributor auth
+    │   │   ├── Assigns contributor to bounty
+    │   │   └── Emits bounty_claimed event
+    │   │
+    │   ├── complete_bounty()
+    │   │   ├── Validates verifier auth
+    │   │   ├── Transfers tokens via TokenClient
+    │   │   ├── Updates contributor reputation
+    │   │   ├── Emits bounty_completed event
+    │   │   └── Emits reward_paid event
+    │   │
+    │   ├── cancel_bounty()
+    │   │   ├── Validates creator auth
+    │   │   ├── Sets status to "cancelled"
+    │   │   └── Emits bounty_cancelled event
+    │   │
+    │   └── expire_bounty()
+    │       ├── Validates caller auth (permissionless)
+    │       ├── Checks deadline has passed
+    │       ├── Sets status to "cancelled"
+    │       └── Emits bounty_expired event
     │
-    ├── claim_bounty()
-    │   ├── Validates contributor auth
-    │   ├── Assigns contributor to bounty
-    │   └── Emits bounty_claimed event
-    │
-    ├── complete_bounty()
-    │   ├── Validates verifier auth
-    │   ├── Transfers tokens via TokenClient
-    │   ├── Updates contributor reputation
-    │   ├── Emits bounty_completed event
-    │   └── Emits reward_paid event
-    │
-    ├── cancel_bounty()
-    │   ├── Validates creator auth
-    │   ├── Sets status to "cancelled"
-    │   └── Emits bounty_cancelled event
-    │
-    └── expire_bounty()
-        ├── Validates caller auth (permissionless)
-        ├── Checks deadline has passed
-        ├── Sets status to "cancelled"
-        └── Emits bounty_expired event
+    └── queries.rs
+        └── get_bounty(), get_contributor(), get_bounty_count(),
+            get_bounties_by_status(), get_status_count(),
+            get_open_bounties(), get_bounties_by_tag(), ... (read-only,
+            no auth, no storage writes)
 ```
 
 ## Storage Layout

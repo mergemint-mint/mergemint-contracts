@@ -1,0 +1,3 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`BountyCard > matches the skeleton snapshot when loading is true 1`] = `"<div class="bounty-card bounty-card--loading" aria-busy="true" aria-label="Loading bounty"><span class="bounty-card__id bounty-card__skeleton-line"></span><span class="bounty-card__creator bounty-card__skeleton-line"></span><span class="bounty-card__reward bounty-card__skeleton-line"></span><span class="bounty-card__status bounty-card__skeleton-line"></span></div>"`;
