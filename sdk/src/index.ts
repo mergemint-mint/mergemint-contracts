@@ -11,7 +11,14 @@ import {
 } from "@stellar/stellar-sdk";
 
 export * from "./types";
-import { NetworkConfig, Bounty, BountyMeta, Contributor, CreateBountyParams } from "./types";
+import {
+  NetworkConfig,
+  Bounty,
+  BountyMeta,
+  Contributor,
+  CreateBountyParams,
+  RetryOptions,
+} from "./types";
 
 export const TESTNET: Omit<NetworkConfig, "contractId"> = {
   rpcUrl: "https://soroban-testnet.stellar.org",
@@ -24,13 +31,6 @@ export const MAINNET: Omit<NetworkConfig, "contractId"> = {
   rpcUrl: "https://mainnet.stellar.validationcloud.io/v1/XCa...",
   networkPassphrase: Networks.PUBLIC,
 };
-  rewardToken: string;
-  minReputation: number;
-  deadline: number | null;
-  tags: string[];
-  requiredVerifiers?: string[];
-  approvalThreshold?: number;
-}
 
 // === Helpers
 
@@ -38,7 +38,7 @@ function addressToScVal(address: string): xdr.ScVal {
   return new Address(address).toScVal();
 }
 
-function symbolToScVal(value: string): xdr.ScVal {
+export function symbolToScVal(value: string): xdr.ScVal {
   if (value.length > 32) {
     throw new Error(`value exceeds 32-character Symbol limit: ${value}`);
   }
@@ -161,6 +161,30 @@ function parseContributor(raw: unknown): Contributor {
   };
 }
 
+// === Retry
+
+const NO_RETRY: RetryOptions = { attempts: 1, backoffMs: 0 };
+
+function normalizeRetry(retry: RetryOptions | undefined): RetryOptions {
+  if (!retry) return NO_RETRY;
+  if (!Number.isInteger(retry.attempts) || retry.attempts < 1) {
+    throw new Error(
+      `Invalid retry.attempts: expected an integer >= 1, got ${retry.attempts}`
+    );
+  }
+  if (!Number.isFinite(retry.backoffMs) || retry.backoffMs < 0) {
+    throw new Error(
+      `Invalid retry.backoffMs: expected a number >= 0, got ${retry.backoffMs}`
+    );
+  }
+  return { attempts: retry.attempts, backoffMs: retry.backoffMs };
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // === SDK
 
 export class MergeMintSDK {
@@ -168,7 +192,19 @@ export class MergeMintSDK {
   private readonly contract: Contract;
   private readonly networkPassphrase: string;
   private readonly contractId: string;
+  private readonly retry: RetryOptions;
 
+  /**
+   * Creates an SDK bound to a single Soroban RPC endpoint and contract.
+   *
+   * @param config - Network configuration. `rpcUrl` must be a real provider
+   * endpoint, `contractId` the deployed MergeMint contract, and
+   * `networkPassphrase` the passphrase of the target network (see {@link TESTNET}
+   * and {@link MAINNET}). Pass `retry` to make every RPC round-trip tolerate
+   * transient failures — see {@link RetryOptions}.
+   * @throws Error if `rpcUrl` still contains a placeholder, or if `retry` holds
+   * an out-of-range `attempts` or `backoffMs`.
+   */
   constructor(config: NetworkConfig) {
     if (!config.contractId || typeof config.contractId !== "string" || config.contractId.trim() === "") {
       throw new Error("Invalid contractId: contractId must be a non-empty string.");
@@ -183,10 +219,20 @@ export class MergeMintSDK {
     this.contract = new Contract(config.contractId.trim());
     this.networkPassphrase = config.networkPassphrase;
     this.contractId = config.contractId.trim();
+    this.retry = normalizeRetry(config.retry);
   }
 
   // === Read methods (no transaction needed)
 
+  /**
+   * Reads a single bounty by id.
+   *
+   * @param bountyId - Bounty id as a hex-encoded `BytesN<32>` string.
+   * @returns The decoded {@link Bounty}, or `null` when the contract account is
+   * unreachable, the simulation errors, or no bounty exists for that id.
+   * @throws Error if `bountyId` is not valid hex, or if the RPC transport fails
+   * on every attempt allowed by the configured retry policy.
+   */
   async getBounty(bountyId: string): Promise<Bounty | null> {
     const result = await this.simulateReadCall("get_bounty", [
       hexToBytesN(bountyId),
@@ -195,6 +241,15 @@ export class MergeMintSDK {
     return parseBounty(scValToNative(result));
   }
 
+  /**
+   * Reads the off-chain-facing title and description stored for a bounty.
+   *
+   * @param bountyId - Bounty id as a hex-encoded `BytesN<32>` string.
+   * @returns The {@link BountyMeta}, or `null` when the contract account is
+   * unreachable, the simulation errors, or no metadata exists for that id.
+   * @throws Error if `bountyId` is not valid hex, or if the RPC transport fails
+   * on every attempt allowed by the configured retry policy.
+   */
   async getBountyMeta(bountyId: string): Promise<BountyMeta | null> {
     const result = await this.simulateReadCall("get_bounty_meta", [
       hexToBytesN(bountyId),
@@ -204,6 +259,15 @@ export class MergeMintSDK {
     return { title: raw.title, description: raw.description };
   }
 
+  /**
+   * Reads a contributor's on-chain reputation record.
+   *
+   * @param address - Stellar account address (`G...`) or contract address (`C...`).
+   * @returns The decoded {@link Contributor}, or `null` when the contract account
+   * is unreachable, the simulation errors, or the address has no record.
+   * @throws Error if `address` is not a valid Stellar address, or if the RPC
+   * transport fails on every attempt allowed by the configured retry policy.
+   */
   async getContributor(address: string): Promise<Contributor | null> {
     const result = await this.simulateReadCall("get_contributor", [
       addressToScVal(address),
@@ -212,12 +276,28 @@ export class MergeMintSDK {
     return parseContributor(scValToNative(result));
   }
 
+  /**
+   * Reads the total number of bounties ever created by the contract.
+   *
+   * @returns The count as a `bigint`; `0n` when the contract account is
+   * unreachable or the simulation errors.
+   * @throws Error if the RPC transport fails on every attempt allowed by the
+   * configured retry policy.
+   */
   async getBountyCount(): Promise<bigint> {
     const result = await this.simulateReadCall("get_bounty_count", []);
     if (!result) return 0n;
     return BigInt(scValToNative(result) as string | number | bigint);
   }
 
+  /**
+   * Reads the ids of every bounty currently in the `open` state.
+   *
+   * @returns Bounty ids as hex-encoded strings; an empty array when the contract
+   * account is unreachable or the simulation errors.
+   * @throws Error if the RPC transport fails on every attempt allowed by the
+   * configured retry policy.
+   */
   async getOpenBounties(): Promise<string[]> {
     const result = await this.simulateReadCall("get_open_bounties", []);
     if (!result) return [];
@@ -227,6 +307,21 @@ export class MergeMintSDK {
 
   // === Write methods (return assembled transaction XDR for signing)
 
+  /**
+   * Builds a `create_bounty` transaction. The transaction is simulated and
+   * assembled but **not** signed or submitted — sign the returned XDR and submit
+   * it yourself.
+   *
+   * @param params - Bounty definition; see {@link CreateBountyParams}. `deadline`
+   * and `requiredVerifiers` are optional, `approvalThreshold` defaults to `1`
+   * and `milestones` defaults to an empty list.
+   * @param sourceAccount - Address that funds and signs the transaction.
+   * @returns The assembled transaction as a base64 XDR string.
+   * @throws Error if `params.title`, `params.description` or any milestone
+   * description exceeds the 32-character `Symbol` limit; if an address is
+   * invalid; if `sourceAccount` does not exist on the network; or if the
+   * simulation fails (message prefixed `Simulation failed:`).
+   */
   async createBounty(
     params: CreateBountyParams,
     sourceAccount: string
@@ -248,6 +343,19 @@ export class MergeMintSDK {
     return this.buildTransaction("create_bounty", args, sourceAccount);
   }
 
+  /**
+   * Builds a `claim_bounty` transaction assigning a contributor to an open
+   * bounty. Not signed or submitted.
+   *
+   * @param contributor - Address of the claiming contributor.
+   * @param bountyId - Bounty id as a hex-encoded `BytesN<32>` string.
+   * @param sourceAccount - Address that funds and signs the transaction.
+   * @returns The assembled transaction as a base64 XDR string.
+   * @throws Error if an address or `bountyId` is invalid, if `sourceAccount`
+   * does not exist on the network, or if the simulation fails — including when
+   * the contract rejects the claim for insufficient reputation, a passed
+   * deadline, or a full assignee list (message prefixed `Simulation failed:`).
+   */
   async claimBounty(
     contributor: string,
     bountyId: string,
@@ -257,6 +365,19 @@ export class MergeMintSDK {
     return this.buildTransaction("claim_bounty", args, sourceAccount);
   }
 
+  /**
+   * Builds a `complete_bounty` transaction, which distributes the reward to the
+   * assignees by basis-point share. Not signed or submitted.
+   *
+   * @param verifier - Address attesting that the work is complete.
+   * @param bountyId - Bounty id as a hex-encoded `BytesN<32>` string.
+   * @param sourceAccount - Address that funds and signs the transaction.
+   * @returns The assembled transaction as a base64 XDR string.
+   * @throws Error if an address or `bountyId` is invalid, if `sourceAccount`
+   * does not exist on the network, or if the simulation fails — including when
+   * the contract rejects the caller as an unauthorised verifier (message
+   * prefixed `Simulation failed:`).
+   */
   async completeBounty(
     verifier: string,
     bountyId: string,
@@ -266,6 +387,19 @@ export class MergeMintSDK {
     return this.buildTransaction("complete_bounty", args, sourceAccount);
   }
 
+  /**
+   * Builds an `approve_completion` transaction recording one verifier approval
+   * toward the bounty's `approvalThreshold`. Not signed or submitted.
+   *
+   * @param verifier - Address casting the approval.
+   * @param bountyId - Bounty id as a hex-encoded `BytesN<32>` string.
+   * @param sourceAccount - Address that funds and signs the transaction.
+   * @returns The assembled transaction as a base64 XDR string.
+   * @throws Error if an address or `bountyId` is invalid, if `sourceAccount`
+   * does not exist on the network, or if the simulation fails — including when
+   * the verifier is not in `requiredVerifiers` or has already approved (message
+   * prefixed `Simulation failed:`).
+   */
   async approveCompletion(
     verifier: string,
     bountyId: string,
@@ -275,6 +409,21 @@ export class MergeMintSDK {
     return this.buildTransaction("approve_completion", args, sourceAccount);
   }
 
+  /**
+   * Builds a `resolve_dispute` transaction settling a disputed bounty. Not
+   * signed or submitted.
+   *
+   * @param arbitrator - Address authorised to resolve the dispute.
+   * @param bountyId - Bounty id as a hex-encoded `BytesN<32>` string.
+   * @param resolution - `"complete"` pays the assignees; `"cancel"` refunds the
+   * creator.
+   * @param sourceAccount - Address that funds and signs the transaction.
+   * @returns The assembled transaction as a base64 XDR string.
+   * @throws Error if an address or `bountyId` is invalid, if `sourceAccount`
+   * does not exist on the network, or if the simulation fails — including when
+   * the bounty is not in the `disputed` state (message prefixed
+   * `Simulation failed:`).
+   */
   async resolveDispute(
     arbitrator: string,
     bountyId: string,
@@ -291,11 +440,36 @@ export class MergeMintSDK {
 
   // === Internals
 
+  /**
+   * Runs a single RPC round-trip under the configured retry policy, doubling the
+   * backoff after every failed attempt. Rethrows the last error once the
+   * attempt budget is exhausted.
+   */
+  private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
+    const { attempts, backoffMs } = this.retry;
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        return await operation();
+      } catch (err) {
+        lastError = err;
+        if (attempt < attempts - 1) {
+          await sleep(backoffMs * 2 ** attempt);
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
   private async simulateReadCall(
     method: string,
     args: xdr.ScVal[]
   ): Promise<xdr.ScVal | null> {
-    const account = await this.rpc.getAccount(this.contractId).catch(() => null);
+    const account = await this.withRetry(() =>
+      this.rpc.getAccount(this.contractId)
+    ).catch(() => null);
     if (!account) return null;
 
     const tx = new TransactionBuilder(account, {
@@ -306,7 +480,7 @@ export class MergeMintSDK {
       .setTimeout(30)
       .build();
 
-    const sim = await this.rpc.simulateTransaction(tx);
+    const sim = await this.withRetry(() => this.rpc.simulateTransaction(tx));
     if (SorobanRpc.Api.isSimulationError(sim)) return null;
 
     const result = (sim as SorobanRpc.Api.SimulateTransactionSuccessResponse)
@@ -319,7 +493,9 @@ export class MergeMintSDK {
     args: xdr.ScVal[],
     sourceAccount: string
   ): Promise<string> {
-    const account = await this.rpc.getAccount(sourceAccount);
+    const account = await this.withRetry(() =>
+      this.rpc.getAccount(sourceAccount)
+    );
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase: this.networkPassphrase,
@@ -328,7 +504,7 @@ export class MergeMintSDK {
       .setTimeout(30)
       .build();
 
-    const sim = await this.rpc.simulateTransaction(tx);
+    const sim = await this.withRetry(() => this.rpc.simulateTransaction(tx));
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
     }

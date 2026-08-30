@@ -1,7 +1,19 @@
+export interface RetryOptions {
+  /** Total number of attempts, including the first one. Must be >= 1. */
+  attempts: number;
+  /** Base delay in milliseconds; doubled after every failed attempt. Must be >= 0. */
+  backoffMs: number;
+}
+
 export interface NetworkConfig {
   rpcUrl: string;
   networkPassphrase: string;
   contractId: string;
+  /**
+   * Optional retry policy applied to every Soroban RPC round-trip. Omitted
+   * means a single attempt with no backoff, matching the previous behaviour.
+   */
+  retry?: RetryOptions;
 }
 
 export interface Bounty {
