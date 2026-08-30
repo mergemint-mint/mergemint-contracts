@@ -2,25 +2,37 @@
 
 Performance notes for the MergeMint contract. Instruction counts are measured in two ways:
 
-1. **Unit tests** — `env.budget().cpu_instruction_count()` in `src/test.rs` (see `benchmark_*` tests) measures CPU instructions consumed in the Soroban simulator during `cargo test`.
+1. **Unit tests** — `env.cost_estimate().budget().cpu_instruction_cost()` in `src/test.rs` (see `benchmark_*` tests) measures CPU instructions consumed in the Soroban simulator during `cargo test`. Each benchmark resets the tracker with `reset_tracker()` before the measured call.
 2. **On-chain simulation** — `simulateTransaction` RPC call returns `cost.cpuInsns` for real network measurements.
 
 ---
 
 ## CPU Instruction Baselines (Issue #289)
 
-Baseline measurements captured by the `benchmark_*` tests in `src/test.rs` using `env.budget().cpu_instruction_count()`. Run `cargo test benchmark` to reproduce.
+Baseline measurements captured by the `benchmark_*` tests in `src/test.rs` using `env.cost_estimate().budget().cpu_instruction_cost()`. Run `cargo test benchmark -- --nocapture` to reproduce.
 
 | Function | CPU Instructions | Soft Limit |
 |----------|-----------------|------------|
-| `create_bounty` | — | 1,000,000 |
-| `claim_bounty` | — | 1,000,000 |
-| `complete_bounty` | — | 1,000,000 |
-| `get_bounty` | — | 500,000 |
-| `get_contributor` | — | 500,000 |
-| `get_bounty_count` | — | 500,000 |
+| `create_bounty` | 533,419 | 1,000,000 |
+| `claim_bounty` | 619,507 | 1,000,000 |
+| `complete_bounty` | 782,959 | 1,000,000 |
+| `get_bounty` | 90,368 | 500,000 |
+| `get_contributor` | 68,465 | 500,000 |
+| `get_bounty_count` | 42,974 | 500,000 |
 
+> Measured 2026-08-28 on Soroban SDK 27.0.0 / `mergemint-contracts` main. Native Rust test harness counts are typically lower than on-chain WASM; use these as regression baselines, not production fee quotes.
+>
 > Values are populated by running `cargo test benchmark -- --nocapture` and reading the printed output.
+>
+> **2026-08-28 verification:** no `benchmark_*` tests currently exist in
+> `src/test.rs`, so the table above has never been populated — the `—`
+> placeholders are not stale figures, they simply predate any benchmark run.
+> `create_bounty`'s current storage pattern (1 read of `BountyCount`, then
+> writes to `Bounty`, `BountyMeta`, `BountyCount`, the status index, the
+> creator index, and the open-bounties index — 6 writes total) was checked
+> against `src/contract/mutations.rs` and matches what's described here.
+> Populating real `cpuInsns`/CPU-instruction figures still requires adding
+> `benchmark_*` tests per the note above and running them.
 
 ---
 

@@ -30,6 +30,10 @@ pub enum DataKey {
     BountyMeta(BountyId),
     Contributor(Address),
     ContributorBounties(Address),
+    /// Bounty IDs a contributor was an assignee on when the bounty reached a
+    /// terminal status (`"completed"` or `"cancelled"`). Maintained
+    /// incrementally by `storage::move_bounty_status`.
+    ContributorHistory(Address),
     /// Legacy single-blob status index — replaced by StatusIndexPage.
     /// Kept in the enum so existing serialised keys can still be read during a
     /// migration pass. New code must not write this variant.
