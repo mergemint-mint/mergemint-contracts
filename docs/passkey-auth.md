@@ -1,3 +1,5 @@
+> **Status: Planned** — The MergeMint contract requires no changes to support passkey-based callers (see [What Changes Are Required](#what-changes-are-required-in-the-mergemint-contract) below). The fee-sponsorship relayer and smart-wallet factory described here are **not yet implemented** in this repo.
+
 # Passkey Authentication for MergeMint Contributors
 
 A guide for platform integrators on how Soroban smart wallets and WebAuthn passkeys work, how a `claim_bounty` invocation is signed in a passkey-based setup, and what this means for the MergeMint contract.

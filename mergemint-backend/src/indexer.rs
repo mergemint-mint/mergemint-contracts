@@ -172,7 +172,7 @@ pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: b
         // were silently skipped.  A future contract upgrade emitting a new
         // event kind would be invisible in production logs.  The warn! here
         // makes that immediately observable.
-        if extract_bounty_id_hex(&[event_name.clone()], &event.value_hex).is_none() {
+        if extract_bounty_id_hex(std::slice::from_ref(&event_name), &event.value_hex).is_none() {
             warn!("unrecognized contract event: {event_name}");
             // Still track the ledger so unrecognised events don't stall progress.
         }
@@ -371,5 +371,81 @@ mod tests {
         poll_once(&mut state, &events, true);
         // highest_ledger never advanced past 50 because every event was skipped.
         assert_eq!(state.last_ledger, 50);
+    }
+
+    // ── Crash-resume: cursor correctness after a crash mid-batch ──────────
+    //
+    // `IndexerState.last_ledger` is the only piece of state persisted between
+    // runs, so "resuming correctly" means: after a crash that interrupts a
+    // batch before it is fully processed, the cursor must be exactly where it
+    // was before the crash — not advanced (which would skip the unprocessed
+    // remainder of the batch) and not regressed (which would reprocess events
+    // already handled in a prior, completed run).
+
+    /// Simulates a process crash partway through a batch: the run that
+    /// crashes only ever sees a *prefix* of the batch and is killed before
+    /// the page is marked complete (`page_complete = false`), mirroring a
+    /// process that dies mid-loop before reaching the completion check.
+    /// `last_ledger` must therefore stay exactly where it was.
+    ///
+    /// On restart the indexer re-fetches the same batch from `last_ledger`
+    /// (Horizon/Soroban RPC pagination is cursor-based, so this is exactly
+    /// what a real restart would do) and this time runs it to completion.
+    /// The resumed run must land on the correct highest ledger — proving no
+    /// events were skipped (cursor didn't jump ahead of the crash) and none
+    /// were double-processed (the resumed run is a single, ordinary
+    /// `poll_once` call, not a replay of partial work already applied).
+    #[test]
+    fn test_indexer_resumes_from_correct_cursor_after_crash_mid_batch() {
+        let mut state = IndexerState { last_ledger: 100 };
+
+        let full_batch = vec![
+            ok_event("bounty_created", 110),
+            ok_event("bounty_claimed", 120),
+            ok_event("reward_paid", 130),
+        ];
+
+        // ── Crash: the process dies after seeing only the first event of the
+        // batch, before the page was ever marked complete.
+        let seen_before_crash = &full_batch[..1];
+        poll_once(&mut state, seen_before_crash, false);
+        assert_eq!(
+            state.last_ledger, 100,
+            "cursor must not advance past a batch interrupted by a crash"
+        );
+
+        // ── Restart: resumes from last_ledger (100), re-fetches the full
+        // batch, and this time processes it to completion.
+        poll_once(&mut state, &full_batch, true);
+        assert_eq!(
+            state.last_ledger, 130,
+            "resumed run must advance to the highest ledger in the re-fetched batch, \
+             proving no events were skipped or reprocessed"
+        );
+    }
+
+    /// Two consecutive crashes must each leave the cursor untouched; only the
+    /// eventual completed run may advance it. Guards against an off-by-one
+    /// that only shows up after repeated interruptions.
+    #[test]
+    fn test_indexer_cursor_stable_across_repeated_crashes() {
+        let mut state = IndexerState { last_ledger: 500 };
+        let batch = vec![
+            ok_event("bounty_created", 510),
+            ok_event("bounty_claimed", 520),
+        ];
+
+        // Crash on attempt 1: nothing processed at all.
+        poll_once(&mut state, &[], false);
+        assert_eq!(state.last_ledger, 500);
+
+        // Crash on attempt 2: partial page again.
+        poll_once(&mut state, &batch[..1], false);
+        assert_eq!(state.last_ledger, 500);
+
+        // Attempt 3 succeeds: the resumed run picks up from the same cursor
+        // and completes.
+        poll_once(&mut state, &batch, true);
+        assert_eq!(state.last_ledger, 520);
     }
 }
