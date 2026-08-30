@@ -1,6 +1,9 @@
 // mergemint-backend/src/rate_limit.rs
 //
 // Per-key token-bucket rate limiter used to protect relay-wallet endpoints.
+// Staged for wiring into `self_claim`; retained here so the limiter and its
+// tuning constants have a single home once that lands.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::Mutex;

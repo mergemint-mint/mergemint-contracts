@@ -58,7 +58,7 @@ mod rate_limit;
 mod routes;
 
 use db::{new_shared_db, new_shared_idempotency_store};
-use routes::bounties::{list_bounties, list_bounties_by_assignee};
+use routes::bounties::{bounty_stream, claim_bounty, list_bounties, list_bounties_by_assignee};
 use routes::tx::{resolve_dispute, self_claim, AppState};
 
 /// Maximum allowed request body size (1 MiB).
@@ -106,9 +106,11 @@ async fn main() {
 
     let shared_db = new_shared_db();
     let idempotency = new_shared_idempotency_store();
+    let (bounty_broadcast, _) = tokio::sync::broadcast::channel(100);
     let state = Arc::new(AppState {
         db: shared_db,
         idempotency,
+        bounty_broadcast,
     });
 
     let app = Router::new()
@@ -119,6 +121,9 @@ async fn main() {
             "/bounties/assignee/:address",
             get(list_bounties_by_assignee),
         )
+        // ── Bounty push channel (#482) ─────────────────────────────────────
+        .route("/bounties/:id/claim", post(claim_bounty))
+        .route("/bounties/stream", get(bounty_stream))
         .with_state(state)
         // ── Correlation-ID middleware stack (#486) ──────────────────────────
         //

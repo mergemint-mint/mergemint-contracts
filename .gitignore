@@ -1,5 +1,6 @@
 # Build output
 target/
+node_modules/
 
 # Soroban test ledger snapshots — generated automatically, not hand-authored
 test_snapshots/

@@ -21,9 +21,13 @@ use crate::db::{
 // Shared application state
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct AppState {
     pub db: SharedDb,
     pub idempotency: SharedIdempotencyStore,
+    /// Fan-out channel for bounty state-change notifications, consumed by the
+    /// `GET /bounties/stream` SSE handler (see `routes::bounties`).
+    pub bounty_broadcast: tokio::sync::broadcast::Sender<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +131,10 @@ fn finalize_idempotency_key(store: &SharedIdempotencyStore, key: String, result:
 }
 
 /// Default self-claim rate limit: 5 relay submissions per claimant per minute.
+/// Staged for wiring into `self_claim` alongside `crate::rate_limit`.
+#[allow(dead_code)]
 pub const SELF_CLAIM_RATE_LIMIT: u32 = 5;
+#[allow(dead_code)]
 pub const SELF_CLAIM_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
@@ -197,6 +204,7 @@ impl AppError {
         (StatusCode::NOT_FOUND, Json(err))
     }
 
+    #[allow(dead_code)]
     pub fn too_many_requests(msg: impl Into<String>) -> (StatusCode, Json<AppError>) {
         let err = AppError {
             code: 429,
@@ -595,6 +603,7 @@ mod tests {
         Arc::new(AppState {
             db,
             idempotency: crate::db::new_shared_idempotency_store(),
+            bounty_broadcast: tokio::sync::broadcast::channel(16).0,
         })
     }
 

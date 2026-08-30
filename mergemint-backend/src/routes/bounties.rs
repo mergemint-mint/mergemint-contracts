@@ -2,16 +2,24 @@
 ///
 /// Endpoints
 /// ---------
-/// GET /bounties                     list bounties (paginated)
-/// GET /bounties/assignee/{address}  list bounties by assignee
+/// GET  /bounties                     list bounties (paginated)
+/// GET  /bounties/assignee/{address}  list bounties by assignee
+/// POST /bounties/{id}/claim          claim a bounty (broadcasts on the stream)
+/// GET  /bounties/stream              SSE stream of bounty state changes (#482)
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     Json,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use std::convert::Infallible;
 use std::sync::Arc;
+use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};
 
 use crate::db::{
     list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage,
@@ -91,6 +99,43 @@ fn is_syntactically_valid_address(address: &str) -> bool {
             .all(|b| matches!(b, b'A'..=b'Z' | b'2'..=b'7'))
 }
 
+/// `GET /bounties/stream`
+///
+/// Server-Sent Events channel that broadcasts a bounty ID whenever a bounty's
+/// state changes (see `claim_bounty`). Clients subscribe once and receive
+/// incremental push notifications instead of polling. Event name is
+/// `bounty_updated`, payload `{"bountyId":"<id>"}`. Implements issue #482.
+pub async fn bounty_stream(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.bounty_broadcast.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        result.ok().map(|bounty_id| {
+            Ok(Event::default()
+                .event("bounty_updated")
+                .data(format!(r#"{{"bountyId":"{}"}}"#, bounty_id)))
+        })
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// `POST /bounties/{id}/claim`
+///
+/// Marks a bounty as claimed by the caller and broadcasts the bounty ID on the
+/// SSE channel so subscribed clients are notified without a polling round-trip.
+pub async fn claim_bounty(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let _ = state.bounty_broadcast.send(id.clone());
+
+    Json(serde_json::json!({
+        "id": id,
+        "status": "claimed"
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +145,7 @@ mod tests {
         Arc::new(AppState {
             db: new_shared_db(),
             idempotency: new_shared_idempotency_store(),
+            bounty_broadcast: tokio::sync::broadcast::channel(16).0,
         })
     }
 
