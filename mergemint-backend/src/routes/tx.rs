@@ -326,6 +326,18 @@ pub struct ResolveDisputeRequest {
     pub winner: String,
 }
 
+fn resolve_dispute_audit_fields<'a>(
+    verifier: &'a str,
+    bounty_id: &'a str,
+    outcome: &'a str,
+) -> (&'a str, &'a str, &'a str, u64) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    (verifier, bounty_id, outcome, timestamp)
+}
+
 #[derive(Debug, Serialize)]
 pub struct ResolveDisputeResponse {
     pub ok: bool,
@@ -353,31 +365,61 @@ pub async fn resolve_dispute(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ResolveDisputeRequest>,
 ) -> Result<Json<ResolveDisputeResponse>, (StatusCode, Json<AppError>)> {
-    let bounty = {
-        let db = read_db(&state.db);
-        let raw = db
-            .records
-            .get(&req.bounty_id)
-            .ok_or_else(|| AppError::not_found("bounty not found"))?
-            .clone();
-        serde_json::from_str::<Bounty>(&raw)
-            .map_err(|_| AppError::bad_request("corrupt bounty record"))?
-    };
+    let result = (async {
+        let bounty = {
+            let db = read_db(&state.db);
+            let raw = db
+                .records
+                .get(&req.bounty_id)
+                .ok_or_else(|| AppError::not_found("bounty not found"))?
+                .clone();
+            serde_json::from_str::<Bounty>(&raw)
+                .map_err(|_| AppError::bad_request("corrupt bounty record"))?
+        };
 
-    // -- precheck: only the bounty creator may arbitrate (#474) --------------
-    if req.arbitrator != bounty.creator {
-        return Err(AppError::bad_request(
-            "only the bounty creator may act as arbitrator",
-        ));
+        // -- precheck: only the bounty creator may arbitrate (#474) --------------
+        if req.arbitrator != bounty.creator {
+            return Err(AppError::bad_request(
+                "only the bounty creator may act as arbitrator",
+            ));
+        }
+
+        // Build the payout XDR (stub — real implementation invokes Stellar SDK).
+        let xdr = build_payout_xdr(&bounty, &req.winner);
+
+        Ok(Json(ResolveDisputeResponse {
+            ok: true,
+            xdr: Some(xdr),
+        }))
+    })
+    .await;
+
+    match &result {
+        Ok(_) => {
+            let (verifier, bounty_id, outcome, timestamp) =
+                resolve_dispute_audit_fields(&req.arbitrator, &req.bounty_id, "success");
+            tracing::info!(
+                verifier = %verifier,
+                bounty_id = %bounty_id,
+                outcome = %outcome,
+                timestamp = timestamp,
+                "resolve_dispute succeeded"
+            );
+        }
+        Err(_) => {
+            let (verifier, bounty_id, outcome, timestamp) =
+                resolve_dispute_audit_fields(&req.arbitrator, &req.bounty_id, "failure");
+            tracing::warn!(
+                verifier = %verifier,
+                bounty_id = %bounty_id,
+                outcome = %outcome,
+                timestamp = timestamp,
+                "resolve_dispute failed"
+            );
+        }
     }
 
-    // Build the payout XDR (stub — real implementation invokes Stellar SDK).
-    let xdr = build_payout_xdr(&bounty, &req.winner);
-
-    Ok(Json(ResolveDisputeResponse {
-        ok: true,
-        xdr: Some(xdr),
-    }))
+    result
 }
 
 /// Stub XDR builder.  Replace with real Stellar `TransactionBuilder` logic.
@@ -632,6 +674,17 @@ mod tests {
         let (status, Json(err)) = AppError::not_found("bounty not found");
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(err.message, "bounty not found");
+    }
+
+    #[test]
+    fn resolve_dispute_audit_fields_include_required_structured_fields() {
+        let (verifier, bounty_id, outcome, timestamp) =
+            resolve_dispute_audit_fields("arb-123", "bounty-456", "success");
+
+        assert_eq!(verifier, "arb-123");
+        assert_eq!(bounty_id, "bounty-456");
+        assert_eq!(outcome, "success");
+        assert!(timestamp > 0, "timestamp must be unix seconds since epoch");
     }
 
     // ---------------------------------------------------------------------
