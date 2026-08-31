@@ -260,7 +260,10 @@ fn build_cors_layer(allowed_origins: &str) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::shutdown_signal;
+    use super::{build_cors_layer, shutdown_signal};
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
 
     #[test]
     fn empty_allowlist_detection_handles_unset_empty_and_commas() {
@@ -287,5 +290,20 @@ mod tests {
             result.is_err(),
             "shutdown_signal resolved without SIGINT/SIGTERM ever being sent"
         );
+    }
+
+    #[test]
+    fn cors_layer_correctly_limits_origins() {
+        // Empty string should allow no origins.
+        let cors = build_cors_layer("");
+        assert!(cors.inner().allow_origin.is_none());
+
+        // Single origin should be allowed.
+        let cors = build_cors_layer("http://localhost:3000");
+        assert!(cors.inner().allow_origin.is_some());
+
+        // Multiple origins should work.
+        let cors = build_cors_layer("http://localhost:3000,https://example.com");
+        assert!(cors.inner().allow_origin.is_some());
     }
 }
