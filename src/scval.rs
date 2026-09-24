@@ -365,7 +365,10 @@ mod tests {
 
             assert_eq!(dec_addr, address);
             assert_eq!(dec_rep, u32::MAX);
-            assert_eq!(dec_earned, total_earned, "total_earned boundary must round-trip");
+            assert_eq!(
+                dec_earned, total_earned,
+                "total_earned boundary must round-trip"
+            );
             assert_eq!(dec_contrib, u32::MAX);
             assert_eq!(dec_claims, u32::MAX);
         }
@@ -387,7 +390,11 @@ mod tests {
 
         assert_eq!(dec_title, title);
         assert_eq!(dec_desc, description);
-        assert_eq!(dec_desc.len(), 0, "empty description must survive the round-trip");
+        assert_eq!(
+            dec_desc.len(),
+            0,
+            "empty description must survive the round-trip"
+        );
     }
 
     /// `address_scval`/`decode_address` round-trip: the encoded form must
@@ -403,7 +410,10 @@ mod tests {
         // `encoded` is already the XDR display string; decode via the same
         // path decode_address uses internally (String -> Address).
         let decoded = Address::from_string(&encoded);
-        assert_eq!(decoded, addr, "encoded address must decode to the same address");
+        assert_eq!(
+            decoded, addr,
+            "encoded address must decode to the same address"
+        );
     }
 
     /// `symbol_scval`/`decode_symbol` round-trip with an empty symbol name

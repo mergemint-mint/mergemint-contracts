@@ -323,7 +323,11 @@ fn test_get_open_bounties_paged_limit_capped_at_max() {
     );
 
     let page2 = client.get_open_bounties_paged(&50, &1000);
-    assert_eq!(page2.len(), 5, "remaining open bounties after first capped page");
+    assert_eq!(
+        page2.len(),
+        5,
+        "remaining open bounties after first capped page"
+    );
 }
 
 /// `get_bounties_by_creator` clamps `limit` to 50 (MAX_LIMIT) per `paginate`.
