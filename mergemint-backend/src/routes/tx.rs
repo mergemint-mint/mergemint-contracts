@@ -66,12 +66,10 @@ impl AppState {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let mut buckets = self.rate_limiter.lock().unwrap();
-        let bucket = buckets
-            .entry(key.to_string())
-            .or_insert(RateBucket {
-                count: 0,
-                window_start: now,
-            });
+        let bucket = buckets.entry(key.to_string()).or_insert(RateBucket {
+            count: 0,
+            window_start: now,
+        });
         if now.saturating_sub(bucket.window_start) >= SELF_CLAIM_RATE_WINDOW_SECS {
             bucket.window_start = now;
             bucket.count = 0;
@@ -539,11 +537,9 @@ async fn self_claim_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rate_limit::TokenBucketLimiter;
     use axum::body::to_bytes;
     use axum::extract::State;
     use axum::response::IntoResponse;
-    use std::time::Duration;
 
     /// Helper: convert a Response body to a String.
     async fn body_string(response: axum::response::Response) -> String {

@@ -292,18 +292,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cors_layer_correctly_limits_origins() {
+    /// Send a request carrying `origin` through a router wrapped in the CORS
+    /// layer built from `allowed`, and return the `access-control-allow-origin`
+    /// response header, if any.
+    async fn allowed_origin_header(allowed: &str, origin: &str) -> Option<String> {
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .layer(build_cors_layer(allowed));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("origin", origin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .map(|value| value.to_str().unwrap().to_owned())
+    }
+
+    #[tokio::test]
+    async fn cors_layer_correctly_limits_origins() {
         // Empty string should allow no origins.
-        let cors = build_cors_layer("");
-        assert!(cors.inner().allow_origin.is_none());
+        assert_eq!(
+            allowed_origin_header("", "http://localhost:3000").await,
+            None
+        );
 
         // Single origin should be allowed.
-        let cors = build_cors_layer("http://localhost:3000");
-        assert!(cors.inner().allow_origin.is_some());
+        assert_eq!(
+            allowed_origin_header("http://localhost:3000", "http://localhost:3000").await,
+            Some("http://localhost:3000".to_owned())
+        );
 
-        // Multiple origins should work.
-        let cors = build_cors_layer("http://localhost:3000,https://example.com");
-        assert!(cors.inner().allow_origin.is_some());
+        // Multiple origins should work, and unlisted origins are rejected.
+        let allowed = "http://localhost:3000,https://example.com";
+        assert_eq!(
+            allowed_origin_header(allowed, "https://example.com").await,
+            Some("https://example.com".to_owned())
+        );
+        assert_eq!(
+            allowed_origin_header(allowed, "https://evil.example").await,
+            None
+        );
     }
 }

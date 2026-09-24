@@ -40,7 +40,7 @@ pub fn is_valid_reward_amount(value: &str) -> bool {
 
     // Strictly positive — reject "0" and "0.0000000".
     let whole_is_zero = whole.bytes().all(|b| b == b'0');
-    let fraction_is_zero = fraction.map_or(true, |f| f.bytes().all(|b| b == b'0'));
+    let fraction_is_zero = fraction.is_none_or(|f| f.bytes().all(|b| b == b'0'));
     !(whole_is_zero && fraction_is_zero)
 }
 
