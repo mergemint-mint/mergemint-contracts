@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTxFlow } from "../hooks/useTxFlow";
 import { TxResultBanner } from "./TxResultBanner";
 import { TxButton } from "./TxButton";
+import { CharCounter } from "./CharCounter";
 import { NetworkName } from "../lib/types";
 import { SYMBOL_MAX_LENGTH } from "../lib/validation";
 

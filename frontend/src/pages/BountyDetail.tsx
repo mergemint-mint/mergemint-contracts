@@ -5,6 +5,7 @@ import { Bounty } from '../types';
 import { mapErrorMessage } from '../utils/format';
 import { StatusBadge } from '../components/StatusBadge';
 import { BountyDetailSkeleton } from '../components/BountyDetailSkeleton';
+import { BountyErrorBoundary } from '../components/BountyErrorBoundary';
 
 function BountyDetailInner() {
   const { id } = useParams<{ id: string }>();

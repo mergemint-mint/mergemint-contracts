@@ -1,9 +1,10 @@
 import { Bounty } from "../lib/types";
+import { Bounty as ApiBounty } from "../types";
 import { shortenAddress } from "../utils/format";
 import { CopyButton } from "./CopyButton";
 
 interface BountyCardProps {
-  bounty?: Bounty;
+  bounty?: Bounty | ApiBounty;
   loading?: boolean;
 }
 
@@ -36,7 +37,9 @@ export function BountyCard({ bounty, loading }: BountyCardProps) {
         <CopyButton value={bounty.creator} />
       </span>
       <span className="bounty-card__reward">
-        {bounty.rewardAmount.toString()} {bounty.rewardToken}
+        {"rewardAmount" in bounty
+          ? `${bounty.rewardAmount.toString()} ${bounty.rewardToken}`
+          : bounty.reward}
       </span>
       <span className="bounty-card__status">{bounty.status}</span>
     </div>

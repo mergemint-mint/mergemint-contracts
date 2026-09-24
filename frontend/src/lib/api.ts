@@ -14,11 +14,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export interface ListBountiesParams {
+export type ListBountiesParams = {
   status?: BountyStatus;
   cursor?: string;
   limit?: number;
-}
+};
 
 function toQuery(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams();

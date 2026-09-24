@@ -10,7 +10,7 @@ import { ContributorProfile } from './pages/ContributorProfile';
 
 function Nav() {
   const location = useLocation();
-  const { clearError } = useWallet();
+  const { address, connect, clearError } = useWallet();
 
   // A prior connect() failure otherwise stays visible until the next
   // connect() attempt, even after navigating away (issue #508).
@@ -22,7 +22,7 @@ function Nav() {
     <nav>
       <Link to="/">Bounties</Link>
       <Link to="/create">Create Bounty</Link>
-      <WalletConnectButton />
+      <WalletConnectButton address={address} onConnect={connect} />
     </nav>
   );
 }
