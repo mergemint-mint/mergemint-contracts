@@ -18,7 +18,7 @@ describe("MergeMintSDK constructor & configuration", () => {
         new MergeMintSDK({
           rpcUrl: MAINNET.rpcUrl,
           networkPassphrase: MAINNET.networkPassphrase,
-          contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
         }),
     ).toThrow("placeholder detected");
   });
@@ -26,7 +26,7 @@ describe("MergeMintSDK constructor & configuration", () => {
   it("should successfully instantiate with valid config", () => {
     const config = createNetworkConfig(
       TESTNET,
-      "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
     );
     const sdk = new MergeMintSDK(config);
     expect(sdk).toBeDefined();

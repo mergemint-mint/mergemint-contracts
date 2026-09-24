@@ -16,7 +16,8 @@ describe("symbolToScVal", () => {
   });
 });
 
-const CONTRACT_ID = "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
+const CONTRACT_ID = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+const SOURCE_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
 /**
  * Minimal stand-in for `SorobanRpc.Server`. `getAccount` fails for the first
@@ -33,7 +34,7 @@ function makeFlakyRpc(failures: number, retval = 7n) {
         throw new Error("transient RPC failure");
       }
       return {
-        accountId: () => CONTRACT_ID,
+        accountId: () => SOURCE_ACCOUNT,
         sequenceNumber: () => "1",
         incrementSequenceNumber: () => undefined,
       };
@@ -122,7 +123,7 @@ describe("MergeMintSDK constructor typed errors", () => {
       new MergeMintSDK({
         rpcUrl: "https://example.com/v1/XCa...",
         networkPassphrase: TESTNET.networkPassphrase,
-        contractId: "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+        contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
       });
       throw new Error("expected constructor to throw");
     } catch (err) {
