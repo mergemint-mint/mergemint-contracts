@@ -23,6 +23,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies for Stellar CLI
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+
       - name: Install Stellar CLI
         run: cargo install stellar-cli --version 23.0.1 --locked
 
@@ -34,13 +37,17 @@ jobs:
         continue-on-error: true
 
       - name: Check interface baseline exists
+        id: baseline
         run: |
           if [ ! -f interface-baseline.json ]; then
             echo "Warning: interface-baseline.json not found. Create with: stellar contract inspect ... > interface-baseline.json"
-            exit 0
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Compare interfaces
+        if: steps.baseline.outputs.exists == 'true'
         run: |
           if diff -q interface-baseline.json current-interface.json > /dev/null 2>&1; then
             echo "✓ Interface compatible"
