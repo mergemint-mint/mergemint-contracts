@@ -130,31 +130,75 @@ MergeMintContract (src/contract/mod.rs)
 
 ---
 
-### State Transition Diagram
+### State Transition Diagram (Mermaid)
 
-```
-                    create_bounty()
-                         │
-                         ▼
-                   ┌──────────┐
-         ┌────────▶│   open   │──────────────────┐
-         │         └────┬─────┘                  │
-         │              │                        │
-         │        claim_bounty()           cancel_bounty()   expire_bounty()
-         │         (contributor)            (creator only)    (permissionless,
-         │              │                        │             deadline passed)
-         │              ▼                        ▼                   │
-         │      ┌──────────────┐          ┌───────────┐ ◀───────────┘
-         │      │ in_progress  │          │ cancelled │
-         │      └──────┬───────┘          └───────────┘
-         │             │
-         │      complete_bounty()
-         │         (verifier)
-         │             │
-         │             ▼
-         │      ┌───────────┐
-         └──────│ completed │   (terminal — no transitions out)
-                └───────────┘
+The diagram below is the single source of truth for status transitions accepted by the contract. Solid arrows depict valid transitions, annotated with the triggering entry point. The note for each state lists invalid transitions attempted from that state along with the resulting `ContractError`.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> open : create_bounty
+
+    open --> in_progress : claim_bounty
+    in_progress --> in_progress : claim_bounty (multi-assignee, capacity left)
+    open --> cancelled : cancel_bounty (creator)
+    open --> cancelled : expire_bounty (deadline passed)
+    open --> disputed : raise_dispute (creator)
+
+    in_progress --> completed : complete_bounty
+    in_progress --> completed : approve_completion (threshold reached)
+    in_progress --> disputed : raise_dispute (creator or assignee)
+
+    disputed --> completed : resolve_dispute "complete"
+    disputed --> cancelled : resolve_dispute "cancel"
+
+    completed --> [*]
+    cancelled --> [*]
+
+    note right of open
+        complete_bounty → BountyNotInProgress
+        complete_milestone → BountyNotInProgress
+        approve_completion → BountyHasNoAssignee
+        resolve_dispute → BountyNotDisputed
+    end note
+
+    note right of in_progress
+        claim_bounty (at capacity) → BountyAlreadyAssigned
+        claim_bounty (same contributor) → AlreadyClaimed
+        cancel_bounty → BountyNotOpen
+        expire_bounty → BountyNotOpen
+        resolve_dispute → BountyNotDisputed
+    end note
+
+    note right of disputed
+        claim_bounty → BountyNotOpen
+        complete_bounty → BountyIsDisputed
+        complete_milestone → BountyNotInProgress
+        raise_dispute → BountyIsDisputed
+        cancel_bounty → BountyNotOpen
+        expire_bounty → BountyNotOpen
+    end note
+
+    note right of completed
+        claim_bounty → BountyNotOpen
+        complete_bounty → BountyNotInProgress
+        complete_milestone → BountyNotInProgress
+        raise_dispute → BountyNotDisputed
+        resolve_dispute → BountyNotDisputed
+        cancel_bounty → BountyNotOpen
+        expire_bounty → BountyNotOpen
+    end note
+
+    note right of cancelled
+        claim_bounty → BountyNotOpen
+        complete_bounty → BountyNotInProgress
+        complete_milestone → BountyNotInProgress
+        raise_dispute → BountyNotDisputed
+        resolve_dispute → BountyNotDisputed
+        cancel_bounty → BountyNotOpen
+        expire_bounty → BountyNotOpen
+    end note
 ```
 
 ---
@@ -292,10 +336,16 @@ Each row describes one valid state transition.
 | From | To | Triggering Function | Auth Requirement | Pre-conditions (Guards) | Post-conditions |
 |------|----|---------------------|-----------------|------------------------|-----------------|
 | — | `open` | `create_bounty` | `creator.require_auth()` | None | Bounty stored; `BountyCount` incremented; `bounty_created` event emitted |
-| `open` | `in_progress` | `claim_bounty` | `contributor.require_auth()` | `bounty.assignee` is `None` (not yet claimed) | `bounty.assignee` set; `bounty.status = "in_progress"`; `bounty_claimed` event emitted |
-| `in_progress` | `completed` | `complete_bounty` | `verifier.require_auth()` | `bounty.assignee` is `Some(_)` | Token transfer from `verifier` to `assignee`; contributor reputation +10; `bounty_completed` + `reward_paid` events emitted |
-| `open` | `cancelled` | `cancel_bounty` | `caller.require_auth()` | `bounty.creator == caller`; `bounty.status == "open"` | `bounty.status = "cancelled"`; `bounty_cancelled` event emitted; *(escrow refund once implemented)* |
-| `open` | `cancelled` | `expire_bounty` | `caller.require_auth()` *(any caller)* | `bounty.deadline` is `Some(d)`; `env.ledger().sequence() > d`; `bounty.status == "open"` | `bounty.status = "cancelled"`; `bounty_expired` event emitted; *(escrow refund once implemented)* |
+| `open` | `in_progress` | `claim_bounty` | `contributor.require_auth()` | `bounty.assignees.len() < bounty.max_assignees` | Assignee added; `bounty.status = "in_progress"`; `bounty_claimed` event emitted |
+| `in_progress` | `in_progress` | `claim_bounty` | `contributor.require_auth()` | Multi-assignee (`assignees.len() < max_assignees`) | Additional assignee added; status remains `"in_progress"`; `bounty_claimed` emitted |
+| `in_progress` | `completed` | `complete_bounty` | `verifier.require_auth()` | `bounty.assignees` not empty | Token transfer from contract to assignees; reputation updated; `bounty_completed` + `reward_paid` emitted |
+| `in_progress` | `completed` | `approve_completion` | `verifier.require_auth()` | Unique approvals reach `approval_threshold` | Payout distributed; `bounty.status = "completed"`; `bounty_completed` emitted |
+| `open` | `disputed` | `raise_dispute` | `caller.require_auth()` | `caller == bounty.creator` | `bounty.status = "disputed"`; `bounty_disputed` event emitted |
+| `in_progress` | `disputed` | `raise_dispute` | `caller.require_auth()` | `caller == creator` or `caller in assignees` | `bounty.status = "disputed"`; `bounty_disputed` event emitted |
+| `disputed` | `completed` | `resolve_dispute` ("complete") | `arbitrator.require_auth()` | `arbitrator == creator`; `bounty.assignees` not empty | Payout funded by arbitrator; `bounty.status = "completed"`; `dispute_resolved` emitted |
+| `disputed` | `cancelled` | `resolve_dispute` ("cancel") | `arbitrator.require_auth()` | `arbitrator == creator` | Escrow refunded to creator; `bounty.status = "cancelled"`; `dispute_resolved` emitted |
+| `open` | `cancelled` | `cancel_bounty` | `caller.require_auth()` | `bounty.creator == caller`; `bounty.status == "open"` | Escrow refunded; `bounty.status = "cancelled"`; `bounty_cancelled` event emitted |
+| `open` | `cancelled` | `expire_bounty` | `caller.require_auth()` *(any caller)* | `bounty.deadline` is `Some(d)`; `env.ledger().sequence() > d`; `bounty.status == "open"` | Escrow refunded; `bounty.status = "cancelled"`; `bounty_expired` event emitted |
 
 ---
 
@@ -306,7 +356,8 @@ Each row describes one valid state transition.
 The initial state of every bounty after `create_bounty`.
 
 Valid exits:
-- → `in_progress` via `claim_bounty` (any authenticated contributor, bounty not yet assigned)
+- → `in_progress` via `claim_bounty` (any authenticated contributor, capacity remaining)
+- → `disputed` via `raise_dispute` (creator only)
 - → `cancelled` via `cancel_bounty` (creator only, bounty still open)
 - → `cancelled` via `expire_bounty` (anyone, deadline set and passed)
 
@@ -316,10 +367,29 @@ No valid entries from other states (creation only).
 
 #### `in_progress`
 
-The bounty has been claimed by a contributor who is working on it.
+The bounty has been claimed by one or more contributors who are working on it.
 
 Valid exits:
-- → `completed` via `complete_bounty` (verifier with funds, assignee must exist)
+- → `in_progress` via `claim_bounty` (multi-assignee bounties with remaining capacity)
+- → `completed` via `complete_bounty` (verifier with funds, assignees exist)
+- → `completed` via `approve_completion` (verifiers reaching approval threshold)
+- → `disputed` via `raise_dispute` (creator or any assigned contributor)
+
+Invalid transitions (will panic):
+- `claim_bounty` at capacity → panics `"bounty already assigned"`
+- `cancel_bounty` on an `in_progress` bounty → panics `"bounty not open"`
+- `expire_bounty` on an `in_progress` bounty → panics `"bounty not open"`
+- `resolve_dispute` on an `in_progress` bounty → panics `"bounty is not in disputed status"`
+
+---
+
+#### `disputed`
+
+The bounty has an active dispute raised by the creator or an assignee. Only `resolve_dispute` can transition the bounty out of this status.
+
+Valid exits:
+- → `completed` via `resolve_dispute` with resolution `"complete"`
+- → `cancelled` via `resolve_dispute` with resolution `"cancel"`
 
 Invalid transitions (will panic):
 - `cancel_bounty` on an `in_progress` bounty → panics `"bounty not open"`
@@ -330,21 +400,22 @@ Invalid transitions (will panic):
 
 #### `completed`
 
-Terminal state. The reward has been transferred and the contributor's reputation updated.
+Terminal state. The reward has been transferred and contributor reputations updated.
 
-No valid exits. Any function that reads status and expects `open` or `in_progress` will reject a completed bounty.
+No valid exits. Any function that reads status and expects `open`, `in_progress`, or `disputed` will reject a completed bounty.
 
 ---
 
 #### `cancelled`
 
-Terminal state. Reached via `cancel_bounty` (creator-initiated) or `expire_bounty` (deadline-triggered).
+Terminal state. Reached via `cancel_bounty` (creator-initiated), `expire_bounty` (deadline-triggered), or `resolve_dispute` (`"cancel"` resolution).
 
-No valid exits. Once cancelled, the bounty ID is permanently inactive. Escrowed tokens will be refunded to the creator once escrow is implemented.
+No valid exits. Once cancelled, the bounty ID is permanently inactive and escrowed tokens are refunded to the creator.
 
-The two paths into `cancelled` emit different events to let off-chain indexers distinguish intentional cancellations from deadline expiries:
-- Intentional: `bounty_cancelled` (topic: `creator`)
+Events emitted by paths into `cancelled`:
+- Creator cancellation: `bounty_cancelled` (topic: `creator`)
 - Deadline expiry: `bounty_expired` (topic: `creator`)
+- Dispute cancellation: `dispute_resolved` (topic: `arbitrator`, resolution: `"cancel"`)
 
 ---
 
@@ -353,12 +424,16 @@ The two paths into `cancelled` emit different events to let off-chain indexers d
 | Function | Who can call | Restricted by |
 |----------|-------------|---------------|
 | `create_bounty` | Anyone (they become the creator) | `creator.require_auth()` |
-| `claim_bounty` | Anyone (they become the assignee) | `contributor.require_auth()`; bounty must be unassigned |
-| `complete_bounty` | Anyone with the reward tokens (verifier) | `verifier.require_auth()`; assignee must exist |
-| `cancel_bounty` | Creator only | `caller.require_auth()` + `bounty.creator == caller` check |
-| `expire_bounty` | Anyone (permissionless expiry) | `caller.require_auth()`; deadline must be set and passed |
+| `claim_bounty` | Anyone (they become an assignee) | `contributor.require_auth()`; capacity must remain |
+| `complete_bounty` | Anyone with the reward tokens (verifier) | `verifier.require_auth()`; assignees must exist; not disputed |
+| `complete_milestone` | Verifier with milestone reward tokens | `verifier.require_auth()`; status must be `in_progress` |
+| `approve_completion` | Verifiers listed in `required_verifiers` | `verifier.require_auth()`; verifier list check |
+| `raise_dispute` | Creator or any existing assignee | `caller.require_auth()`; creator or assignee check; status must be `open` or `in_progress` |
+| `resolve_dispute` | Creator only (as arbitrator) | `arbitrator.require_auth()`; `arbitrator == creator`; status must be `disputed`; `min_reputation` |
+| `cancel_bounty` | Creator only | `caller.require_auth()` + `bounty.creator == caller` check; status must be `open` |
+| `expire_bounty` | Anyone (permissionless expiry) | `caller.require_auth()`; deadline must be set and passed; status must be `open` |
 
-**Design note on `expire_bounty` being permissionless:** the creator may be offline or unresponsive, but the bounty's deadline still needs to be enforced to clean the open list and (eventually) release escrowed funds. Allowing any authenticated caller to trigger expiry ensures liveness without compromising security — the caller cannot change the outcome, only initiate a state change that the on-chain guards would allow anyway.
+**Design note on `expire_bounty` being permissionless:** the creator may be offline or unresponsive, but the bounty's deadline still needs to be enforced to clean the open list and release escrowed funds. Allowing any authenticated caller to trigger expiry ensures liveness without compromising security — the caller cannot change the outcome, only initiate a state change that the on-chain guards would allow anyway.
 
 ---
 
