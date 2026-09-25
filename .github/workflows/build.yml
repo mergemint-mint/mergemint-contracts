@@ -34,7 +34,7 @@ jobs:
       contents: write # commit the updated baseline back to the PR branch
       pull-requests: write # post the size diff comment
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -113,7 +113,7 @@ jobs:
         # PRs from forks get a read-only token and cannot comment; the size is
         # still in the job summary, so don't fail the build over it.
         continue-on-error: true
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           WASM_FILE: ${{ steps.size.outputs.file }}
           SIZE: ${{ steps.size.outputs.size }}
