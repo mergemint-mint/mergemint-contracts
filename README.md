@@ -83,7 +83,7 @@ Processes a batch with parallel execution.
 
 - **Parameters**:
   - `batchId`: ID of the batch to process
-- **Events**: `ParallelRefreshStarted`, `TaskCompleted`, `TaskFailed`
+- **Events**: `ParallelRefreshStarted`, `TaskCompleted`, `TaskFailed`, `TaskRetried`
 
 #### `finalizeBatch(uint256 batchId)`
 

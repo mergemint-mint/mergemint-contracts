@@ -350,3 +350,58 @@ describe("BountyRefresh", function () {
         });
     });
 });
+
+describe("BountyRefresh task retries", function () {
+    let flakyRefresh;
+    let addr1, addr2;
+
+    beforeEach(async function () {
+        [, addr1, addr2] = await ethers.getSigners();
+        const FlakyBountyRefresh = await ethers.getContractFactory("FlakyBountyRefresh");
+        flakyRefresh = await FlakyBountyRefresh.deploy();
+        await flakyRefresh.deployed();
+    });
+
+    it("Should emit TaskRetried with batch id, task id and attempt for each retry", async function () {
+        // Bounty 7 fails its first two attempts and succeeds on the third.
+        await flakyRefresh.setFailUntilAttempt(7, 2);
+        await flakyRefresh.createBatch([addr1.address, addr2.address], [1, 7]);
+
+        const tx = flakyRefresh.processBatchParallel(0);
+        // Task 0 (bounty 1) succeeds first time; task 1 (bounty 7) retries twice.
+        await expect(tx).to.emit(flakyRefresh, "TaskRetried").withArgs(0, 1, 1);
+        await expect(tx).to.emit(flakyRefresh, "TaskRetried").withArgs(0, 1, 2);
+        await expect(tx).to.emit(flakyRefresh, "TaskCompleted").withArgs(1, addr2.address, 7, true);
+
+        const receipt = await (await tx).wait();
+        const retries = receipt.events.filter((e) => e.event === "TaskRetried");
+        expect(retries.length).to.equal(2);
+
+        const task = await flakyRefresh.getTask(1);
+        expect(task.attempts).to.equal(3);
+        expect(task.completed).to.equal(true);
+    });
+
+    it("Should not emit TaskRetried when a task succeeds first time", async function () {
+        await flakyRefresh.createBatch([addr1.address], [1]);
+        await expect(flakyRefresh.processBatchParallel(0)).to.not.emit(flakyRefresh, "TaskRetried");
+    });
+
+    it("Should mark the task failed after exhausting MAX_TASK_RETRIES", async function () {
+        const maxRetries = (await flakyRefresh.MAX_TASK_RETRIES()).toNumber();
+        await flakyRefresh.setFailUntilAttempt(1, maxRetries + 1);
+        await flakyRefresh.createBatch([addr1.address], [1]);
+
+        const tx = flakyRefresh.processBatchParallel(0);
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            await expect(tx).to.emit(flakyRefresh, "TaskRetried").withArgs(0, 0, attempt);
+        }
+        await expect(tx)
+            .to.emit(flakyRefresh, "TaskFailed")
+            .withArgs(0, addr1.address, "Transient refresh failure");
+
+        const task = await flakyRefresh.getTask(0);
+        expect(task.attempts).to.equal(maxRetries + 1);
+        expect(task.failed).to.equal(true);
+    });
+});
