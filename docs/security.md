@@ -1,5 +1,7 @@
 # Security Threat Model
 
+> For a structured STRIDE analysis across the contract, backend, frontend and wallet, see [threat-model.md](threat-model.md).
+
 This document analyses known attack vectors against the MergeMint contract, rates their severity, describes current mitigations, and identifies residual risk. It covers the **current no-escrow design** (the contract never holds a token balance; the verifier pushes tokens directly from their own wallet) as well as the **planned escrow model** where the contract will custody funds.
 
 ---

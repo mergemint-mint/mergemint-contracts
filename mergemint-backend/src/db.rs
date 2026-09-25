@@ -317,3 +317,12 @@ mod tests {
         assert!(guard.entries.is_empty(), "recovered store should be intact");
     }
 }
+
+/// Get a single bounty by id
+pub fn get_bounty(
+    db: &SharedDb,
+    id: &str,
+) -> Option<Bounty> {
+    let guard = read_db(db);
+    guard.bounties.iter().find(|b| b.id == id).cloned()
+}

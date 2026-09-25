@@ -58,7 +58,7 @@ mod rate_limit;
 mod routes;
 
 use db::{new_shared_db, new_shared_idempotency_store};
-use routes::bounties::{bounty_stream, claim_bounty, list_bounties, list_bounties_by_assignee};
+use routes::bounties::{get_bounty_route, bounty_stream, claim_bounty, list_bounties, list_bounties_by_assignee};
 use routes::tx::{new_shared_rate_limiter, resolve_dispute, self_claim, AppState};
 
 /// Maximum allowed request body size (1 MiB).
@@ -118,6 +118,7 @@ async fn main() {
         .route("/tx/resolve-dispute", post(resolve_dispute))
         .route("/tx/self-claim", post(self_claim))
         .route("/bounties", get(list_bounties))
+        .route("/bounties/:id", get(get_bounty_route))
         .route(
             "/bounties/assignee/:address",
             get(list_bounties_by_assignee),
