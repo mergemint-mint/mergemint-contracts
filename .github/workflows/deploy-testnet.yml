@@ -1,0 +1,122 @@
+name: Deploy to Testnet
+
+# Deploys the contract to Stellar testnet with scripts/deploy.sh and publishes
+# the resulting contract ID as the `testnet-contract-id` artifact.
+#
+# Setup (Settings → Environments → "testnet"):
+#   Secret   STELLAR_DEPLOYER_SECRET_KEY  S... secret key of a funded testnet account
+#   Variable STELLAR_CLI_VERSION          optional, overrides the pinned CLI version
+# Protection rules on the environment (required reviewers, allowed branches)
+# gate both the manual and the automatic deploys.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "scripts/deploy.sh"
+      - ".github/workflows/deploy-testnet.yml"
+
+# Never run two deploys at once; let an in-flight deploy finish.
+concurrency:
+  group: deploy-testnet
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: testnet
+    outputs:
+      contract_id: ${{ steps.deploy.outputs.contract_id }}
+    env:
+      STELLAR_CLI_VERSION: ${{ vars.STELLAR_CLI_VERSION || '28.0.0' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - name: Cache cargo registry and wasm build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/wasm32v1-none
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-wasm-
+
+      - name: Install Stellar CLI
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" stellar
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/stellar" --version
+
+      - name: Deploy contract
+        id: deploy
+        env:
+          STELLAR_DEPLOYER_SECRET_KEY: ${{ secrets.STELLAR_DEPLOYER_SECRET_KEY }}
+          WASM_TARGET: wasm32v1-none
+          CONTRACT_ID_FILE: contract-id.txt
+        run: |
+          if [ -z "$STELLAR_DEPLOYER_SECRET_KEY" ]; then
+            echo "::error::STELLAR_DEPLOYER_SECRET_KEY is not set in the 'testnet' environment."
+            exit 1
+          fi
+
+          ./scripts/deploy.sh testnet "$STELLAR_DEPLOYER_SECRET_KEY"
+
+          CONTRACT_ID=$(tr -d '[:space:]' < "$CONTRACT_ID_FILE")
+          if [ -z "$CONTRACT_ID" ]; then
+            echo "::error::deploy.sh did not produce a contract ID."
+            exit 1
+          fi
+          echo "contract_id=$CONTRACT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Write deployment metadata
+        env:
+          CONTRACT_ID: ${{ steps.deploy.outputs.contract_id }}
+        run: |
+          WASM_SHA256=$(sha256sum target/wasm32v1-none/release/mergemint_contracts.wasm | cut -d' ' -f1)
+          cat > deployment.json <<EOF
+          {
+            "network": "testnet",
+            "contract_id": "${CONTRACT_ID}",
+            "commit": "${GITHUB_SHA}",
+            "ref": "${GITHUB_REF}",
+            "wasm_sha256": "${WASM_SHA256}",
+            "workflow_run": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+            "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+          {
+            echo "### Testnet deployment"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Contract ID | \`${CONTRACT_ID}\` |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| WASM SHA-256 | \`${WASM_SHA256}\` |"
+            echo "| Explorer | https://stellar.expert/explorer/testnet/contract/${CONTRACT_ID} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload contract ID artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-contract-id
+          path: |
+            contract-id.txt
+            deployment.json
+          if-no-files-found: error
+          retention-days: 90
