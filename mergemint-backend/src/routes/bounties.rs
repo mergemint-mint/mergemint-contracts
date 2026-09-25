@@ -136,6 +136,22 @@ pub async fn claim_bounty(
     }))
 }
 
+
+/// `GET /bounties/{id}`
+pub async fn get_bounty_route(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Bounty>, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(bounty) = crate::db::get_bounty(&state.db, &id) {
+        Ok(Json(bounty))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "bounty not found" })),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +290,35 @@ mod tests {
         .await;
 
         assert_eq!(page.bounties.len(), 5);
+    }
+
+
+    #[tokio::test]
+    async fn get_bounty_route_returns_bounty_if_found() {
+        let state = test_state();
+        seed_bounties(&state, 1);
+
+        let result = get_bounty_route(
+            State(state),
+            Path("0".to_string()),
+        ).await;
+
+        let Json(bounty) = result.expect("must return bounty");
+        assert_eq!(bounty.id, "0");
+        assert_eq!(bounty.creator, "carol");
+    }
+
+    #[tokio::test]
+    async fn get_bounty_route_returns_404_if_not_found() {
+        let state = test_state();
+
+        let result = get_bounty_route(
+            State(state),
+            Path("999".to_string()),
+        ).await;
+
+        let (status, Json(body)) = result.expect_err("must return 404");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.get("error").is_some());
     }
 }

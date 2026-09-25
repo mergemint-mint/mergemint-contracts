@@ -34,7 +34,16 @@
 // / `resolve_dispute` call that has already reached the point of submitting
 // a chain transaction — instead of dropping them mid-flight when a deploy
 // sends SIGTERM.
+//
+// ## Health checks
+//
+// `GET /health` returns `200 ok` once the server is listening. The runtime
+// container image is distroless (no shell or curl), so the binary doubles as
+// its own probe: `mergemint-backend healthcheck` requests `/health` on the
+// local listener and exits non-zero if it doesn't get a 200.
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,7 +67,7 @@ mod rate_limit;
 mod routes;
 
 use db::{new_shared_db, new_shared_idempotency_store};
-use routes::bounties::{bounty_stream, claim_bounty, list_bounties, list_bounties_by_assignee};
+use routes::bounties::{get_bounty_route, bounty_stream, claim_bounty, list_bounties, list_bounties_by_assignee};
 use routes::tx::{new_shared_rate_limiter, resolve_dispute, self_claim, AppState};
 
 /// Maximum allowed request body size (1 MiB).
@@ -73,6 +82,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// generated automatically by `SetRequestIdLayer`.
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
+/// Address the HTTP server listens on.
+const LISTEN_ADDR: &str = "0.0.0.0:8080";
+
+/// Address the `healthcheck` subcommand probes.
+const HEALTHCHECK_ADDR: &str = "127.0.0.1:8080";
+
 /// Reward-token allowlist env var consumed by create-bounty flows.
 const ALLOWLISTED_REWARD_TOKENS_ENV: &str = "ALLOWLISTED_REWARD_TOKENS";
 
@@ -83,6 +98,16 @@ const CORS_ALLOWED_ORIGINS_ENV: &str = "CORS_ALLOWED_ORIGINS";
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        std::process::exit(match healthcheck(HEALTHCHECK_ADDR) {
+            Ok(()) => 0,
+            Err(err) => {
+                eprintln!("healthcheck failed: {err}");
+                1
+            }
+        });
+    }
+
     // ---------------------------------------------------------------------------
     // Initialise structured logging (#486)
     //
@@ -115,9 +140,11 @@ async fn main() {
     });
 
     let app = Router::new()
+        .route("/health", get(health))
         .route("/tx/resolve-dispute", post(resolve_dispute))
         .route("/tx/self-claim", post(self_claim))
         .route("/bounties", get(list_bounties))
+        .route("/bounties/:id", get(get_bounty_route))
         .route(
             "/bounties/assignee/:address",
             get(list_bounties_by_assignee),
@@ -170,7 +197,7 @@ async fn main() {
             &std::env::var(CORS_ALLOWED_ORIGINS_ENV).unwrap_or_default(),
         ));
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
+    let listener = tokio::net::TcpListener::bind(LISTEN_ADDR)
         .await
         .expect("failed to bind TCP listener");
 
@@ -183,6 +210,34 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+}
+
+/// Liveness probe used by container healthchecks.
+async fn health() -> &'static str {
+    "ok"
+}
+
+/// Issue `GET /health` against `addr` and succeed only on an HTTP 200.
+///
+/// Deliberately dependency-free (plain `std` TCP) so it works inside the
+/// distroless runtime image without pulling an HTTP client into the binary.
+fn healthcheck(addr: &str) -> std::io::Result<()> {
+    let timeout = Some(Duration::from_secs(3));
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    stream.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let status_line = response.lines().next().unwrap_or_default();
+    if status_line.split_whitespace().nth(1) == Some("200") {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "unexpected response: {status_line:?}"
+        )))
+    }
 }
 
 /// Waits for SIGINT (Ctrl+C) or, on Unix, SIGTERM.
@@ -260,7 +315,7 @@ fn build_cors_layer(allowed_origins: &str) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_cors_layer, shutdown_signal};
+    use super::{build_cors_layer, health, healthcheck, shutdown_signal};
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -339,5 +394,40 @@ mod tests {
             allowed_origin_header(allowed, "https://evil.example").await,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn healthcheck_succeeds_against_health_route() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let app = axum::Router::new().route("/health", axum::routing::get(health));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let result = tokio::task::spawn_blocking(move || healthcheck(&addr))
+            .await
+            .unwrap();
+        assert!(result.is_ok(), "healthcheck failed: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn healthcheck_fails_on_non_200() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        // No /health route registered, so the probe gets a 404.
+        let app = axum::Router::new();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let result = tokio::task::spawn_blocking(move || healthcheck(&addr))
+            .await
+            .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn healthcheck_fails_when_nothing_is_listening() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        assert!(healthcheck(&addr).is_err());
     }
 }

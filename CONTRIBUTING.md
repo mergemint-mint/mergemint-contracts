@@ -6,13 +6,99 @@ Thank you for your interest in contributing! This guide covers everything you ne
 
 ## Table of Contents
 
+- [Your First Contribution](#your-first-contribution)
 - [Prerequisites](#prerequisites)
+- [Pre-commit Hooks](#pre-commit-hooks)
 - [Development Workflow](#development-workflow)
 - [Code Standards](#code-standards)
 - [Branch Naming](#branch-naming)
 - [Pull Request Process](#pull-request-process)
 - [Test Snapshots](#test-snapshots)
 - [Security Considerations](#security-considerations)
+
+---
+
+## Your First Contribution
+
+New here? This is the shortest path from a fresh clone to a merged pull request. Each step links to the detailed section further down.
+
+### 1. Pick an issue
+
+- Browse issues labelled [`good first issue`](https://github.com/mergemint-mint/mergemint-contracts/labels/good%20first%20issue). These are scoped to a single area and do not require deep knowledge of Soroban.
+- Leave a comment on the issue saying you are picking it up, so two people don't work on the same thing. If you have questions about the approach, ask them in the issue **before** writing code.
+- Docs, test, and SDK issues are the easiest entry points. Contract changes in `src/contract/mutations.rs` touch escrowed funds and get the most careful review.
+
+### 2. Fork, clone, and branch
+
+```bash
+# Fork on GitHub first, then:
+git clone https://github.com/<your-username>/mergemint-contracts.git
+cd mergemint-contracts
+git remote add upstream https://github.com/mergemint-mint/mergemint-contracts.git
+
+# Always branch from an up-to-date main
+git fetch upstream
+git checkout -b docs/first-issue-guide upstream/main
+```
+
+Name the branch using the [prefixes below](#branch-naming) (`feat/`, `fix/`, `docs/`, `test/`, `refactor/`, `ci/`).
+
+### 3. Set up your toolchain
+
+Install the [prerequisites](#prerequisites). `rust-toolchain.toml` pins the exact Rust version and the `wasm32v1-none` target, so `rustup` installs them automatically the first time you run `cargo` inside the repo.
+
+### 4. Confirm the baseline is green
+
+Before changing anything, check that the existing suite passes on your machine. If it doesn't, the problem is your setup, not your change. See [docs/contributor-faq.md](docs/contributor-faq.md#troubleshooting) for common fixes.
+
+| Area you are changing          | Directory            | Command(s) to run                                                   |
+| ------------------------------ | -------------------- | ------------------------------------------------------------------- |
+| Smart contract (Rust)          | repo root (`src/`)   | `cargo test`, `cargo fmt --check`, `cargo clippy -- -D warnings`    |
+| Contract WASM build            | repo root            | `cargo build --release --target wasm32v1-none`                      |
+| Backend (Rust)                 | `mergemint-backend/` | `cargo test --all-features`, `cargo clippy --all-targets -- -D warnings` |
+| TypeScript SDK                 | `sdk/`               | `npm install`, `npm run typecheck`, `npm test`                      |
+| Frontend (React + Vite)        | `frontend/`          | `npm install`, `npx tsc --noEmit`, `npm test`                       |
+| Frontend components (visual)   | `frontend/`          | `npm run storybook` (component catalog on http://localhost:6006)    |
+| Docs only                      | `docs/`, `*.md`      | Preview the Markdown and check that every link and command works    |
+
+`make test` and `make lint` wrap the contract commands.
+
+### 5. Make the change
+
+- Keep the change focused on the issue. Unrelated cleanups belong in a separate PR.
+- Add or update tests alongside code changes. Contract tests live in `src/test.rs` and `src/contract/queries_test.rs`.
+- If you change a `#[contracttype]` struct, read [Test Snapshots](#test-snapshots) and [docs/migration.md](docs/migration.md) first.
+- If you change the public contract interface, add a [`CHANGELOG.md`](#changelog) entry.
+
+### 6. Commit
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) style messages, matching the history of this repo:
+
+```
+docs: add good first issue guide
+fix(contract): reject zero-share assignees in complete_bounty
+feat(sdk): add getOpenBountiesPage helper
+```
+
+Run `cargo fmt` (and the relevant commands from the table above) before every commit.
+
+### 7. Open the pull request
+
+Push your branch to your fork and open a PR against `mergemint-mint/mergemint-contracts:main`. The PR template will ask for the items below. A PR that includes all of them is usually reviewed on the first pass.
+
+**What a good PR looks like:**
+
+- [ ] A title in Conventional Commit style (`docs: …`, `fix: …`, `feat: …`)
+- [ ] `Closes #<issue-number>` in the description
+- [ ] A short explanation of **what** changed and **why**, plus any trade-offs
+- [ ] Pasted output of the test command(s) for the area you touched
+- [ ] Screenshots for anything visual (frontend changes, Storybook stories)
+- [ ] One logical change; small diffs get reviewed faster than large ones
+- [ ] All [required CI checks](#ci--required-status-checks) green
+
+### 8. Respond to review
+
+A maintainer will review your PR. Push follow-up commits to the same branch to address comments; don't force-push over a review in progress unless asked. Once approved and green, a maintainer merges it. That's your first merged PR.
 
 ---
 
@@ -43,6 +129,41 @@ cargo install stellar-cli --version 23.0.1 --locked
 ```
 
 Verify with `stellar --version`. Used for building, deploying, and inspecting contracts. CI pins this exact version in `interface-check.yml` so `stellar contract inspect` output stays stable across runs — install the same version locally to avoid false-positive interface diffs.
+
+### 4. Node.js 20+ (for JS/TS subprojects and the pre-commit hook)
+
+```bash
+npm install   # at the repo root — installs the pinned eslint and prettier
+```
+
+---
+
+## Pre-commit Hooks
+
+Formatting and lint failures are cheaper to catch locally than in CI. Install the git hook once per clone:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+On every `git commit` the hook checks **only the parts of the repo you staged**, using the same commands as CI:
+
+| Staged files                                       | Checks run                                                                      |
+| -------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `*.rs` / `Cargo.toml` in the contract crate (root) | `cargo fmt --check`, `cargo clippy -- -D warnings`                              |
+| `*.rs` / `Cargo.toml` under `mergemint-backend/`   | `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` |
+| `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `*.ts`, `*.tsx` | `eslint --max-warnings=0`, `prettier --check`                                   |
+| `*.json`, `*.css`, `*.md`, `*.yml`, `*.yaml`       | `prettier --check`                                                              |
+
+ESLint and Prettier are configured at the repo root (`eslint.config.mjs`, `.prettierrc.json`, `.prettierignore`) and run from the root `node_modules`, so run `npm install` first. To fix problems:
+
+```bash
+cargo fmt                              # Rust formatting (run in mergemint-backend/ for the backend)
+npx prettier --write <files>           # JS/TS/JSON/Markdown/YAML formatting
+npx eslint --fix <files>               # auto-fixable lint issues
+```
+
+Re-run `./scripts/install-hooks.sh` after pulling changes to the script. In an emergency you can bypass the hook with `git commit --no-verify`; CI will still run the same checks.
 
 ---
 
@@ -121,6 +242,16 @@ Use one of these prefixes followed by a short kebab-case description:
 | `ci/`       | Changes to GitHub Actions workflows or scripts      |
 
 Examples: `feat/claim-expiry`, `fix/double-claim-guard`, `docs/snapshot-guide`
+
+### GitHub Actions
+
+Every `uses:` in `.github/workflows/` must reference a full 40-character commit SHA, followed by the human-readable version as a comment:
+
+```yaml
+- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+```
+
+Tags can be moved to point at different code; SHAs cannot. Dependabot (`.github/dependabot.yml`, `github-actions` ecosystem) opens weekly PRs that bump both the SHA and the version comment. To look up the SHA for a new action, run `git ls-remote --tags https://github.com/<owner>/<repo>`.
 
 ---
 

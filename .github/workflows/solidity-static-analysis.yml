@@ -6,7 +6,9 @@
 # so vulnerability classes that cargo/clippy (Rust-focused) can't see —
 # reentrancy, unchecked external calls, unsafe delegatecall, etc. — were
 # going unchecked for contracts/bounty/*.sol. This job runs Slither and
-# fails the build on any High-severity finding.
+# fails the build on any Medium- or High-severity finding. Findings that
+# are false positives are suppressed inline with `slither-disable-next-line`
+# and justified in docs/security.md.
 #
 # Scoped to changes under contracts/bounty/ so it does not fire on
 # unrelated commits (mirrors the path-scoping used in backend-ci.yml).
@@ -47,4 +49,12 @@ jobs:
           slither contracts/bounty \
             --filter-paths "node_modules" \
             --solc-remaps "@openzeppelin=node_modules/@openzeppelin" \
-            --fail-high
+            --fail-medium \
+            --json slither-report.json
+
+      - name: Upload Slither report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slither-report
+          path: slither-report.json

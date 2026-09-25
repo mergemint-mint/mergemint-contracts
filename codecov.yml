@@ -1,0 +1,31 @@
+# Codecov configuration. Reports are uploaded by .github/workflows/coverage.yml.
+coverage:
+  status:
+    # Report coverage on PRs without failing them while baselines settle.
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+flags:
+  contract:
+    paths:
+      - src/
+    carryforward: true
+  backend:
+    paths:
+      - mergemint-backend/
+    carryforward: true
+  frontend:
+    paths:
+      - frontend/
+    carryforward: true
+  sdk:
+    paths:
+      - sdk/
+    carryforward: true
+
+comment:
+  layout: "header, diff, flags, files"

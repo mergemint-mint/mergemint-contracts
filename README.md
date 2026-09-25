@@ -1,5 +1,7 @@
 # Batch and Parallel Contributor Refresh
 
+[![codecov](https://codecov.io/gh/mergemint-mint/mergemint-contracts/branch/main/graph/badge.svg)](https://codecov.io/gh/mergemint-mint/mergemint-contracts)
+
 This implementation provides production-ready code for batching and parallelizing contributor refresh operations in the `refresh_bounty` function.
 
 ## Overview
@@ -14,53 +16,62 @@ The solution consists of:
 
 ### Batch Processing
 
-- Supports up to 100 contributors per batch
-- Automatic chunking for large datasets
-- Configurable batch sizes
+1. **Writes** (create, claim, complete, dispute) are Soroban contract invocations. The frontend
+   uses the SDK (or XDR built by the backend's `/tx/*` routes), and the user signs with their
+   wallet.
+2. **Contract events** (`bounty_created`, `bounty_claimed`, `reward_paid`, …) are polled by the
+   indexer in `mergemint-backend` and stored in the database.
+3. **Reads** come from the backend API: paginated lists, assignee filters, and a Server-Sent
+   Events stream that pushes bounty updates to open clients.
 
-### Parallel Execution
+See [docs/architecture.md](docs/architecture.md) for contract data flow and storage layout.
 
-- Up to 10 parallel tasks per batch
-- Non-blocking task execution
-- Automatic retry mechanism (3 retries with exponential backoff)
+## Repository layout
 
-### Error Handling
+| Path                                         | What it is                                                                                           | Stack                              |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| [`src/`](src/) ([`Cargo.toml`](Cargo.toml))  | The MergeMint Soroban contract: bounties, milestones, escrow, disputes, contributor reputation       | Rust, `soroban-sdk`                |
+| [`mergemint-backend/`](mergemint-backend/)   | Event indexer and HTTP API (bounty lists, assignee filter, SSE stream, `/tx/*` transaction builders) | Rust, Axum, SQLx                   |
+| [`backend/`](backend/)                       | Health-check endpoint logic (indexer lag, DB reachability, network passphrase validation)            | TypeScript                         |
+| [`frontend/`](frontend/)                     | Main web app: bounty list/detail, create bounty, contributor profile, wallet connect                 | React, Vite, Vitest, Playwright    |
+| [`mergemint-frontend/`](mergemint-frontend/) | Lightweight React frontend package used by the root npm workspace                                    | React, Vite, Vitest                |
+| [`app/`](app/)                               | Reusable form components for the bounty and contributor flows (`@mergemint/app`)                     | React, TypeScript                  |
+| [`sdk/`](sdk/)                               | Typed TypeScript SDK wrapping the contract's XDR interface (`@mergemint/sdk`)                        | TypeScript, `@stellar/stellar-sdk` |
+| [`contracts/bounty/`](contracts/bounty/)     | Batch/parallel contributor-refresh prototype (see [docs/batch-refresh.md](docs/batch-refresh.md))    | Solidity                           |
+| [`test/`](test/)                             | Hardhat tests for the batch-refresh prototype and bounty fixtures                                    | JavaScript                         |
+| [`scripts/`](scripts/)                       | Deploy, smoke/integration tests, git hooks, [k6 load scenarios](scripts/k6/README.md)                | Bash, JavaScript                   |
+| [`docs/`](docs/)                             | Design docs, guides and specs (index below)                                                          | Markdown                           |
+| [`security/`](security/)                     | Write-ups of specific security checks enforced by the contract                                       | Markdown                           |
+| [`.github/`](.github/)                       | CI workflows, Dependabot, issue and PR templates                                                     | GitHub Actions                     |
+| [`.devcontainer/`](.devcontainer/)           | Dev container with the Rust toolchain preinstalled                                                   | Dev Containers                     |
 
-- Comprehensive error tracking per task
-- Batch-level success/failure metrics
-- Detailed error messages for debugging
+## Quickstart
 
-### Safety Features
+### Prerequisites
 
-- Reentrancy protection
-- Pausable contract for emergency stops
-- Owner-only operations
-- Input validation
+- Rust (stable) with the WASM target: `rustup target add wasm32-unknown-unknown`
+- [Stellar CLI](https://developers.stellar.org/docs/tools/cli): `cargo install stellar-cli`
+- Node.js 20+ (for the frontends, SDK and lint tooling)
 
-## Usage
+Or open the repo in the provided [dev container](.devcontainer/devcontainer.json).
 
-### Smart Contract Deployment
+### Contract
 
-```javascript
-const BountyRefresh = await ethers.getContractFactory("BountyRefresh");
-const contract = await BountyRefresh.deploy();
-await contract.deployed();
+```bash
+make test     # run the contract test suite (no network needed)
+make lint     # clippy (warnings as errors) + rustfmt check
+make build    # build target/wasm32-unknown-unknown/release/mergemint_contracts.wasm
 ```
 
-### Batch Refresh via JavaScript
+To deploy to testnet, follow [docs/getting-started.md](docs/getting-started.md) (create and fund a
+key, then `make deploy`). `make bindings` generates TypeScript bindings into `sdk/generated/`.
 
-```javascript
-const BatchRefreshManager = require("./scripts/batchRefresh");
+### Backend
 
-const manager = new BatchRefreshManager(contractAddress);
-await manager.initialize();
-
-const result = await manager.processBatchRefresh(contributors, bountyIds, {
-  parallel: true,
-  verbose: true,
-});
-
-console.log(result.summary);
+```bash
+cd mergemint-backend
+cargo run            # listens on http://localhost:8080
+cargo test
 ```
 
 ## API Reference
@@ -83,7 +94,7 @@ Processes a batch with parallel execution.
 
 - **Parameters**:
   - `batchId`: ID of the batch to process
-- **Events**: `ParallelRefreshStarted`, `TaskCompleted`, `TaskFailed`
+- **Events**: `ParallelRefreshStarted`, `TaskCompleted`, `TaskFailed`, `TaskRetried`
 
 #### `finalizeBatch(uint256 batchId)`
 
@@ -93,73 +104,49 @@ Finalizes batch processing.
   - `batchId`: ID of the batch to finalize
 - **Events**: `BatchProcessingCompleted`
 
-#### `getBatch(uint256 batchId)`
-
-Retrieves batch details.
-
-- **Returns**: `RefreshBatch` struct
-
-#### `getTask(uint256 taskId)`
-
-Retrieves task details.
-
-- **Returns**: `BountyRefreshTask` struct
-
-#### `getContributorTasks(address contributor)`
-
-Retrieves all tasks for a contributor.
-
-- **Returns**: Array of task IDs
-
-### Manager Methods
-
-#### `processBatchRefresh(contributors, bountyIds, options)`
-
-Processes multiple batches of contributors.
-
-- **Parameters**:
-  - `contributors`: Array of contributor addresses
-  - `bountyIds`: Array of bounty IDs
-  - `options`: Configuration object
-    - `parallel`: Enable parallel processing (default: true)
-    - `verbose`: Enable logging (default: false)
-- **Returns**: Result object with summary
-
-## Performance Characteristics
-
-- **Throughput**: ~100 contributors per batch
-- **Parallelism**: 10 concurrent tasks
-- **Retry Logic**: 3 attempts with 1s delay
-- **Gas Optimization**: Batch operations reduce overhead
-
-## Testing
-
-Run the test suite:
-
 ```bash
-npx hardhat test test/BountyRefresh.test.js
+npm install                  # root workspace + lint tooling
+npm run dev:frontend         # start mergemint-frontend with Vite
+
+cd frontend && npm install && npx vitest run   # main web app tests
+cd sdk && npm install && npm run build         # build @mergemint/sdk
 ```
 
-Test coverage includes:
+### Before your first commit
 
-- Batch creation validation
-- Parallel processing
-- Error handling
-- Pause/unpause functionality
-- Edge cases
+```bash
+./scripts/install-hooks.sh   # runs fmt, clippy, eslint and prettier on staged files
+```
 
-## Security Considerations
+See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, the PR process, changelog rules and test
+snapshots.
 
-1. **Reentrancy Protection**: Uses OpenZeppelin's ReentrancyGuard
-2. **Access Control**: Owner-only operations
-3. **Input Validation**: Comprehensive parameter checks
-4. **Emergency Stop**: Pausable contract functionality
-5. **Error Tracking**: Detailed error logging for auditing
+## Documentation
 
-## Future Enhancements
+| Topic                                    | Doc                                                                        |
+| ---------------------------------------- | -------------------------------------------------------------------------- |
+| Getting started on testnet               | [docs/getting-started.md](docs/getting-started.md)                         |
+| Contract architecture and storage layout | [docs/architecture.md](docs/architecture.md)                               |
+| Event schema                             | [docs/event-schema.md](docs/event-schema.md)                               |
+| Horizon / RPC polling in the indexer     | [docs/horizon-polling.md](docs/horizon-polling.md)                         |
+| Integrations                             | [docs/integrations.md](docs/integrations.md)                               |
+| Security model                           | [docs/security.md](docs/security.md)                                       |
+| Pause and upgrade strategy               | [docs/pause-upgrade-strategy.md](docs/pause-upgrade-strategy.md)           |
+| Escrow implementation plan               | [docs/escrow-implementation-plan.md](docs/escrow-implementation-plan.md)   |
+| `create_bounty` parameter design         | [docs/create-bounty-params-design.md](docs/create-bounty-params-design.md) |
+| Passkey authentication                   | [docs/passkey-auth.md](docs/passkey-auth.md)                               |
+| Shared type generation                   | [docs/shared-type-generation.md](docs/shared-type-generation.md)           |
+| Migrations                               | [docs/migration.md](docs/migration.md)                                     |
+| Benchmarks                               | [docs/benchmarks.md](docs/benchmarks.md)                                   |
+| Batch and parallel contributor refresh   | [docs/batch-refresh.md](docs/batch-refresh.md)                             |
+| Backend load testing (k6)                | [scripts/k6/README.md](scripts/k6/README.md)                               |
+| Contributor FAQ                          | [docs/contributor-faq.md](docs/contributor-faq.md)                         |
+| SDK usage                                | [sdk/README.md](sdk/README.md)                                             |
+| Changelog (contract interface)           | [CHANGELOG.md](CHANGELOG.md)                                               |
+| Backend changelog                        | [mergemint-backend/CHANGELOG.md](mergemint-backend/CHANGELOG.md)           |
 
-- Dynamic batch sizing based on gas prices
-- Priority queue for urgent refreshes
-- Webhook notifications for batch completion
-- Metrics and analytics dashboard
-- Distributed processing across multiple nodes
+## Contributing
+
+Contributions are welcome. Every PR should be tied to an issue, so start by opening or picking one
+up, then read [CONTRIBUTING.md](CONTRIBUTING.md). If you think you've found a security issue in the
+contract, read [docs/security.md](docs/security.md) first.

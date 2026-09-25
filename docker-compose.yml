@@ -1,26 +1,103 @@
-version: '3.8'
+# Full local stack for MergeMint: `docker compose up --build`
+#
+#   stellar   — local standalone Stellar network (core + Horizon + Soroban RPC + Friendbot)
+#   postgres  — application database
+#   backend   — mergemint-backend (Axum), http://localhost:8080
+#   frontend  — Vite dev server for frontend/, http://localhost:5173
+#
+# Every service has a healthcheck, and dependents wait for `service_healthy`,
+# so `docker compose up --wait` returns only once the whole stack is ready.
+# See docs/getting-started.md for details and overrides.
+
+name: mergemint
 
 services:
-  mergemint-backend:
+  stellar:
+    image: stellar/quickstart:${STELLAR_QUICKSTART_TAG:-latest}
+    command: --local
+    ports:
+      - "${STELLAR_PORT:-8000}:8000"
+    healthcheck:
+      # Soroban RPC reports "healthy" only once core has synced the local ledger.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sf -X POST -H 'Content-Type: application/json'
+          -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+          http://localhost:8000/rpc | grep -q '"status":"healthy"'
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mergemint}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mergemint}
+      POSTGRES_DB: ${POSTGRES_DB:-mergemint}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  backend:
     build:
       context: ./mergemint-backend
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "${BACKEND_PORT:-8080}:8080"
     environment:
-      - RUST_LOG=info
-      - DATABASE_URL=sqlite://mergemint.db
-      - NETWORK_PASSPHRASE=Test SDF Network ; September 2015
+      RUST_LOG: ${RUST_LOG:-info}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      ALLOWLISTED_REWARD_TOKENS: ${ALLOWLISTED_REWARD_TOKENS:-}
+      DATABASE_URL: postgres://${POSTGRES_USER:-mergemint}:${POSTGRES_PASSWORD:-mergemint}@postgres:5432/${POSTGRES_DB:-mergemint}
+      RPC_URL: http://stellar:8000/rpc
+      HORIZON_URL: http://stellar:8000
+      NETWORK_PASSPHRASE: Standalone Network ; February 2017
+      SOROBAN_NETWORK: local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      stellar:
+        condition: service_healthy
+    healthcheck:
+      # Distroless image: the binary probes its own /health endpoint.
+      test: ["CMD", "/app/mergemint-backend", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
-  mergemint-frontend:
+  frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "${FRONTEND_PORT:-5173}:5173"
     environment:
-      - VITE_BACKEND_URL=http://localhost:8080
+      # Read by the browser, so these must be host-reachable URLs.
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8080}
+      VITE_NETWORK: ${VITE_NETWORK:-testnet}
     depends_on:
-      - mergemint-backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:5173/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
+
+volumes:
+  postgres-data:

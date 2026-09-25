@@ -1,5 +1,7 @@
 # Security Threat Model
 
+> For a structured STRIDE analysis across the contract, backend, frontend and wallet, see [threat-model.md](threat-model.md).
+
 This document analyses known attack vectors against the MergeMint contract, rates their severity, describes current mitigations, and identifies residual risk. It covers the **current no-escrow design** (the contract never holds a token balance; the verifier pushes tokens directly from their own wallet) as well as the **planned escrow model** where the contract will custody funds.
 
 ---
@@ -250,3 +252,39 @@ Every new state-mutating function added to `MergeMintContract` must:
 1. Accept the authenticated principal as the first argument.
 2. Call `principal.require_auth()` as the very first statement in the function body.
 3. Include a `# Authorization` section in its doc comment explaining who must authenticate.
+
+## Slither triage (`contracts/bounty`)
+
+The `Solidity Static Analysis` workflow runs Slither with `--fail-medium`, so
+any new Medium or High finding fails CI. The JSON report is uploaded as the
+`slither-report` workflow artifact. Each Medium/High finding raised against
+`BountyRefresh.sol` has been resolved as follows:
+
+| Detector | Impact | Resolution |
+| --- | --- | --- |
+| `uninitialized-local` (`reason` in `_processRefreshTask`) | Medium | **Fixed** — initialised to `""`. |
+| `reentrancy-no-eth` (`_processRefreshTask`) | Medium | **False positive** — suppressed inline. |
+| `reentrancy-benign` (`_processRefreshTask`) | Low | **False positive** — suppressed inline, same reason. |
+
+**Why the reentrancy findings are false positives.** The only external call in
+`_processRefreshTask` is `this._executeRefresh(...)`, a self-call made so the
+refresh can be wrapped in `try/catch` and retried. `_executeRefresh` is guarded
+by `onlySelf`, so no other account can reach it, and the only entry point,
+`processBatchParallel`, is `nonReentrant`. No third-party code runs between
+the call and the storage writes that follow it, so there is nothing that could
+re-enter and observe inconsistent task or batch state.
+
+Remaining Low/Informational findings (`calls-loop`, `timestamp`,
+`costly-loop`, `naming-convention`, `solc-version`) are below the CI gate and
+are accepted: the loop is bounded by `MAX_BATCH_SIZE`, the `timestamp` hits
+are boolean flag checks on a struct that happens to contain timestamps, and
+`_executeRefresh` keeps its name for ABI compatibility.
+
+To reproduce locally:
+
+```sh
+pip install slither-analyzer
+npm install --no-save @openzeppelin/contracts@^4.9.0
+slither contracts/bounty --filter-paths node_modules \
+  --solc-remaps "@openzeppelin=node_modules/@openzeppelin" --fail-medium
+```

@@ -17,6 +17,7 @@ Changes that have landed on `main` but are not yet associated with a tagged rele
 
 ### Added
 
+- `BountyRefresh`: failed refresh tasks are now retried up to `MAX_TASK_RETRIES` (3) times, each retry emitting `TaskRetried(batchId, taskId, attempt)`. `_executeRefresh` is now restricted to self-calls (`onlySelf`); previously its `onlyOwner` guard made every self-invoked task fail.
 - `sdk`: optional `retry: { attempts, backoffMs }` constructor option that retries
   every Soroban RPC round-trip with exponential backoff (#665).
 - `sdk`: JSDoc on every public `MergeMintSDK` method, documenting parameters,

@@ -1,0 +1,150 @@
+# .github/workflows/coverage.yml
+#
+# Test coverage for every package, uploaded to Codecov.
+#
+# Jobs:
+#   contract  — Soroban contract (repo root) via `cargo llvm-cov`
+#   backend   — mergemint-backend via `cargo llvm-cov`
+#   frontend  — frontend/ via Vitest's v8 coverage provider
+#   sdk       — sdk/ via Jest coverage
+#
+# Each job uploads an lcov report under its own Codecov flag (see codecov.yml)
+# so per-package coverage is visible on PRs. Uploads need the CODECOV_TOKEN
+# repository secret; without it (e.g. PRs from forks) the upload is skipped
+# with a warning rather than failing the build.
+
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  contract:
+    name: Contract (cargo llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable with llvm-tools-preview
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          flags: contract
+          fail_ci_if_error: false
+
+  backend:
+    name: Backend (cargo llvm-cov)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mergemint-backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable with llvm-tools-preview
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mergemint-backend -> target
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: mergemint-backend/lcov.info
+          flags: backend
+          fail_ci_if_error: false
+
+  frontend:
+    name: Frontend (Vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      # The frontend suite has pre-existing failures and is not yet gated
+      # elsewhere in CI, so a failing test must not block the coverage upload.
+      # Coverage is still written on failure (reportOnFailure in vite.config.ts).
+      - name: Run tests with coverage
+        run: npm run test:coverage
+        continue-on-error: true
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: frontend/coverage/lcov.info
+          flags: frontend
+          fail_ci_if_error: false
+
+  sdk:
+    name: SDK (Jest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests with coverage
+        run: npm run test:coverage
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: sdk/coverage/lcov.info
+          flags: sdk
+          fail_ci_if_error: false

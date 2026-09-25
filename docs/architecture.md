@@ -126,7 +126,7 @@ MergeMintContract (src/contract/mod.rs)
 | `disputed` | The creator or an assignee raised a dispute. Only `resolve_dispute` can move it on. |
 | `cancelled` | The bounty was cancelled by its creator, expired after its deadline passed, or a dispute was resolved with `"cancel"`. |
 
-> **Note:** The Mermaid diagram below provides the comprehensive machine, including dispute transitions and the exact errors returned for every invalid transition.
+> **Note:** the ASCII diagram below predates `disputed`. See [Lifecycle Diagram (Mermaid)](#lifecycle-diagram-mermaid) for the complete machine, including dispute transitions and the error returned for every invalid transition.
 
 ---
 
@@ -203,34 +203,128 @@ stateDiagram-v2
 
 ---
 
-### Invalid Transition Reference Table
+### Lifecycle Diagram (Mermaid)
 
-The table below lists the error returned when a given entry point is executed on a bounty in each respective lifecycle status.
+The diagram below is the single source of truth for which status transitions
+the contract accepts. Solid arrows are the **valid** transitions, labelled with
+the entry point that performs them. The note beside each state lists every
+**invalid** transition attempted from that state and the `ContractError` it
+fails with. The panic message for each error is in
+[Guard Failure Messages](#guard-failure-messages) below.
+
+It is derived from the guards in `src/contract/mutations.rs`, and the error
+names match `src/errors.rs`.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> open : create_bounty
+
+    open --> in_progress : claim_bounty
+    in_progress --> in_progress : claim_bounty (multi-assignee, capacity left)
+    open --> cancelled : cancel_bounty (creator)
+    open --> cancelled : expire_bounty (deadline passed)
+    open --> disputed : raise_dispute (creator)
+
+    in_progress --> completed : complete_bounty
+    in_progress --> completed : approve_completion (threshold reached)
+    in_progress --> disputed : raise_dispute (creator or assignee)
+
+    disputed --> completed : resolve_dispute "complete"
+    disputed --> cancelled : resolve_dispute "cancel"
+
+    completed --> [*]
+    cancelled --> [*]
+
+    note right of open
+        complete_bounty → BountyNotInProgress
+        complete_milestone → BountyNotInProgress
+        approve_completion → BountyHasNoAssignee
+        resolve_dispute → BountyNotDisputed
+    end note
+
+    note right of in_progress
+        claim_bounty (at capacity) → BountyAlreadyAssigned
+        claim_bounty (same contributor) → AlreadyClaimed
+        cancel_bounty → BountyNotOpen
+        expire_bounty → BountyNotOpen
+        resolve_dispute → BountyNotDisputed
+    end note
+
+    note right of disputed
+        claim_bounty → BountyNotOpen
+        complete_bounty → BountyIsDisputed
+        complete_milestone → BountyNotInProgress
+        raise_dispute → BountyIsDisputed
+        cancel_bounty → BountyNotOpen
+        expire_bounty → BountyNotOpen
+    end note
+
+    note right of completed
+        claim_bounty → BountyNotOpen
+        complete_bounty → BountyNotInProgress
+        complete_milestone → BountyNotInProgress
+        raise_dispute → BountyNotDisputed
+        resolve_dispute → BountyNotDisputed
+        cancel_bounty → BountyNotOpen
+        expire_bounty → BountyNotOpen
+    end note
+
+    note right of cancelled
+        claim_bounty → BountyNotOpen
+        complete_bounty → BountyNotInProgress
+        complete_milestone → BountyNotInProgress
+        raise_dispute → BountyNotDisputed
+        resolve_dispute → BountyNotDisputed
+        cancel_bounty → BountyNotOpen
+        expire_bounty → BountyNotOpen
+    end note
+```
+
+#### Invalid transition reference
+
+The same information as a table. Each cell is the error returned when the
+entry point in that row is called on a bounty in that column's status. ✅ means
+the call is accepted, subject to the non-status guards listed under
+[Transition Reference Table](#transition-reference-table).
 
 | Entry point | `open` | `in_progress` | `disputed` | `completed` | `cancelled` |
 |---|---|---|---|---|---|
-| `claim_bounty` | Accepted | Accepted if `assignees.len() < max_assignees`, else `BountyAlreadyAssigned` | `BountyNotOpen` | `BountyNotOpen` | `BountyNotOpen` |
-| `complete_bounty` | `BountyNotInProgress` | Accepted | `BountyIsDisputed` | `BountyNotInProgress` | `BountyNotInProgress` |
-| `complete_milestone` ¹ | `BountyNotInProgress` | Accepted | `BountyNotInProgress` | `BountyNotInProgress` | `BountyNotInProgress` |
-| `approve_completion` ² | `BountyHasNoAssignee` | Accepted | Evaluated by verifier list | Evaluated by verifier list | Evaluated by verifier list |
-| `raise_dispute` | Accepted | Accepted | `BountyIsDisputed` | `BountyNotDisputed` ³ | `BountyNotDisputed` ³ |
-| `resolve_dispute` | `BountyNotDisputed` | `BountyNotDisputed` | Accepted | `BountyNotDisputed` | `BountyNotDisputed` |
-| `cancel_bounty` | Accepted | `BountyNotOpen` | `BountyNotOpen` | `BountyNotOpen` | `BountyNotOpen` |
-| `expire_bounty` | Accepted | `BountyNotOpen` | `BountyNotOpen` | `BountyNotOpen` | `BountyNotOpen` |
+| `claim_bounty` | ✅ | ✅ if `assignees.len() < max_assignees`, else `BountyAlreadyAssigned` | `BountyNotOpen` | `BountyNotOpen` | `BountyNotOpen` |
+| `complete_bounty` | `BountyNotInProgress` | ✅ | `BountyIsDisputed` | `BountyNotInProgress` | `BountyNotInProgress` |
+| `complete_milestone` ¹ | `BountyNotInProgress` | ✅ | `BountyNotInProgress` | `BountyNotInProgress` | `BountyNotInProgress` |
+| `approve_completion` ² | `BountyHasNoAssignee` | ✅ | ⚠️ no status guard | ⚠️ no status guard | ⚠️ no status guard |
+| `raise_dispute` | ✅ | ✅ | `BountyIsDisputed` | `BountyNotDisputed` ³ | `BountyNotDisputed` ³ |
+| `resolve_dispute` | `BountyNotDisputed` | `BountyNotDisputed` | ✅ | `BountyNotDisputed` | `BountyNotDisputed` |
+| `cancel_bounty` | ✅ | `BountyNotOpen` | `BountyNotOpen` | `BountyNotOpen` | `BountyNotOpen` |
+| `expire_bounty` | ✅ | `BountyNotOpen` | `BountyNotOpen` | `BountyNotOpen` | `BountyNotOpen` |
 
 Notes:
-1. `complete_milestone` never mutates `status`. It marks a specific milestone completed and pays out its reward. It is gated on `in_progress`.
-2. `approve_completion` does not contain an explicit standalone status guard when `required_verifiers` is `Some`. If `required_verifiers` is `None`, it falls back to `complete_bounty_inner` which requires `in_progress` (`BountyNotInProgress`).
-3. `raise_dispute` on terminal bounties (`completed`, `cancelled`) fails with `BountyNotDisputed` (`"bounty is not in disputed status"`).
 
-### Guard Evaluation Precedence
+1. `complete_milestone` never changes `status`. It only marks one milestone
+   paid. It is listed because it is gated on `in_progress`.
+2. `approve_completion` has **no explicit status guard**. When
+   `required_verifiers` is `None` it delegates to the same check as
+   `complete_bounty` and fails with `BountyNotInProgress` outside
+   `in_progress`. When `required_verifiers` is set, it only checks that there
+   are assignees, that the verifier is on the list (`VerifierNotAuthorized`),
+   and that they have not voted yet (`AlreadyApproved`). It can therefore
+   reach the completion branch from `disputed`, `completed`, or a `cancelled`
+   bounty that still has assignees. This is tracked as a known gap in
+   [threat-model.md](threat-model.md).
+3. `raise_dispute` on a terminal bounty reuses `BountyNotDisputed`
+   (`"bounty is not in disputed status"`). The message is misleading for this
+   case, but it is the error the contract returns today.
 
-When multiple validation preconditions fail simultaneously, the first evaluated guard returns:
-- `claim_bounty`: `BountyNotFound` → `AlreadyClaimed` → `BountyNotOpen` → `CreatorCannotClaim` → `BountyAlreadyAssigned` → `ContributorHasActiveClaim` → `BountyDeadlinePassed` → `ReputationTooLow`.
+Guard order also matters. When several guards fail at once, the first one
+evaluated wins:
+
+- `claim_bounty`: `BountyNotFound` → `AlreadyClaimed` → status (`BountyNotOpen`) → `CreatorCannotClaim` → `BountyAlreadyAssigned` → `ContributorHasActiveClaim` → `BountyDeadlinePassed` → `ReputationTooLow`.
 - `complete_bounty`: `BountyNotFound` → `BountyIsDisputed` → `BountyNotInProgress` → `BountyHasNoAssignee` → `VerifierCannotBeAssignee` (→ `NotAllMilestonesCompleted` for milestone bounties).
 - `raise_dispute`: `BountyNotFound` → `BountyIsDisputed` → `BountyNotDisputed` → `OnlyCreatorOrAssigneeCanDispute`.
 - `resolve_dispute`: `BountyNotFound` → `BountyNotDisputed` → `NotArbitrator` → `InvalidResolution` → `ReputationTooLow` → `BountyHasNoAssignee` / `NotAllMilestonesCompleted` (on `"complete"`).
-- `cancel_bounty`: `BountyNotFound` → `NotBountyCreator` → `BountyNotOpen`.
+- `cancel_bounty`: `BountyNotFound` → `NotBountyCreator` → `BountyNotOpen`. A non-creator gets `NotBountyCreator` whatever the status is.
 - `expire_bounty`: `BountyNotFound` → `BountyNoDeadline` → `DeadlineNotPassed` → `BountyNotOpen`.
 
 ---
@@ -298,11 +392,9 @@ Valid exits:
 - → `cancelled` via `resolve_dispute` with resolution `"cancel"`
 
 Invalid transitions (will panic):
-- `claim_bounty` on a `disputed` bounty → panics `"bounty not open"`
-- `complete_bounty` on a `disputed` bounty → panics `"bounty is disputed"`
-- `raise_dispute` on an already disputed bounty → panics `"bounty is disputed"`
-- `cancel_bounty` on a `disputed` bounty → panics `"bounty not open"`
-- `expire_bounty` on a `disputed` bounty → panics `"bounty not open"`
+- `cancel_bounty` on an `in_progress` bounty → panics `"bounty not open"`
+- `expire_bounty` on an `in_progress` bounty → panics `"bounty not open"`
+- `claim_bounty` again → panics `"bounty already assigned"`
 
 ---
 
@@ -354,26 +446,15 @@ Messages are taken verbatim from `errors::message` in `src/errors.rs`.
 | Bounty does not exist | `BountyNotFound` | `"bounty not found"` |
 | Bounty is at `max_assignees` capacity | `BountyAlreadyAssigned` | `"bounty already assigned"` |
 | Contributor already assigned to this bounty | `AlreadyClaimed` | `"bounty already claimed by contributor"` |
-| Bounty is not in `open` state | `BountyNotOpen` | `"bounty not open"` |
-| Bounty is not in `in_progress` state | `BountyNotInProgress` | `"bounty is not in progress"` |
 | Bounty has no assignee | `BountyHasNoAssignee` | `"bounty has no assignee"` |
 | Caller is not the bounty creator | `NotBountyCreator` | `"not bounty creator"` |
-| Caller is not the arbitrator | `NotArbitrator` | `"caller is not authorized to resolve this dispute"` |
-| Bounty is disputed | `BountyIsDisputed` | `"bounty is disputed"` |
-| Bounty is not in disputed status | `BountyNotDisputed` | `"bounty is not in disputed status"` |
+| Bounty is not in a claimable / cancellable state | `BountyNotOpen` | `"bounty not open"` |
+| Bounty is not `in_progress` | `BountyNotInProgress` | `"bounty is not in progress"` |
+| Bounty is `disputed` | `BountyIsDisputed` | `"bounty is disputed"` |
+| Bounty is not `disputed` (or cannot be disputed) | `BountyNotDisputed` | `"bounty is not in disputed status"` |
 | Bounty has no deadline set | `BountyNoDeadline` | `"bounty has no deadline"` |
 | Deadline has not yet passed | `DeadlineNotPassed` | `"deadline has not passed"` |
-| Deadline has passed | `BountyDeadlinePassed` | `"bounty deadline passed"` |
-| Contributor reputation too low | `ReputationTooLow` | `"contributor reputation is too low"` |
-| Verifier cannot be assignee | `VerifierCannotBeAssignee` | `"verifier cannot be the assignee"` |
-| Creator cannot claim | `CreatorCannotClaim` | `"creator cannot claim"` |
-| Contributor has active claim | `ContributorHasActiveClaim` | `"contributor already has an active claim"` |
-| Verifier not authorized | `VerifierNotAuthorized` | `"verifier is not in the required verifiers list"` |
-| Verifier already approved | `AlreadyApproved` | `"verifier has already approved this bounty"` |
-| Invalid resolution symbol | `InvalidResolution` | `"resolution must be 'complete' or 'cancel'"` |
-| Milestone already completed | `MilestoneAlreadyCompleted` | `"milestone is already completed"` |
-| Not all milestones completed | `NotAllMilestonesCompleted` | `"not all milestones are completed"` |
-| Invalid milestone index | `InvalidMilestoneIndex` | `"invalid milestone index"` |
+| Deadline has passed (claim) | `BountyDeadlinePassed` | `"bounty deadline passed"` |
 
 ---
 

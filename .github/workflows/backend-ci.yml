@@ -12,7 +12,8 @@
 #   build    — ensure the production binary compiles in release mode
 #
 # All jobs are scoped to changes under `mergemint-backend/` so they do not
-# fire on unrelated commits.
+# fire on unrelated commits. Jobs that compile use Swatinem/rust-cache to
+# reuse the cargo registry and target/ between runs.
 
 name: Backend CI
 
@@ -47,10 +48,10 @@ jobs:
     name: Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
 
@@ -75,22 +76,17 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            mergemint-backend/target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('mergemint-backend/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-clippy-
+          workspaces: mergemint-backend -> target
 
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -102,20 +98,15 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            mergemint-backend/target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('mergemint-backend/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
+          workspaces: mergemint-backend -> target
 
       - name: Run tests
         run: cargo test --all-features
@@ -128,20 +119,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: [fmt, clippy, test]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            mergemint-backend/target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('mergemint-backend/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-release-
+          workspaces: mergemint-backend -> target
 
       - name: Build (release)
         run: cargo build --release
