@@ -146,6 +146,10 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
      * @param bountyId The bounty ID
      * @param index The index in the batch
      */
+    // The only external call here is `this._executeRefresh`, a self-call to an
+    // onlySelf function reached from the nonReentrant processBatchParallel, so
+    // no third party can re-enter. See docs/security.md (Slither triage).
+    // slither-disable-next-line reentrancy-no-eth,reentrancy-benign
     function _processRefreshTask(
         uint256 batchId,
         address contributor,
@@ -166,7 +170,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
 
         contributorTasks[contributor].push(taskId);
 
-        string memory reason;
+        string memory reason = "";
         for (uint256 attempt = 0; attempt <= MAX_TASK_RETRIES; attempt++) {
             if (attempt > 0) {
                 emit TaskRetried(batchId, taskId, attempt);
