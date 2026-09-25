@@ -5,15 +5,34 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # `labeled` lets a maintainer apply the baseline-update label to re-run the
+    # size check and accept the new size without pushing another commit.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  WASM_SIZE_BASELINE_FILE: .github/wasm-size-baseline.txt
+  WASM_SIZE_THRESHOLD_PERCENT: 10
+  # Applying this label to a PR accepts the PR's WASM size as the new baseline:
+  # the regression check no longer fails and the baseline file is committed
+  # back to the PR branch.
+  WASM_BASELINE_UPDATE_LABEL: update-wasm-baseline
+
 jobs:
   wasm-build:
+    # Ignore unrelated label events so labelling a PR doesn't rebuild it.
+    if: github.event.action != 'labeled' || github.event.label.name == 'update-wasm-baseline'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # commit the updated baseline back to the PR branch
+      pull-requests: write # post the size diff comment
     steps:
       - uses: actions/checkout@v4
 
@@ -35,44 +54,166 @@ jobs:
       - name: Build WASM
         run: cargo build --release --target wasm32v1-none
 
-      - name: Report WASM binary size
-        run: |
-          WASM_FILE=$(find target/wasm32v1-none/release -name "*.wasm" | head -1)
-          if [ -n "$WASM_FILE" ]; then
-            SIZE=$(wc -c < "$WASM_FILE")
-            echo "### WASM Binary Size" >> $GITHUB_STEP_SUMMARY
-            echo "**File:** \`$WASM_FILE\`" >> $GITHUB_STEP_SUMMARY
-            echo "**Size:** ${SIZE} bytes ($(echo "scale=2; $SIZE/1024" | bc) KB)" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Check WASM size regression
+      - name: Measure WASM size against baseline
+        id: size
         env:
-          WASM_SIZE_BASELINE_FILE: .github/wasm-size-baseline.txt
-          WASM_SIZE_THRESHOLD_PERCENT: 10
+          BASELINE_UPDATE_REQUESTED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'update-wasm-baseline') }}
         run: |
-          WASM_FILE=$(find target/wasm32v1-none/release -name "*.wasm" | head -1)
+          WASM_FILE=$(find target/wasm32v1-none/release -maxdepth 1 -name "*.wasm" | head -1)
           if [ -z "$WASM_FILE" ]; then
-            echo "No WASM artifact found; skipping size regression check."
-            exit 0
-          fi
-
-          if [ ! -f "$WASM_SIZE_BASELINE_FILE" ]; then
-            echo "No baseline found at $WASM_SIZE_BASELINE_FILE; skipping regression check."
+            echo "No WASM artifact found; skipping size check."
             exit 0
           fi
 
           SIZE=$(wc -c < "$WASM_FILE")
-          BASELINE=$(cat "$WASM_SIZE_BASELINE_FILE")
-          MAX_ALLOWED=$(( BASELINE + BASELINE * WASM_SIZE_THRESHOLD_PERCENT / 100 ))
+          echo "file=$WASM_FILE" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
 
-          echo "### WASM Size Regression Check" >> $GITHUB_STEP_SUMMARY
-          echo "Baseline: ${BASELINE} bytes" >> $GITHUB_STEP_SUMMARY
-          echo "Current: ${SIZE} bytes" >> $GITHUB_STEP_SUMMARY
-          echo "Max allowed (+${WASM_SIZE_THRESHOLD_PERCENT}%): ${MAX_ALLOWED} bytes" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### WASM Binary Size"
+            echo "**File:** \`$WASM_FILE\`"
+            echo "**Size:** ${SIZE} bytes ($(awk -v s="$SIZE" 'BEGIN { printf "%.2f", s / 1024 }') KB)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$SIZE" -gt "$MAX_ALLOWED" ]; then
-            echo "::error::WASM binary size regressed beyond ${WASM_SIZE_THRESHOLD_PERCENT}% threshold (baseline ${BASELINE} bytes, current ${SIZE} bytes)."
-            exit 1
+          if [ ! -f "$WASM_SIZE_BASELINE_FILE" ]; then
+            echo "No baseline found at $WASM_SIZE_BASELINE_FILE."
+            if [ "$BASELINE_UPDATE_REQUESTED" = "true" ]; then
+              echo "status=accepted" >> "$GITHUB_OUTPUT"
+            else
+              echo "status=no-baseline" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
           fi
 
-          echo "WASM size within the ${WASM_SIZE_THRESHOLD_PERCENT}% regression threshold."
+          BASELINE=$(tr -dc '0-9' < "$WASM_SIZE_BASELINE_FILE")
+          DELTA=$(( SIZE - BASELINE ))
+          MAX_ALLOWED=$(( BASELINE + BASELINE * WASM_SIZE_THRESHOLD_PERCENT / 100 ))
+          PERCENT=$(awk -v d="$DELTA" -v b="$BASELINE" 'BEGIN { if (b == 0) print "n/a"; else printf "%+.2f%%", d * 100 / b }')
+
+          if [ "$BASELINE_UPDATE_REQUESTED" = "true" ]; then
+            STATUS=accepted
+          elif [ "$SIZE" -gt "$MAX_ALLOWED" ]; then
+            STATUS=regressed
+          else
+            STATUS=ok
+          fi
+
+          {
+            echo "baseline=$BASELINE"
+            echo "delta=$DELTA"
+            echo "percent=$PERCENT"
+            echo "max_allowed=$MAX_ALLOWED"
+            echo "status=$STATUS"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### WASM Size Regression Check"
+            echo "Baseline: ${BASELINE} bytes"
+            echo "Current: ${SIZE} bytes"
+            echo "Change: ${DELTA} bytes (${PERCENT})"
+            echo "Max allowed (+${WASM_SIZE_THRESHOLD_PERCENT}%): ${MAX_ALLOWED} bytes"
+            echo "Status: ${STATUS}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment WASM size diff on PR
+        if: github.event_name == 'pull_request' && steps.size.outputs.size != ''
+        # PRs from forks get a read-only token and cannot comment; the size is
+        # still in the job summary, so don't fail the build over it.
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          WASM_FILE: ${{ steps.size.outputs.file }}
+          SIZE: ${{ steps.size.outputs.size }}
+          BASELINE: ${{ steps.size.outputs.baseline }}
+          DELTA: ${{ steps.size.outputs.delta }}
+          PERCENT: ${{ steps.size.outputs.percent }}
+          MAX_ALLOWED: ${{ steps.size.outputs.max_allowed }}
+          STATUS: ${{ steps.size.outputs.status }}
+        with:
+          script: |
+            const marker = '<!-- wasm-size-report -->';
+            const env = process.env;
+            const label = env.WASM_BASELINE_UPDATE_LABEL;
+            const kb = (bytes) => (Number(bytes) / 1024).toFixed(2);
+            const signed = (n) => (Number(n) > 0 ? `+${n}` : `${n}`);
+
+            const headline = {
+              ok: `:white_check_mark: WASM size is within the ${env.WASM_SIZE_THRESHOLD_PERCENT}% regression threshold.`,
+              regressed: `:x: WASM size grew by more than ${env.WASM_SIZE_THRESHOLD_PERCENT}% over the baseline. If the increase is expected, a maintainer can apply the \`${label}\` label to accept it as the new baseline.`,
+              accepted: `:label: \`${label}\` is applied — this size is accepted and \`${env.WASM_SIZE_BASELINE_FILE}\` is being updated on this branch.`,
+              'no-baseline': `:information_source: No baseline found at \`${env.WASM_SIZE_BASELINE_FILE}\`. Apply the \`${label}\` label to record this size as the baseline.`,
+            }[env.STATUS] ?? '';
+
+            const rows = [
+              '| | Bytes | KB |',
+              '|---|---:|---:|',
+            ];
+            if (env.BASELINE) {
+              rows.push(`| Baseline | ${env.BASELINE} | ${kb(env.BASELINE)} |`);
+            }
+            rows.push(`| This PR | ${env.SIZE} | ${kb(env.SIZE)} |`);
+            if (env.BASELINE) {
+              rows.push(`| **Change** | **${signed(env.DELTA)}** | **${env.PERCENT}** |`);
+              rows.push(`| Max allowed | ${env.MAX_ALLOWED} | ${kb(env.MAX_ALLOWED)} |`);
+            }
+
+            const body = [
+              marker,
+              '### WASM size report',
+              '',
+              headline,
+              '',
+              ...rows,
+              '',
+              `<sub>\`${env.WASM_FILE}\` · commit ${context.payload.pull_request.head.sha.slice(0, 7)}</sub>`,
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(
+              (c) => c.user.type === 'Bot' && c.body.includes(marker),
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Update WASM size baseline on PR branch
+        if: >-
+          steps.size.outputs.status == 'accepted' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          SIZE: ${{ steps.size.outputs.size }}
+        run: |
+          git fetch --depth=1 origin "$HEAD_REF"
+          git worktree add -B "$HEAD_REF" ../baseline-update "origin/$HEAD_REF"
+          cd ../baseline-update
+
+          echo "$SIZE" > "$WASM_SIZE_BASELINE_FILE"
+          if git diff --quiet -- "$WASM_SIZE_BASELINE_FILE"; then
+            echo "Baseline already at ${SIZE} bytes; nothing to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$WASM_SIZE_BASELINE_FILE"
+          git commit -m "ci: update wasm size baseline to ${SIZE} bytes"
+          git push origin "HEAD:$HEAD_REF"
+
+      - name: Enforce WASM size regression threshold
+        if: steps.size.outputs.status == 'regressed'
+        env:
+          SIZE: ${{ steps.size.outputs.size }}
+          BASELINE: ${{ steps.size.outputs.baseline }}
+          DELTA: ${{ steps.size.outputs.delta }}
+          PERCENT: ${{ steps.size.outputs.percent }}
+        run: |
+          echo "::error::WASM binary size regressed beyond ${WASM_SIZE_THRESHOLD_PERCENT}% threshold: ${BASELINE} -> ${SIZE} bytes (${DELTA} bytes, ${PERCENT}). If this is expected, apply the '${WASM_BASELINE_UPDATE_LABEL}' label to accept the new size."
+          exit 1
