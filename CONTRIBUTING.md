@@ -8,6 +8,7 @@ Thank you for your interest in contributing! This guide covers everything you ne
 
 - [Your First Contribution](#your-first-contribution)
 - [Prerequisites](#prerequisites)
+- [Pre-commit Hooks](#pre-commit-hooks)
 - [Development Workflow](#development-workflow)
 - [Code Standards](#code-standards)
 - [Branch Naming](#branch-naming)
@@ -129,6 +130,41 @@ cargo install stellar-cli --version 23.0.1 --locked
 
 Verify with `stellar --version`. Used for building, deploying, and inspecting contracts. CI pins this exact version in `interface-check.yml` so `stellar contract inspect` output stays stable across runs — install the same version locally to avoid false-positive interface diffs.
 
+### 4. Node.js 20+ (for JS/TS subprojects and the pre-commit hook)
+
+```bash
+npm install   # at the repo root — installs the pinned eslint and prettier
+```
+
+---
+
+## Pre-commit Hooks
+
+Formatting and lint failures are cheaper to catch locally than in CI. Install the git hook once per clone:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+On every `git commit` the hook checks **only the parts of the repo you staged**, using the same commands as CI:
+
+| Staged files                                       | Checks run                                                                      |
+| -------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `*.rs` / `Cargo.toml` in the contract crate (root) | `cargo fmt --check`, `cargo clippy -- -D warnings`                              |
+| `*.rs` / `Cargo.toml` under `mergemint-backend/`   | `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` |
+| `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `*.ts`, `*.tsx` | `eslint --max-warnings=0`, `prettier --check`                                   |
+| `*.json`, `*.css`, `*.md`, `*.yml`, `*.yaml`       | `prettier --check`                                                              |
+
+ESLint and Prettier are configured at the repo root (`eslint.config.mjs`, `.prettierrc.json`, `.prettierignore`) and run from the root `node_modules`, so run `npm install` first. To fix problems:
+
+```bash
+cargo fmt                              # Rust formatting (run in mergemint-backend/ for the backend)
+npx prettier --write <files>           # JS/TS/JSON/Markdown/YAML formatting
+npx eslint --fix <files>               # auto-fixable lint issues
+```
+
+Re-run `./scripts/install-hooks.sh` after pulling changes to the script. In an emergency you can bypass the hook with `git commit --no-verify`; CI will still run the same checks.
+
 ---
 
 ## Development Workflow
@@ -206,6 +242,16 @@ Use one of these prefixes followed by a short kebab-case description:
 | `ci/`       | Changes to GitHub Actions workflows or scripts      |
 
 Examples: `feat/claim-expiry`, `fix/double-claim-guard`, `docs/snapshot-guide`
+
+### GitHub Actions
+
+Every `uses:` in `.github/workflows/` must reference a full 40-character commit SHA, followed by the human-readable version as a comment:
+
+```yaml
+- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+```
+
+Tags can be moved to point at different code; SHAs cannot. Dependabot (`.github/dependabot.yml`, `github-actions` ecosystem) opens weekly PRs that bump both the SHA and the version comment. To look up the SHA for a new action, run `git ls-remote --tags https://github.com/<owner>/<repo>`.
 
 ---
 

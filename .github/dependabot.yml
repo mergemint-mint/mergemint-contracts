@@ -14,3 +14,21 @@ updates:
       - dependencies
     commit-message:
       prefix: "chore(deps)"
+
+  # Workflow actions are pinned to full commit SHAs (with a `# vX.Y.Z` comment)
+  # so a moved tag can never swap in different code. Dependabot understands this
+  # format and opens PRs that bump both the SHA and the version comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci(deps)"

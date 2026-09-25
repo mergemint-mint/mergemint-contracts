@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt deploy bindings clean help
+.PHONY: build test lint fmt deploy bindings load-test clean help
 
 ## Build the contract for WASM target
 build:
@@ -27,6 +27,10 @@ bindings: build
 		--wasm target/wasm32-unknown-unknown/release/mergemint_contracts.wasm \
 		--output-dir sdk/generated
 
+## Run k6 load scenarios against the backend (SCENARIO=mixed|list|filter|stream|tx)
+load-test:
+	./scripts/k6/run.sh $(or $(SCENARIO),mixed)
+
 ## Remove build artifacts and generated bindings
 clean:
 	cargo clean
@@ -40,5 +44,6 @@ help:
 	@echo "  make fmt       - Auto-format source files"
 	@echo "  make deploy    - Deploy contract via scripts/deploy.sh"
 	@echo "  make bindings  - Generate TypeScript bindings"
+	@echo "  make load-test - Run k6 load scenarios (SCENARIO=mixed|list|filter|stream|tx)"
 	@echo "  make clean     - Clean build artifacts"
 	@echo "  make help      - Show this help"

@@ -7,6 +7,17 @@
   ],
   "scripts": {
     "build:sdk": "npm run build --workspace=mergemint-contracts/sdk",
-    "dev:frontend": "npm run dev --workspace=mergemint-frontend"
+    "dev:frontend": "npm run dev --workspace=mergemint-frontend",
+    "lint:js": "eslint --max-warnings=0 .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.11.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.9",
+    "typescript-eslint": "^8.70.1"
   }
 }
