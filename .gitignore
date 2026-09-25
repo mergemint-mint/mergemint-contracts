@@ -45,3 +45,4 @@ pkg/
 
 # Environment secrets (keep .env.example tracked)
 .env
+storybook-static/

@@ -57,6 +57,7 @@ Before changing anything, check that the existing suite passes on your machine. 
 | Backend (Rust)                 | `mergemint-backend/` | `cargo test --all-features`, `cargo clippy --all-targets -- -D warnings` |
 | TypeScript SDK                 | `sdk/`               | `npm install`, `npm run typecheck`, `npm test`                      |
 | Frontend (React + Vite)        | `frontend/`          | `npm install`, `npx tsc --noEmit`, `npm test`                       |
+| Frontend components (visual)   | `frontend/`          | `npm run storybook` (component catalog on http://localhost:6006)    |
 | Docs only                      | `docs/`, `*.md`      | Preview the Markdown and check that every link and command works    |
 
 `make test` and `make lint` wrap the contract commands.
