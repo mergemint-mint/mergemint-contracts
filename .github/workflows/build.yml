@@ -22,15 +22,8 @@ jobs:
         with:
           targets: wasm32v1-none
 
-      - name: Cache cargo registry and wasm build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/wasm32v1-none
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-wasm-
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
 
       - name: Build WASM
         run: cargo build --release --target wasm32v1-none

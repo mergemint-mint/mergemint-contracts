@@ -12,7 +12,8 @@
 #   build    — ensure the production binary compiles in release mode
 #
 # All jobs are scoped to changes under `mergemint-backend/` so they do not
-# fire on unrelated commits.
+# fire on unrelated commits. Jobs that compile use Swatinem/rust-cache to
+# reuse the cargo registry and target/ between runs.
 
 name: Backend CI
 
@@ -82,15 +83,10 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            mergemint-backend/target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('mergemint-backend/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-clippy-
+          workspaces: mergemint-backend -> target
 
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -107,15 +103,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            mergemint-backend/target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('mergemint-backend/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
+          workspaces: mergemint-backend -> target
 
       - name: Run tests
         run: cargo test --all-features
@@ -133,15 +124,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            mergemint-backend/target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('mergemint-backend/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-release-
+          workspaces: mergemint-backend -> target
 
       - name: Build (release)
         run: cargo build --release

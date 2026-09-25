@@ -24,14 +24,10 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-${{ matrix.toolchain }}-
+          key: ${{ matrix.toolchain }}
 
       - name: Run tests
         run: cargo test --verbose
@@ -45,6 +41,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
