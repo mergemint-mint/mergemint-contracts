@@ -1,0 +1,107 @@
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    #e0e0e0 25%,
+    #f0f0f0 50%,
+    #e0e0e0 75%
+  );
+  background-size: 1000px 100%;
+  animation: shimmer 2s infinite;
+  border-radius: 6px;
+}
+
+/* Respect reduced motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+    background: #f0f0f0;
+  }
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  background: white;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.titleSkeleton {
+  height: 20px;
+  flex: 1;
+  max-width: 200px;
+}
+
+.statusSkeleton {
+  width: 80px;
+  height: 20px;
+  border-radius: 4px;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.descriptionSkeleton {
+  height: 14px;
+  width: 100%;
+  border-radius: 4px;
+}
+
+.descriptionSkeleton:last-child {
+  width: 80%;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.leftFooter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.avatarSkeleton {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+
+.nameSkeleton {
+  width: 100px;
+  height: 14px;
+  border-radius: 4px;
+}
+
+.amountSkeleton {
+  width: 80px;
+  height: 18px;
+  border-radius: 4px;
+  font-weight: 600;
+}
