@@ -3,7 +3,7 @@ import { Bounty, BountyPage, BountyStatus, Contributor } from '../types';
 // All stable endpoints are versioned under /api/v1. The base URL can be
 // overridden for local development via VITE_API_BASE_URL (e.g. http://localhost:8080/api/v1).
 // If no env var is set we default to the versioned prefix served by the same origin.
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '/api/v1';
+export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '/api/v1';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, init);
