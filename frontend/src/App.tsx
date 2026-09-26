@@ -1,12 +1,15 @@
-import React, { useEffect } from 'react';
+import React, { Suspense, useEffect, lazy } from 'react';
 import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router-dom';
 import { WalletProvider, useWallet } from './lib/WalletContext';
 import { WalletConnectButton } from './components/WalletConnectButton';
 import { NetworkMismatchBanner } from './components/NetworkMismatchBanner';
-import { BountyList } from './pages/BountyList';
-import { BountyDetail } from './pages/BountyDetail';
-import { CreateBounty } from './pages/CreateBounty';
-import { ContributorProfile } from './pages/ContributorProfile';
+import { PageSkeleton } from './components/PageSkeleton';
+
+// Lazy load page components to enable route-based code splitting
+const BountyList = lazy(() => import('./pages/BountyList').then(m => ({ default: m.BountyList })));
+const BountyDetail = lazy(() => import('./pages/BountyDetail').then(m => ({ default: m.BountyDetail })));
+const CreateBounty = lazy(() => import('./pages/CreateBounty').then(m => ({ default: m.CreateBounty })));
+const ContributorProfile = lazy(() => import('./pages/ContributorProfile').then(m => ({ default: m.ContributorProfile })));
 
 function Nav() {
   const location = useLocation();
@@ -33,12 +36,14 @@ export default function App() {
       <BrowserRouter>
         <Nav />
         <NetworkMismatchBanner />
-        <Routes>
-          <Route path="/" element={<BountyList />} />
-          <Route path="/bounties/:id" element={<BountyDetail />} />
-          <Route path="/create" element={<CreateBounty />} />
-          <Route path="/contributors/:address" element={<ContributorProfile />} />
-        </Routes>
+        <Suspense fallback={<PageSkeleton />}>
+          <Routes>
+            <Route path="/" element={<BountyList />} />
+            <Route path="/bounties/:id" element={<BountyDetail />} />
+            <Route path="/create" element={<CreateBounty />} />
+            <Route path="/contributors/:address" element={<ContributorProfile />} />
+          </Routes>
+        </Suspense>
       </BrowserRouter>
     </WalletProvider>
   );
