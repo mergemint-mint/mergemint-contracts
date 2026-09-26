@@ -9,10 +9,19 @@ test_snapshots/
 .vscode/
 .idea/
 *.iml
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
 
 # OS artefacts
 .DS_Store
+.DS_Store?
 Thumbs.db
+ehthumbs.db
+desktop.ini
 
 # Misc
 somzilla.md
@@ -20,19 +29,31 @@ somzilla.md
 # JavaScript / Node
 node_modules/
 dist/
+build/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.yarn/
+.pnp.*
 
-# Test snapshots (Jest / Vitest)
+# Test snapshots (Jest / Vitest) — auto-generated, should not be committed
 *.snap
-__snapshots__/
+**/__snapshots__/
 
 # Code coverage
 coverage/
 .nyc_output/
+lcov.info
+*.lcov
 
 # End-to-end test artefacts
 playwright-report/
 test-results/
+blob-report/
+.playwright/
 
 # WebAssembly build output
 *.wasm
@@ -42,7 +63,23 @@ pkg/
 .turbo/
 .next/
 .parcel-cache/
+.vite/
+.rollup.cache/
+
+# TypeScript incremental build info
+*.tsbuildinfo
 
 # Environment secrets (keep .env.example tracked)
 .env
+.env.local
+.env.*.local
+.env.production
+
+# Storybook static output
 storybook-static/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+tmp/
