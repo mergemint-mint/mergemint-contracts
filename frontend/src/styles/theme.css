@@ -162,3 +162,218 @@
   background: var(--mm-error-bg);
   color: var(--mm-error-fg);
 }
+
+/* TopUpModal.tsx */
+.topup-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+
+.topup-modal {
+  background: var(--mm-bg);
+  color: var(--mm-fg);
+  border: 1px solid var(--mm-border);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 480px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+.topup-modal__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--mm-border);
+}
+
+.topup-modal__header h3 {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+
+.topup-modal__close-button {
+  background: transparent;
+  border: none;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: var(--mm-fg-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.topup-modal__close-button:hover {
+  color: var(--mm-fg);
+  background: var(--mm-bg-subtle);
+}
+
+.topup-modal__body {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.topup-modal__description {
+  margin: 0;
+  color: var(--mm-fg-muted);
+  font-size: 0.9rem;
+}
+
+.topup-modal__balance-info {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.875rem;
+  color: var(--mm-fg-muted);
+  background: var(--mm-bg-subtle);
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+
+.topup-modal__input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.topup-modal__input-group label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--mm-fg);
+}
+
+.topup-modal__input-wrapper {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.topup-modal__input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--mm-bg);
+  border: 1px solid var(--mm-border);
+  border-radius: 6px;
+  color: var(--mm-fg);
+  font-size: 1rem;
+  box-sizing: border-box;
+}
+
+.topup-modal__input:focus {
+  outline: none;
+  border-color: var(--mm-accent);
+}
+
+.topup-modal__max-button {
+  position: absolute;
+  right: 8px;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: var(--mm-bg-subtle);
+  border: 1px solid var(--mm-border);
+  border-radius: 4px;
+  color: var(--mm-accent);
+  cursor: pointer;
+}
+
+.topup-modal__max-button:hover {
+  background: var(--mm-accent);
+  color: #ffffff;
+}
+
+.topup-modal__error {
+  margin: 4px 0 0 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.topup-modal__summary {
+  background: var(--mm-bg-subtle);
+  border: 1px solid var(--mm-border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.topup-modal__summary-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.9rem;
+  color: var(--mm-fg);
+}
+
+.topup-modal__summary-total {
+  font-size: 1rem;
+  color: var(--mm-accent);
+}
+
+.topup-modal__divider {
+  border: 0;
+  border-top: 1px solid var(--mm-border);
+  margin: 4px 0;
+}
+
+.topup-modal__confirm-text {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--mm-fg-muted);
+}
+
+.topup-modal__submit-error {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.topup-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--mm-border);
+  background: var(--mm-bg-subtle);
+}
+
+.topup-modal__cancel-button {
+  padding: 8px 16px;
+  background: transparent;
+  border: 1px solid var(--mm-border);
+  border-radius: 6px;
+  color: var(--mm-fg-muted);
+  cursor: pointer;
+}
+
+.topup-modal__cancel-button:hover {
+  color: var(--mm-fg);
+  background: var(--mm-bg);
+}
+
+.topup-open-button {
+  padding: 8px 16px;
+  background: var(--mm-accent);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  margin-top: 12px;
+}
+
+.topup-open-button:hover {
+  opacity: 0.9;
+}
+
