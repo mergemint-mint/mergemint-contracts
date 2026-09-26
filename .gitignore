@@ -46,3 +46,14 @@ pkg/
 # Environment secrets (keep .env.example tracked)
 .env
 storybook-static/
+
+# Vitest / vite cache and temp files
+.vite/
+*.local
+
+# AI assistant temp / session files
+.claude/*.tmp
+.claude/*.tmp.*
+
+# TypeScript build info (incremental compilation cache)
+*.tsbuildinfo
