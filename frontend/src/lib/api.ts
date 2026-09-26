@@ -70,6 +70,15 @@ export const api = {
   claimBounty(id: string): Promise<Bounty> {
     return request(`/bounties/${id}/claim`, { method: 'POST' });
   },
+  /**
+   * Cancels an open bounty and triggers escrow refund.
+   *
+   * @param id Bounty identifier.
+   * @returns Updated bounty data with cancelled status.
+   */
+  cancelBounty(id: string): Promise<Bounty> {
+    return request(`/bounties/${id}/cancel`, { method: 'POST' });
+  },
   getContributor(address: string): Promise<Contributor> {
     return request(`/contributors/${address}`);
   },
