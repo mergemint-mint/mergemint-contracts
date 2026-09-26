@@ -6,6 +6,7 @@ import { mapErrorMessage } from '../utils/format';
 import { StatusBadge } from '../components/StatusBadge';
 import { BountyDetailSkeleton } from '../components/BountyDetailSkeleton';
 import { BountyErrorBoundary } from '../components/BountyErrorBoundary';
+import { MilestoneTracker } from '../components/MilestoneTracker';
 
 function BountyDetailInner() {
   const { id } = useParams<{ id: string }>();
@@ -48,6 +49,7 @@ function BountyDetailInner() {
       <StatusBadge status={bounty.status} />
       <p>{bounty.description}</p>
       {error && <p role="alert">{error}</p>}
+      <MilestoneTracker milestones={bounty.milestones} totalReward={bounty.reward} />
       <button onClick={handleClaim} disabled={claiming || bounty.status !== 'open'}>
         {claiming ? 'Claiming...' : 'Claim Bounty'}
       </button>
