@@ -39,6 +39,8 @@ use std::sync::{Arc, RwLock};
 // instead of only surfacing as a slow query in production.
 #[cfg(test)]
 const BOUNTIES_INDEX_MIGRATION: &str = include_str!("../migrations/0001_add_bounties_indexes.sql");
+#[cfg(test)]
+const AUDIT_LOGS_MIGRATION: &str = include_str!("../migrations/0002_create_audit_logs_table.sql");
 
 /// Lightweight in-memory store used during development / integration tests.
 /// Production deployments replace this with a real database pool.
@@ -50,6 +52,37 @@ pub struct DbStore {
     /// stores the flat id -> JSON blobs used by the dispute/self-claim
     /// flows) since it has its own queryable shape.
     pub bounties: Vec<Bounty>,
+    /// Audit log entries tracking administrative actions like resolve_dispute.
+    pub audit_logs: Vec<AuditLog>,
+}
+
+// ---------------------------------------------------------------------------
+// Audit Logging
+// ---------------------------------------------------------------------------
+
+/// An audit log entry recording an administrative action (e.g., resolve_dispute).
+///
+/// Fields match the database schema defined in migrations/0002_create_audit_logs_table.sql.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditLog {
+    pub id: Option<i64>,
+    pub actor: String,
+    pub action: String,
+    pub target: String,
+    pub timestamp: u64,
+}
+
+impl AuditLog {
+    /// Create a new audit log entry with the given fields.
+    pub fn new(actor: String, action: String, target: String, timestamp: u64) -> Self {
+        AuditLog {
+            id: None,
+            actor,
+            action,
+            target,
+            timestamp,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +168,43 @@ fn paginate(mut bounties: Vec<Bounty>, limit: i64) -> BountyPage {
         bounties,
         next_cursor,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Audit log queries
+// ---------------------------------------------------------------------------
+
+/// Query audit logs, optionally filtering by actor, action, or target.
+/// Results are sorted by timestamp descending (newest first).
+pub fn query_audit_logs(
+    db: &SharedDb,
+    actor: Option<&str>,
+    action: Option<&str>,
+    target: Option<&str>,
+    limit: i64,
+) -> Vec<AuditLog> {
+    let guard = read_db(db);
+    let mut logs: Vec<AuditLog> = guard
+        .audit_logs
+        .iter()
+        .filter(|log| actor.is_none_or(|a| log.actor == a))
+        .filter(|log| action.is_none_or(|a| log.action == a))
+        .filter(|log| target.is_none_or(|t| log.target == t))
+        .cloned()
+        .collect();
+    
+    // Sort by timestamp descending (newest first)
+    logs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    logs.truncate(limit);
+    logs
+}
+
+/// Add an audit log entry to the store.
+pub fn write_audit_log(db: &SharedDb, log: AuditLog) {
+    let mut guard = acquire_db(db);
+    guard.audit_logs.push(log);
 }
 
 /// Shared, thread-safe handle to the database store.
@@ -315,6 +385,109 @@ mod tests {
 
         let guard = acquire_idempotency(&store);
         assert!(guard.entries.is_empty(), "recovered store should be intact");
+    }
+
+    #[test]
+    fn test_audit_logs_migration_has_required_indexes() {
+        let migration = AUDIT_LOGS_MIGRATION.to_lowercase();
+
+        assert!(
+            migration.contains("create table if not exists audit_logs"),
+            "migration must create audit_logs table; got:\n{migration}"
+        );
+        assert!(
+            migration.contains("timestamp bigint not null"),
+            "migration must have timestamp field; got:\n{migration}"
+        );
+        assert!(
+            migration.contains("actor varchar"),
+            "migration must have actor field; got:\n{migration}"
+        );
+        assert!(
+            migration.contains("action varchar"),
+            "migration must have action field; got:\n{migration}"
+        );
+        assert!(
+            migration.contains("target varchar"),
+            "migration must have target field; got:\n{migration}"
+        );
+        assert!(
+            migration.contains("create index if not exists idx_audit_logs_timestamp on audit_logs (timestamp desc)"),
+            "migration must index audit_logs.timestamp DESC; got:\n{migration}"
+        );
+        assert!(
+            migration.contains("create index if not exists idx_audit_logs_actor on audit_logs (actor)"),
+            "migration must index audit_logs.actor; got:\n{migration}"
+        );
+        assert!(
+            migration.contains("create index if not exists idx_audit_logs_action on audit_logs (action)"),
+            "migration must index audit_logs.action; got:\n{migration}"
+        );
+    }
+
+    #[test]
+    fn test_write_and_query_audit_logs() {
+        let db = new_shared_db();
+
+        let log1 = AuditLog::new(
+            "arbitrator-1".to_string(),
+            "resolve_dispute".to_string(),
+            "bounty-123".to_string(),
+            1000,
+        );
+        let log2 = AuditLog::new(
+            "arbitrator-2".to_string(),
+            "resolve_dispute".to_string(),
+            "bounty-456".to_string(),
+            2000,
+        );
+
+        write_audit_log(&db, log1.clone());
+        write_audit_log(&db, log2.clone());
+
+        let logs = query_audit_logs(&db, None, None, None, 100);
+        assert_eq!(logs.len(), 2);
+        // Should be sorted by timestamp descending (newest first)
+        assert_eq!(logs[0].timestamp, 2000);
+        assert_eq!(logs[1].timestamp, 1000);
+    }
+
+    #[test]
+    fn test_query_audit_logs_by_actor() {
+        let db = new_shared_db();
+
+        write_audit_log(&db, AuditLog::new("alice".to_string(), "resolve_dispute".to_string(), "bounty-1".to_string(), 100));
+        write_audit_log(&db, AuditLog::new("bob".to_string(), "resolve_dispute".to_string(), "bounty-2".to_string(), 200));
+        write_audit_log(&db, AuditLog::new("alice".to_string(), "resolve_dispute".to_string(), "bounty-3".to_string(), 300));
+
+        let alice_logs = query_audit_logs(&db, Some("alice"), None, None, 100);
+        assert_eq!(alice_logs.len(), 2);
+        assert!(alice_logs.iter().all(|log| log.actor == "alice"));
+    }
+
+    #[test]
+    fn test_query_audit_logs_by_target() {
+        let db = new_shared_db();
+
+        write_audit_log(&db, AuditLog::new("alice".to_string(), "resolve_dispute".to_string(), "bounty-1".to_string(), 100));
+        write_audit_log(&db, AuditLog::new("bob".to_string(), "resolve_dispute".to_string(), "bounty-2".to_string(), 200));
+        write_audit_log(&db, AuditLog::new("charlie".to_string(), "resolve_dispute".to_string(), "bounty-1".to_string(), 300));
+
+        let bounty1_logs = query_audit_logs(&db, None, None, Some("bounty-1"), 100);
+        assert_eq!(bounty1_logs.len(), 2);
+        assert!(bounty1_logs.iter().all(|log| log.target == "bounty-1"));
+    }
+
+    #[test]
+    fn test_query_audit_logs_respects_limit() {
+        let db = new_shared_db();
+
+        for i in 0..10 {
+            write_audit_log(&db, AuditLog::new("actor".to_string(), "action".to_string(), format!("target-{}", i), i as u64));
+        }
+
+        let limited = query_audit_logs(&db, None, None, None, 3);
+        assert_eq!(limited.len(), 3);
     }
 }
 

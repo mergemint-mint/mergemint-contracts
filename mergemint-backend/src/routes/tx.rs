@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::{
-    acquire_idempotency, read_db, read_idempotency, IdempotencyEntry, SharedDb,
-    SharedIdempotencyStore,
+    acquire_idempotency, read_db, read_idempotency, write_audit_log, AuditLog, IdempotencyEntry,
+    SharedDb, SharedIdempotencyStore,
 };
 
 // ---------------------------------------------------------------------------
@@ -403,6 +403,14 @@ pub async fn resolve_dispute(
                 timestamp = timestamp,
                 "resolve_dispute succeeded"
             );
+            // Write to persistent audit log
+            let audit_log = AuditLog::new(
+                verifier.to_string(),
+                "resolve_dispute".to_string(),
+                bounty_id.to_string(),
+                timestamp,
+            );
+            write_audit_log(&state.db, audit_log);
         }
         Err(_) => {
             let (verifier, bounty_id, outcome, timestamp) =
@@ -528,6 +536,48 @@ async fn self_claim_inner(
         ok: true,
         xdr: Some(xdr),
     })
+}
+
+// ---------------------------------------------------------------------------
+// query_audit_logs handler
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct QueryAuditLogsRequest {
+    pub actor: Option<String>,
+    pub action: Option<String>,
+    pub target: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QueryAuditLogsResponse {
+    pub logs: Vec<AuditLog>,
+}
+
+/// Query audit logs with optional filtering by actor, action, or target.
+/// This is a read-only admin endpoint.
+///
+/// Supported query parameters:
+/// - `actor`: filter by the actor who performed the action (e.g., arbitrator address)
+/// - `action`: filter by action type (e.g., "resolve_dispute")
+/// - `target`: filter by target (e.g., bounty_id)
+/// - `limit`: maximum number of results to return (default: 100, max: 1000)
+pub async fn query_audit_logs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<QueryAuditLogsRequest>,
+) -> Json<QueryAuditLogsResponse> {
+    let limit = params.limit.unwrap_or(100).min(1000).max(1);
+    
+    let logs = crate::db::query_audit_logs(
+        &state.db,
+        params.actor.as_deref(),
+        params.action.as_deref(),
+        params.target.as_deref(),
+        limit,
+    );
+
+    Json(QueryAuditLogsResponse { logs })
 }
 
 // ---------------------------------------------------------------------------
