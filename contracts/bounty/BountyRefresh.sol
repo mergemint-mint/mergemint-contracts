@@ -10,6 +10,17 @@ import "@openzeppelin/contracts/security/Pausable.sol";
  * @dev Handles batch and parallel refresh of contributor bounties
  */
 contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
+    error InvalidBatchSize();
+    error BatchDoesNotExist();
+    error UnauthorizedCaller();
+    error InvalidContributor();
+    error InvalidBountyId();
+    error ContributorsAndBountyIdsMismatch();
+    error EmptyBatch();
+    error BatchAlreadyProcessing();
+    error BatchAlreadyCompleted();
+    error BatchNotProcessing();
+
     // Constants
     uint256 public constant MAX_BATCH_SIZE = 100;
     uint256 public constant MAX_PARALLEL_TASKS = 10;
@@ -59,17 +70,17 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
 
     // Modifiers
     modifier validBatchSize(uint256 size) {
-        require(size > 0 && size <= MAX_BATCH_SIZE, "Invalid batch size");
+        if (size == 0 || size > MAX_BATCH_SIZE) revert InvalidBatchSize();
         _;
     }
 
     modifier batchExists(uint256 batchId) {
-        require(batchId < batchCounter, "Batch does not exist");
+        if (batchId >= batchCounter) revert BatchDoesNotExist();
         _;
     }
 
     modifier onlySelf() {
-        require(msg.sender == address(this), "Only callable by self");
+        if (msg.sender != address(this)) revert UnauthorizedCaller();
         _;
     }
 
@@ -83,11 +94,8 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         address[] calldata contributors,
         uint256[] calldata bountyIds
     ) external onlyOwner validBatchSize(contributors.length) returns (uint256) {
-        require(
-            contributors.length == bountyIds.length,
-            "Contributors and bountyIds length mismatch"
-        );
-        require(contributors.length > 0, "Empty batch");
+        if (contributors.length != bountyIds.length) revert ContributorsAndBountyIdsMismatch();
+        if (contributors.length == 0) revert EmptyBatch();
 
         uint256 batchId = batchCounter++;
         RefreshBatch storage batch = batches[batchId];
@@ -114,8 +122,8 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         batchExists(batchId)
     {
         RefreshBatch storage batch = batches[batchId];
-        require(!batch.isProcessing, "Batch already processing");
-        require(!batch.isCompleted, "Batch already completed");
+        if (batch.isProcessing) revert BatchAlreadyProcessing();
+        if (batch.isCompleted) revert BatchAlreadyCompleted();
 
         batch.isProcessing = true;
         emit BatchProcessingStarted(batchId);
@@ -127,12 +135,15 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
 
         emit ParallelRefreshStarted(batchId, parallelCount);
 
+        address[] memory contributors = batch.contributors;
+        uint256[] memory bountyIds = batch.bountyIds;
+
         // Process in parallel chunks
-        for (uint256 i = 0; i < batchLength; i++) {
+        for (uint256 i = 0; i < batchLength; ++i) {
             _processRefreshTask(
                 batchId,
-                batch.contributors[i],
-                batch.bountyIds[i],
+                contributors[i],
+                bountyIds[i],
                 i
             );
         }
@@ -156,8 +167,8 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         uint256 bountyId,
         uint256 index
     ) internal {
-        require(contributor != address(0), "Invalid contributor address");
-        require(bountyId > 0, "Invalid bounty ID");
+        if (contributor == address(0)) revert InvalidContributor();
+        if (bountyId == 0) revert InvalidBountyId();
 
         uint256 taskId = taskCounter++;
         BountyRefreshTask storage task = refreshTasks[taskId];
@@ -171,7 +182,8 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         contributorTasks[contributor].push(taskId);
 
         string memory reason = "";
-        for (uint256 attempt = 0; attempt <= MAX_TASK_RETRIES; attempt++) {
+        uint256 maxAttempts = MAX_TASK_RETRIES + 1;
+        for (uint256 attempt = 0; attempt < maxAttempts; ++attempt) {
             if (attempt > 0) {
                 emit TaskRetried(batchId, taskId, attempt);
             }
@@ -224,8 +236,8 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         batchExists(batchId)
     {
         RefreshBatch storage batch = batches[batchId];
-        require(batch.isProcessing, "Batch not processing");
-        require(!batch.isCompleted, "Batch already completed");
+        if (!batch.isProcessing) revert BatchNotProcessing();
+        if (batch.isCompleted) revert BatchAlreadyCompleted();
 
         batch.isProcessing = false;
         batch.isCompleted = true;
