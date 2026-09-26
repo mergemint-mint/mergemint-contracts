@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};
 
 use crate::db::{
-    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage,
+    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, Bounty, BountyPage,
 };
 use crate::routes::tx::AppState;
 
@@ -117,7 +117,10 @@ pub async fn bounty_stream(
         })
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(state.sse_keep_alive_duration)
+    )
 }
 
 /// `POST /bounties/{id}/claim`
@@ -163,6 +166,7 @@ mod tests {
             idempotency: new_shared_idempotency_store(),
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
         })
     }
 

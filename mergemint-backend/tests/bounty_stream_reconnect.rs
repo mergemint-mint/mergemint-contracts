@@ -82,6 +82,7 @@ async fn reconnect_after_drop_delivers_no_duplicate_events() {
         idempotency: new_shared_idempotency_store(),
         rate_limiter: mergemint_backend::routes::tx::new_shared_rate_limiter(),
         bounty_broadcast: tokio::sync::broadcast::channel(16).0,
+        sse_keep_alive_duration: Duration::from_secs(15),
     });
     let url = spawn_test_server(state.clone()).await;
     let client = reqwest::Client::new();
@@ -125,5 +126,77 @@ async fn reconnect_after_drop_delivers_no_duplicate_events() {
     assert!(
         !second_events.contains(&r#"{"bountyId":"bounty-before-drop"}"#.to_string()),
         "reconnecting must never replay an event already delivered on the dropped connection"
+    );
+}
+
+/// Test that SSE keep-alive heartbeats arrive within the configured interval.
+/// This verifies that the configurable SSE keep-alive prevents idle connection
+/// timeouts from proxies and load balancers.
+#[tokio::test]
+async fn keep_alive_heartbeat_arrives_within_interval() {
+    let keep_alive_duration = Duration::from_millis(200); // Use short duration for testing
+    let state = Arc::new(AppState {
+        db: new_shared_db(),
+        idempotency: new_shared_idempotency_store(),
+        rate_limiter: mergemint_backend::routes::tx::new_shared_rate_limiter(),
+        bounty_broadcast: tokio::sync::broadcast::channel(16).0,
+        sse_keep_alive_duration: keep_alive_duration,
+    });
+    let url = spawn_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    // Connect to the SSE stream but don't send any bounty events.
+    // The keep-alive should send heartbeats (empty comments) to keep the
+    // connection alive.
+    let mut response = client
+        .get(&url)
+        .send()
+        .await
+        .expect("failed to connect to SSE stream");
+
+    // Measure time between the start and when we receive a keep-alive packet.
+    let start = std::time::Instant::now();
+    let mut buf = String::new();
+
+    // Give the server time to send a keep-alive heartbeat.
+    // We expect it within 1 second (well above the 200ms keep-alive interval).
+    let timeout = Duration::from_secs(1);
+    let deadline = start + timeout;
+
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(100), response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+                // The keep-alive sends a comment-only event (`:` followed by newline).
+                // If we see a double newline with potential SSE content, that's a packet.
+                if buf.contains("\n\n") {
+                    let elapsed = start.elapsed();
+                    // Verify the heartbeat arrived within 1.5x the keep-alive interval
+                    // to account for timing variance and OS scheduling.
+                    assert!(
+                        elapsed < keep_alive_duration * 2,
+                        "keep-alive heartbeat took {:?} but interval is {:?}",
+                        elapsed,
+                        keep_alive_duration
+                    );
+                    return; // Test passed
+                }
+            }
+            Ok(Ok(None)) => {
+                panic!("SSE stream closed unexpectedly");
+            }
+            Ok(Err(e)) => {
+                panic!("error reading from SSE stream: {}", e);
+            }
+            Err(_) => {
+                // Timeout on chunk, try again
+                continue;
+            }
+        }
+    }
+
+    panic!(
+        "no keep-alive heartbeat received within {:?}",
+        timeout
     );
 }

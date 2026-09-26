@@ -35,6 +35,9 @@ pub struct AppState {
     /// Fan-out channel for bounty state-change notifications, consumed by the
     /// `GET /bounties/stream` SSE handler (see `routes::bounties`).
     pub bounty_broadcast: tokio::sync::broadcast::Sender<String>,
+    /// Interval for SSE keep-alive heartbeats to prevent idle connection
+    /// timeouts from load balancers and proxies.
+    pub sse_keep_alive_duration: std::time::Duration,
 }
 
 /// Maximum `self_claim` calls allowed per `SELF_CLAIM_RATE_WINDOW_SECS` window,
@@ -709,6 +712,7 @@ mod tests {
             idempotency: crate::db::new_shared_idempotency_store(),
             rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
         })
     }
 
