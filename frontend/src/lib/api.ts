@@ -70,7 +70,15 @@ export const api = {
   claimBounty(id: string): Promise<Bounty> {
     return request(`/bounties/${id}/claim`, { method: 'POST' });
   },
+  topUpBounty(id: string, amount: string): Promise<Bounty> {
+    return request(`/bounties/${id}/topup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount }),
+    });
+  },
   getContributor(address: string): Promise<Contributor> {
     return request(`/contributors/${address}`);
   },
 };
+
