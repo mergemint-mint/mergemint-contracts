@@ -35,6 +35,9 @@ pub struct AppState {
     /// Fan-out channel for bounty state-change notifications, consumed by the
     /// `GET /bounties/stream` SSE handler (see `routes::bounties`).
     pub bounty_broadcast: tokio::sync::broadcast::Sender<String>,
+    /// In-memory cache for leaderboard data, with 60-second expiry to avoid
+    /// expensive aggregation on every request (see `routes::leaderboard`).
+    pub leaderboard_cache: crate::routes::leaderboard::LeaderboardCache,
 }
 
 /// Maximum `self_claim` calls allowed per `SELF_CLAIM_RATE_WINDOW_SECS` window,
@@ -709,6 +712,7 @@ mod tests {
             idempotency: crate::db::new_shared_idempotency_store(),
             rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
+            leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
         })
     }
 
