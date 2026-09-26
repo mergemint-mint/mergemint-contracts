@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};
 
 use crate::db::{
-    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage,
+    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage, Bounty,
 };
 use crate::routes::tx::AppState;
 

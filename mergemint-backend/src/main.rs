@@ -68,7 +68,7 @@ mod routes;
 
 use db::{new_shared_db, new_shared_idempotency_store};
 use routes::bounties::{get_bounty_route, bounty_stream, claim_bounty, list_bounties, list_bounties_by_assignee};
-use routes::tx::{new_shared_rate_limiter, resolve_dispute, self_claim, AppState};
+use routes::tx::{new_shared_rate_limiter, resolve_dispute, self_claim, query_audit_logs, AppState};
 
 /// Maximum allowed request body size (1 MiB).
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -143,6 +143,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/tx/resolve-dispute", post(resolve_dispute))
         .route("/tx/self-claim", post(self_claim))
+        .route("/admin/audit-logs", get(query_audit_logs))
         .route("/bounties", get(list_bounties))
         .route("/bounties/:id", get(get_bounty_route))
         .route(
