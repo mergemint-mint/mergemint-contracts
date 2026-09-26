@@ -60,3 +60,39 @@ export function mapErrorMessage(raw: string): string {
   }
   return raw;
 }
+
+/**
+ * Formats a Unix-epoch timestamp (seconds) as a relative time string using
+ * Intl.RelativeTimeFormat, e.g. "in 3 days", "2 hours ago".
+ * Falls back to the ISO date string when the timestamp is null/undefined.
+ */
+export function formatRelative(
+  epochSeconds: number | null | undefined,
+  now: Date = new Date()
+): string {
+  if (epochSeconds == null) return '—';
+  const diffMs = epochSeconds * 1000 - now.getTime();
+  const diffSec = Math.round(diffMs / 1000);
+  const absMs = Math.abs(diffMs);
+
+  const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+
+  if (absMs < 60_000) return rtf.format(diffSec, 'second');
+  if (absMs < 3_600_000) return rtf.format(Math.round(diffSec / 60), 'minute');
+  if (absMs < 86_400_000) return rtf.format(Math.round(diffSec / 3600), 'hour');
+  if (absMs < 2_592_000_000) return rtf.format(Math.round(diffSec / 86400), 'day');
+  if (absMs < 31_536_000_000) return rtf.format(Math.round(diffSec / 2_592_000), 'month');
+  return rtf.format(Math.round(diffSec / 31_536_000), 'year');
+}
+
+/**
+ * Returns true when a deadline (Unix epoch seconds) is within 24 hours from now.
+ */
+export function isDeadlineUrgent(
+  epochSeconds: number | null | undefined,
+  now: Date = new Date()
+): boolean {
+  if (epochSeconds == null) return false;
+  const diffMs = epochSeconds * 1000 - now.getTime();
+  return diffMs > 0 && diffMs < 86_400_000;
+}

@@ -46,3 +46,17 @@ pkg/
 # Environment secrets (keep .env.example tracked)
 .env
 storybook-static/
+
+# Local environment overrides
+*.local
+
+# Vite build cache
+.vite/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Lock files (optional – only if your team prefers not to track them)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml

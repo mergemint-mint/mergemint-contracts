@@ -6,9 +6,11 @@ import { mapErrorMessage } from '../utils/format';
 import { StatusBadge } from '../components/StatusBadge';
 import { BountyDetailSkeleton } from '../components/BountyDetailSkeleton';
 import { BountyErrorBoundary } from '../components/BountyErrorBoundary';
+import { useTranslation } from '../i18n';
 
 function BountyDetailInner() {
   const { id } = useParams<{ id: string }>();
+  const { t } = useTranslation();
   const [bounty, setBounty] = useState<Bounty | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [claiming, setClaiming] = useState(false);
@@ -40,7 +42,7 @@ function BountyDetailInner() {
 
   if (loading && !bounty) return <BountyDetailSkeleton />;
   if (error && !bounty) return <p role="alert">{error}</p>;
-  if (!bounty) return <p>Loading...</p>;
+  if (!bounty) return <p>{t('loading')}</p>;
 
   return (
     <div>
@@ -49,7 +51,7 @@ function BountyDetailInner() {
       <p>{bounty.description}</p>
       {error && <p role="alert">{error}</p>}
       <button onClick={handleClaim} disabled={claiming || bounty.status !== 'open'}>
-        {claiming ? 'Claiming...' : 'Claim Bounty'}
+        {claiming ? t('claiming') : t('claim_bounty')}
       </button>
     </div>
   );
