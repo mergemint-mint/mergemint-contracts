@@ -60,6 +60,22 @@ export interface CreateBountyParams {
   milestones?: Array<{ description: string; reward: bigint; completed: boolean }>;
 }
 
+export interface MutationOptions {
+  /** When true, returns fee and footprint instead of assembled transaction */
+  simulate?: boolean;
+}
+
+export interface SimulateResult {
+  /** Resource fee in stroops */
+  resourceFee: bigint;
+  /** Simulation footprint (CPU, memory, ops, etc.) */
+  footprint: {
+    cpu: bigint;
+    mem: bigint;
+    ops?: Record<string, unknown>;
+  };
+}
+
 export type MergeMintErrorCode =
   | 'INVALID_CONFIG'
   | 'INVALID_CONTRACT_ID'
