@@ -157,6 +157,116 @@
   color: var(--mm-fg);
 }
 
+/* MilestoneTracker.tsx */
+.milestone-tracker {
+  background: var(--mm-bg-subtle);
+  border: 1px solid var(--mm-border);
+  border-radius: 4px;
+  padding: 16px;
+  margin: 16px 0;
+}
+
+.milestone-tracker__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.milestone-tracker__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--mm-fg);
+  margin: 0;
+}
+
+.milestone-tracker__progress-summary {
+  font-size: 14px;
+  color: var(--mm-fg-muted);
+}
+
+.milestone-tracker__progress-bar {
+  height: 8px;
+  background: var(--mm-border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 16px;
+  display: block;
+}
+
+.milestone-tracker__progress-fill {
+  height: 100%;
+  background: var(--mm-success-fg);
+  transition: width 0.3s ease;
+}
+
+.milestone-tracker__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.milestone-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--mm-border);
+}
+
+.milestone-item:last-child {
+  border-bottom: none;
+}
+
+.milestone-item__checkbox {
+  margin-top: 2px;
+  cursor: default;
+  accent-color: var(--mm-success-fg);
+  flex-shrink: 0;
+}
+
+.milestone-item__content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  gap: 12px;
+}
+
+.milestone-item__description {
+  color: var(--mm-fg);
+  flex: 1;
+}
+
+.milestone-item--completed .milestone-item__description {
+  text-decoration: line-through;
+  color: var(--mm-fg-muted);
+}
+
+.milestone-item__reward {
+  color: var(--mm-fg-muted);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.milestone-tracker__total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 12px;
+  border-top: 1px solid var(--mm-border);
+  margin-top: 12px;
+  font-weight: 600;
+}
+
+.milestone-tracker__total-label {
+  color: var(--mm-fg-muted);
+}
+
+.milestone-tracker__total-value {
+  color: var(--mm-fg);
+}
+
 /* Shared across CreateBounty.tsx and BountyDetail.tsx */
 .error {
   background: var(--mm-error-bg);
