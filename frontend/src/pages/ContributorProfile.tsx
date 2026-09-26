@@ -4,10 +4,12 @@ import { api } from '../lib/api';
 import { Contributor } from '../types';
 import { mapErrorMessage } from '../utils/format';
 import { useWallet } from '../lib/WalletContext';
+import { useTranslation } from '../i18n';
 
 export function ContributorProfile() {
   const { address } = useParams<{ address: string }>();
   const { address: walletAddress } = useWallet();
+  const { t } = useTranslation();
   const [contributor, setContributor] = useState<Contributor | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -20,17 +22,17 @@ export function ContributorProfile() {
   }, [address, walletAddress]);
 
   if (!walletAddress) {
-    return <p className="contributor-profile__empty">Connect your wallet to view contributor profiles.</p>;
+    return <p className="contributor-profile__empty">{t('connect_wallet_prompt')}</p>;
   }
 
   if (error) return <p role="alert">{error}</p>;
-  if (!contributor) return <p>Loading...</p>;
+  if (!contributor) return <p>{t('loading')}</p>;
 
   return (
     <div>
       <h1>{contributor.address}</h1>
-      <p>Reputation: {contributor.reputation}</p>
-      <p>Completed bounties: {contributor.completedBounties}</p>
+      <p>{t('reputation')}: {contributor.reputation}</p>
+      <p>{t('completed_bounties')}: {contributor.completedBounties}</p>
     </div>
   );
 }

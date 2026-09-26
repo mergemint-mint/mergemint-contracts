@@ -2,9 +2,11 @@ import React, { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { mapErrorMessage } from '../utils/format';
+import { useTranslation } from '../i18n';
 
 export function CreateBounty() {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [reward, setReward] = useState('');
@@ -30,17 +32,17 @@ export function CreateBounty() {
 
   return (
     <form onSubmit={handleSubmit}>
-      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" required />
+      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t('placeholder_title')} required />
       <textarea
         value={description}
         onChange={(e) => setDescription(e.target.value)}
-        placeholder="Description"
+        placeholder={t('placeholder_description')}
         required
       />
-      <input value={reward} onChange={(e) => setReward(e.target.value)} placeholder="Reward (XLM)" required />
+      <input value={reward} onChange={(e) => setReward(e.target.value)} placeholder={t('placeholder_reward')} required />
       {error && <p role="alert">{error}</p>}
       <button type="submit" disabled={submitting}>
-        {submitting ? 'Creating...' : 'Create Bounty'}
+        {submitting ? t('creating') : t('create_bounty')}
       </button>
     </form>
   );
