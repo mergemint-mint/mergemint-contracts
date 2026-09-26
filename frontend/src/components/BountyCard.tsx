@@ -6,6 +6,7 @@ import { CopyButton } from "./CopyButton";
 interface BountyCardProps {
   bounty?: Bounty | ApiBounty;
   loading?: boolean;
+  highlighted?: boolean;
 }
 
 // Skeleton placeholder shown in place of a BountyCard while its bounty data
@@ -21,13 +22,15 @@ function BountyCardSkeleton() {
   );
 }
 
-export function BountyCard({ bounty, loading }: BountyCardProps) {
+export function BountyCard({ bounty, loading, highlighted }: BountyCardProps) {
   if (loading || !bounty) {
     return <BountyCardSkeleton />;
   }
 
+  const className = highlighted ? "bounty-card bounty-card--highlighted" : "bounty-card";
+
   return (
-    <div className="bounty-card">
+    <div className={className}>
       <span className="bounty-card__id" title={bounty.id}>
         {shortenAddress(bounty.id)}
         <CopyButton value={bounty.id} />

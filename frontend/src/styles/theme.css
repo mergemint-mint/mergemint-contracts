@@ -58,6 +58,11 @@
   background: var(--mm-bg);
   color: var(--mm-fg);
   border: 1px solid var(--mm-border);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+.bounty-card--highlighted {
+  border-color: var(--mm-accent);
+  box-shadow: 0 0 0 2px var(--mm-accent);
 }
 .bounty-card__id,
 .bounty-card__creator {
