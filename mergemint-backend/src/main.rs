@@ -68,6 +68,7 @@ mod routes;
 
 use db::{new_shared_db, new_shared_idempotency_store};
 use routes::bounties::{get_bounty_route, bounty_stream, claim_bounty, list_bounties, list_bounties_by_assignee};
+use routes::leaderboard::get_leaderboard_route;
 use routes::tx::{new_shared_rate_limiter, resolve_dispute, self_claim, AppState};
 
 /// Maximum allowed request body size (1 MiB).
@@ -137,6 +138,7 @@ async fn main() {
         idempotency,
         rate_limiter: new_shared_rate_limiter(),
         bounty_broadcast,
+        leaderboard_cache: routes::leaderboard::new_leaderboard_cache(),
     });
 
     let app = Router::new()
@@ -149,6 +151,7 @@ async fn main() {
             "/bounties/assignee/:address",
             get(list_bounties_by_assignee),
         )
+        .route("/leaderboard", get(get_leaderboard_route))
         // ── Bounty push channel (#482) ─────────────────────────────────────
         .route("/bounties/:id/claim", post(claim_bounty))
         .route("/bounties/stream", get(bounty_stream))
