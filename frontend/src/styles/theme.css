@@ -162,3 +162,198 @@
   background: var(--mm-error-bg);
   color: var(--mm-error-fg);
 }
+
+/* CancelBountyDialog.tsx */
+.cancel-bounty-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+
+.cancel-bounty-dialog {
+  background: var(--mm-bg);
+  color: var(--mm-fg);
+  border: 1px solid var(--mm-border);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 480px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+.cancel-bounty-dialog__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--mm-border);
+}
+
+.cancel-bounty-dialog__header h3 {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--mm-fg);
+}
+
+.cancel-bounty-dialog__close-button {
+  background: transparent;
+  border: none;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: var(--mm-fg-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.cancel-bounty-dialog__close-button:hover:not(:disabled) {
+  color: var(--mm-fg);
+  background: var(--mm-bg-subtle);
+}
+
+.cancel-bounty-dialog__close-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cancel-bounty-dialog__body {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.cancel-bounty-dialog__warning {
+  margin: 0;
+  padding: 12px;
+  background: var(--mm-error-bg);
+  color: var(--mm-error-fg);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.cancel-bounty-dialog__refund-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.95rem;
+  background: var(--mm-bg-subtle);
+  border: 1px solid var(--mm-border);
+  padding: 10px 14px;
+  border-radius: 6px;
+}
+
+.cancel-bounty-dialog__refund-label {
+  color: var(--mm-fg-muted);
+}
+
+.cancel-bounty-dialog__refund-value {
+  color: var(--mm-fg);
+  font-size: 1.05rem;
+}
+
+.cancel-bounty-dialog__confirm-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cancel-bounty-dialog__confirm-label {
+  font-size: 0.875rem;
+  color: var(--mm-fg);
+  line-height: 1.4;
+}
+
+.cancel-bounty-dialog__input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--mm-bg);
+  border: 1px solid var(--mm-border);
+  border-radius: 6px;
+  color: var(--mm-fg);
+  font-size: 0.95rem;
+  box-sizing: border-box;
+}
+
+.cancel-bounty-dialog__input:focus {
+  outline: none;
+  border-color: var(--mm-accent);
+}
+
+.cancel-bounty-dialog__error {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.cancel-bounty-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--mm-border);
+  background: var(--mm-bg-subtle);
+}
+
+.cancel-bounty-dialog__cancel-button {
+  padding: 8px 16px;
+  background: transparent;
+  border: 1px solid var(--mm-border);
+  border-radius: 6px;
+  color: var(--mm-fg-muted);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.cancel-bounty-dialog__cancel-button:hover:not(:disabled) {
+  color: var(--mm-fg);
+  background: var(--mm-bg);
+}
+
+.cancel-bounty-dialog__confirm-button {
+  padding: 8px 16px;
+  background: var(--mm-error-fg);
+  color: #ffffff;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.cancel-bounty-dialog__confirm-button:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.cancel-bounty-dialog__confirm-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cancel-bounty-open-button {
+  padding: 8px 16px;
+  background: transparent;
+  color: var(--mm-error-fg);
+  border: 1px solid var(--mm-error-fg);
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  margin-left: 8px;
+}
+
+.cancel-bounty-open-button:hover:not(:disabled) {
+  background: var(--mm-error-bg);
+}
+
+.cancel-bounty-open-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
