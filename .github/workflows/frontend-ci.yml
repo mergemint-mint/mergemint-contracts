@@ -71,6 +71,33 @@ jobs:
         run: npx eslint src --ext .ts,.tsx
         continue-on-error: true
 
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: ${{ runner.os }}-frontend-${{ hashFiles('frontend/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-frontend-
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Run unit tests
+        run: npx vitest run
+
   build:
     name: Build
     runs-on: ubuntu-latest

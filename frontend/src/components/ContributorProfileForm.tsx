@@ -1,6 +1,11 @@
-import React, { useEffect, useState } from "react";
-import { CharCounter } from "./CharCounter";
-import { SYMBOL_MAX_LENGTH } from "../lib/validation";
+/**
+ * ContributorProfileForm — reusable component for editing contributor metadata
+ * and viewing assigned bounties. Migrated from app/src/components/ContributorProfile.tsx
+ * as part of frontend consolidation (#916).
+ */
+import React, { useEffect, useState } from 'react';
+import { CharCounter } from './CharCounter';
+import { SYMBOL_MAX_LENGTH } from '../lib/validation';
 
 // Minimal Bounty type used for the assignee list display
 interface AssigneeBounty {
@@ -14,18 +19,18 @@ export interface ContributorProfileFormValues {
   metadata: string;
 }
 
-interface ContributorProfileProps {
+interface ContributorProfileFormProps {
   initialMetadata?: string;
   /** Stellar address of the contributor — used to fetch assigned bounties. */
   address?: string;
   onSave: (values: ContributorProfileFormValues) => void;
 }
 
-export function ContributorProfile({
-  initialMetadata = "",
+export function ContributorProfileForm({
+  initialMetadata = '',
   address,
   onSave,
-}: ContributorProfileProps) {
+}: ContributorProfileFormProps) {
   const [metadata, setMetadata] = useState(initialMetadata);
   const [assignedBounties, setAssignedBounties] = useState<AssigneeBounty[]>([]);
   const [bountiesLoading, setBountiesLoading] = useState(false);
@@ -34,11 +39,12 @@ export function ContributorProfile({
   const isOverLimit = metadata.length > SYMBOL_MAX_LENGTH;
 
   // Fetch bounties assigned to this contributor whenever the address changes.
-  // Uses the new GET /api/v1/bounties/assignee/{address} endpoint (#481).
+  // Uses the GET /api/v1/bounties/assignee/{address} endpoint (#481).
   useEffect(() => {
     if (!address) return;
 
-    const apiBase = (import.meta as Record<string, Record<string, string>>).env?.VITE_API_BASE_URL ?? "/api/v1";
+    const apiBase =
+      (import.meta as Record<string, Record<string, string>>).env?.VITE_API_BASE_URL ?? '/api/v1';
     setBountiesLoading(true);
     setBountiesError(null);
 
@@ -72,8 +78,7 @@ export function ContributorProfile({
         <div className="field-footer">
           <CharCounter length={metadata.length} max={SYMBOL_MAX_LENGTH} />
           <span className="helper-text">
-            Stored on-chain as a Symbol, limited to {SYMBOL_MAX_LENGTH}{" "}
-            characters.
+            Stored on-chain as a Symbol, limited to {SYMBOL_MAX_LENGTH} characters.
           </span>
         </div>
         {isOverLimit && (
