@@ -20,7 +20,11 @@ test("claim -> raise dispute -> resolve dispute flow", async ({ page, context })
   await page.getByRole("button", { name: "Connect Wallet" }).click();
   await page.getByRole("button", { name: "Create Bounty" }).click();
   await page.getByLabel("Title").fill("E2E Dispute Test Bounty");
+  await page.getByLabel("Description").fill("E2E Dispute Test Bounty Description");
+  await page.getByRole("button", { name: "Next" }).click();
   await page.getByLabel("Reward Amount").fill("10");
+  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: "Next" }).click();
   await page.getByRole("button", { name: "Submit" }).click();
 
   await expect(page.getByText("Status: open")).toBeVisible();
