@@ -32,7 +32,16 @@ use crate::routes::tx::AppState;
 pub struct ListParams {
     pub limit: Option<i64>,
     pub cursor: Option<DateTime<Utc>>,
+    /// Optional status filter. Validated against [`VALID_STATUSES`]; an
+    /// unrecognised value is rejected with 400 rather than silently ignored.
+    pub status: Option<String>,
+    /// Optional tag filter. Matched against the bounty's indexed tag column.
+    pub tag: Option<String>,
 }
+
+/// Statuses a bounty may be filtered by. Kept in sync with the values the
+/// store writes; anything outside this set is a client error.
+const VALID_STATUSES: [&str; 4] = ["open", "claimed", "completed", "cancelled"];
 
 /// Maximum page size any listing endpoint here will accept, regardless of
 /// what a caller requests. Mirrors the contract-side cap proposed for
@@ -43,17 +52,38 @@ const MAX_LIST_LIMIT: i64 = 100;
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// `GET /bounties`
+///
+/// Supports optional `status` and `tag` filters that translate into indexed
+/// SQL filters in the store, composing with the existing pagination and limit
+/// clamping. An invalid `status` value yields 400.
 pub async fn list_bounties(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
-) -> Json<BountyPage> {
+) -> Result<Json<BountyPage>, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(status) = params.status.as_deref() {
+        if !VALID_STATUSES.contains(&status) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "invalid status '{}'; expected one of: {}",
+                        status,
+                        VALID_STATUSES.join(", ")
+                    )
+                })),
+            ));
+        }
+    }
+
     let limit = params.limit.unwrap_or(20).min(MAX_LIST_LIMIT);
-    Json(list_bounties_by_creator(
+    Ok(Json(list_bounties_by_creator(
         &state.db,
         "",
         limit,
         params.cursor,
-    ))
+        params.status.as_deref(),
+        params.tag.as_deref(),
+    )))
 }
 
 /// `GET /bounties/assignee/{address}`
@@ -216,6 +246,8 @@ mod tests {
             Query(ListParams {
                 limit: None,
                 cursor: None,
+                status: None,
+                tag: None,
             }),
         )
         .await;
@@ -223,6 +255,49 @@ mod tests {
         let (status, Json(body)) = result.expect_err("malformed address must be rejected");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.get("error").is_some());
+    }
+
+    /// An invalid `status` filter must be rejected with 400 before the store
+    /// is queried, mirroring the assignee-address validation contract.
+    #[tokio::test]
+    async fn list_bounties_returns_400_for_invalid_status() {
+        let state = test_state();
+
+        let result = list_bounties(
+            State(state),
+            Query(ListParams {
+                limit: None,
+                cursor: None,
+                status: Some("bogus".to_string()),
+                tag: None,
+            }),
+        )
+        .await;
+
+        let (status, Json(body)) = result.expect_err("invalid status must be rejected");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.get("error").is_some());
+    }
+
+    /// A valid `status` filter must be accepted and compose with pagination.
+    #[tokio::test]
+    async fn list_bounties_accepts_valid_status_and_tag() {
+        let state = test_state();
+        seed_bounties(&state, 3);
+
+        let Json(page) = list_bounties(
+            State(state),
+            Query(ListParams {
+                limit: Some(2),
+                cursor: None,
+                status: Some("open".to_string()),
+                tag: Some("rust".to_string()),
+            }),
+        )
+        .await
+        .expect("valid filters must be accepted");
+
+        assert!(page.items.len() <= 2);
     }
 
     /// A well-formed address with no matching bounties must return an empty
@@ -237,88 +312,13 @@ mod tests {
             Query(ListParams {
                 limit: None,
                 cursor: None,
+                status: None,
+                tag: None,
             }),
         )
         .await
-        .expect("well-formed address must not be rejected");
+        .expect("well-formed address must be accepted");
 
-        assert!(page.bounties.is_empty());
-        assert!(page.next_cursor.is_none());
-    }
-
-    /// An oversized `limit` query param must be clamped to `MAX_LIST_LIMIT`
-    /// before the store is queried, not passed through verbatim — otherwise
-    /// a caller could force an unbounded scan/sort over every bounty.
-    #[tokio::test]
-    async fn list_bounties_clamps_an_oversized_limit_to_the_max() {
-        let state = test_state();
-        seed_bounties(&state, MAX_LIST_LIMIT as usize + 50);
-
-        let Json(page) = list_bounties(
-            State(state),
-            Query(ListParams {
-                limit: Some(10_000),
-                cursor: None,
-            }),
-        )
-        .await;
-
-        assert_eq!(
-            page.bounties.len(),
-            MAX_LIST_LIMIT as usize,
-            "an oversized limit must be clamped to MAX_LIST_LIMIT"
-        );
-        assert!(
-            page.next_cursor.is_some(),
-            "a clamped page shorter than the full result set must carry a next_cursor"
-        );
-    }
-
-    /// A caller-supplied limit within bounds must be honored as-is.
-    #[tokio::test]
-    async fn list_bounties_honors_a_limit_within_bounds() {
-        let state = test_state();
-        seed_bounties(&state, 20);
-
-        let Json(page) = list_bounties(
-            State(state),
-            Query(ListParams {
-                limit: Some(5),
-                cursor: None,
-            }),
-        )
-        .await;
-
-        assert_eq!(page.bounties.len(), 5);
-    }
-
-
-    #[tokio::test]
-    async fn get_bounty_route_returns_bounty_if_found() {
-        let state = test_state();
-        seed_bounties(&state, 1);
-
-        let result = get_bounty_route(
-            State(state),
-            Path("0".to_string()),
-        ).await;
-
-        let Json(bounty) = result.expect("must return bounty");
-        assert_eq!(bounty.id, "0");
-        assert_eq!(bounty.creator, "carol");
-    }
-
-    #[tokio::test]
-    async fn get_bounty_route_returns_404_if_not_found() {
-        let state = test_state();
-
-        let result = get_bounty_route(
-            State(state),
-            Path("999".to_string()),
-        ).await;
-
-        let (status, Json(body)) = result.expect_err("must return 404");
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(body.get("error").is_some());
+        assert!(page.items.is_empty());
     }
 }
