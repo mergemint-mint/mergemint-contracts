@@ -14,8 +14,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export type BountySortField = 'reward' | 'deadline' | 'created';
+export type SortOrder = 'asc' | 'desc';
+
 export type ListBountiesParams = {
   status?: BountyStatus;
+  tag?: string;
+  sort?: BountySortField;
+  order?: SortOrder;
   cursor?: string;
   limit?: number;
 };
