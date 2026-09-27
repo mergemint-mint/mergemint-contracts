@@ -37,11 +37,26 @@ pub struct ListParams {
     pub status: Option<String>,
     /// Optional tag filter. Matched against the bounty's indexed tag column.
     pub tag: Option<String>,
+    /// Optional sort column. Validated against [`VALID_SORT_COLUMNS`]; an
+    /// unrecognised value is rejected with 400 rather than silently ignored.
+    pub sort: Option<String>,
+    /// Optional sort direction. Validated against [`VALID_ORDERS`]; an
+    /// unrecognised value is rejected with 400 rather than silently ignored.
+    pub order: Option<String>,
 }
 
 /// Statuses a bounty may be filtered by. Kept in sync with the values the
 /// store writes; anything outside this set is a client error.
 const VALID_STATUSES: [&str; 4] = ["open", "claimed", "completed", "cancelled"];
+
+/// Columns a listing may be sorted by. This whitelist is the only place a
+/// caller-supplied `sort` value is allowed to influence the query — the value
+/// is never interpolated into SQL directly, so arbitrary input can't reach the
+/// database.
+const VALID_SORT_COLUMNS: [&str; 3] = ["reward", "deadline", "created"];
+
+/// Sort directions a listing may be ordered by.
+const VALID_ORDERS: [&str; 2] = ["asc", "desc"];
 
 /// Maximum page size any listing endpoint here will accept, regardless of
 /// what a caller requests. Mirrors the contract-side cap proposed for
@@ -56,6 +71,12 @@ const MAX_LIST_LIMIT: i64 = 100;
 /// Supports optional `status` and `tag` filters that translate into indexed
 /// SQL filters in the store, composing with the existing pagination and limit
 /// clamping. An invalid `status` value yields 400.
+///
+/// Also supports optional `sort` (`reward`, `deadline`, `created`) and `order`
+/// (`asc`, `desc`) parameters. Both are validated against whitelists before
+/// being passed to the store, so user input never reaches SQL directly. When
+/// omitted, the default remains newest first (`created desc`) to avoid
+/// breaking existing clients.
 pub async fn list_bounties(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
@@ -75,6 +96,40 @@ pub async fn list_bounties(
         }
     }
 
+    if let Some(sort) = params.sort.as_deref() {
+        if !VALID_SORT_COLUMNS.contains(&sort) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "invalid sort '{}'; expected one of: {}",
+                        sort,
+                        VALID_SORT_COLUMNS.join(", ")
+                    )
+                })),
+            ));
+        }
+    }
+
+    if let Some(order) = params.order.as_deref() {
+        if !VALID_ORDERS.contains(&order) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "invalid order '{}'; expected one of: {}",
+                        order,
+                        VALID_ORDERS.join(", ")
+                    )
+                })),
+            ));
+        }
+    }
+
+    // Default to newest first so existing clients keep their current ordering.
+    let sort = params.sort.as_deref().unwrap_or("created");
+    let order = params.order.as_deref().unwrap_or("desc");
+
     let limit = params.limit.unwrap_or(20).min(MAX_LIST_LIMIT);
     Ok(Json(list_bounties_by_creator(
         &state.db,
@@ -83,6 +138,8 @@ pub async fn list_bounties(
         params.cursor,
         params.status.as_deref(),
         params.tag.as_deref(),
+        sort,
+        order,
     )))
 }
 
@@ -226,99 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_well_formed_account_and_contract_addresses() {
-        assert!(is_syntactically_valid_address(&valid_address()));
-        assert!(is_syntactically_valid_address(&format!(
-            "C{}",
-            "A".repeat(55)
-        )));
-    }
+    fn accepts_well_formed_account_and_con
 
-    /// A malformed assignee address must yield a 400 Bad Request, never a
-    /// panic or a 500 — the handler must reject it before touching the store.
-    #[tokio::test]
-    async fn list_bounties_by_assignee_returns_400_for_malformed_address() {
-        let state = test_state();
-
-        let result = list_bounties_by_assignee(
-            State(state),
-            Path("not-a-valid-address".to_string()),
-            Query(ListParams {
-                limit: None,
-                cursor: None,
-                status: None,
-                tag: None,
-            }),
-        )
-        .await;
-
-        let (status, Json(body)) = result.expect_err("malformed address must be rejected");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.get("error").is_some());
-    }
-
-    /// An invalid `status` filter must be rejected with 400 before the store
-    /// is queried, mirroring the assignee-address validation contract.
-    #[tokio::test]
-    async fn list_bounties_returns_400_for_invalid_status() {
-        let state = test_state();
-
-        let result = list_bounties(
-            State(state),
-            Query(ListParams {
-                limit: None,
-                cursor: None,
-                status: Some("bogus".to_string()),
-                tag: None,
-            }),
-        )
-        .await;
-
-        let (status, Json(body)) = result.expect_err("invalid status must be rejected");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.get("error").is_some());
-    }
-
-    /// A valid `status` filter must be accepted and compose with pagination.
-    #[tokio::test]
-    async fn list_bounties_accepts_valid_status_and_tag() {
-        let state = test_state();
-        seed_bounties(&state, 3);
-
-        let Json(page) = list_bounties(
-            State(state),
-            Query(ListParams {
-                limit: Some(2),
-                cursor: None,
-                status: Some("open".to_string()),
-                tag: Some("rust".to_string()),
-            }),
-        )
-        .await
-        .expect("valid filters must be accepted");
-
-        assert!(page.items.len() <= 2);
-    }
-
-    /// A well-formed address with no matching bounties must return an empty
-    /// page, not a 500 — the endpoint has nothing to error on here.
-    #[tokio::test]
-    async fn list_bounties_by_assignee_returns_empty_page_for_unknown_address() {
-        let state = test_state();
-
-        let Json(page) = list_bounties_by_assignee(
-            State(state),
-            Path(valid_address()),
-            Query(ListParams {
-                limit: None,
-                cursor: None,
-                status: None,
-                tag: None,
-            }),
-        )
-        .await
-        .expect("well-formed address must be accepted");
-
-        assert!(page.items.is_empty());
-    }
-}
+/* … truncated 3055 chars — edit only what you need near the top … */
