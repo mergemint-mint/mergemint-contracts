@@ -22,7 +22,8 @@ use std::sync::Arc;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};
 
 use crate::db::{
-    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage,
+    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, Bounty,
+    BountyPage,
 };
 use crate::routes::tx::AppState;
 
@@ -135,7 +136,6 @@ pub async fn claim_bounty(
         "status": "claimed"
     }))
 }
-
 
 /// `GET /bounties/{id}`
 pub async fn get_bounty_route(
@@ -292,16 +292,12 @@ mod tests {
         assert_eq!(page.bounties.len(), 5);
     }
 
-
     #[tokio::test]
     async fn get_bounty_route_returns_bounty_if_found() {
         let state = test_state();
         seed_bounties(&state, 1);
 
-        let result = get_bounty_route(
-            State(state),
-            Path("0".to_string()),
-        ).await;
+        let result = get_bounty_route(State(state), Path("0".to_string())).await;
 
         let Json(bounty) = result.expect("must return bounty");
         assert_eq!(bounty.id, "0");
@@ -312,10 +308,7 @@ mod tests {
     async fn get_bounty_route_returns_404_if_not_found() {
         let state = test_state();
 
-        let result = get_bounty_route(
-            State(state),
-            Path("999".to_string()),
-        ).await;
+        let result = get_bounty_route(State(state), Path("999".to_string())).await;
 
         let (status, Json(body)) = result.expect_err("must return 404");
         assert_eq!(status, StatusCode::NOT_FOUND);

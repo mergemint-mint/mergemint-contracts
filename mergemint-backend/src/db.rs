@@ -39,6 +39,9 @@ use std::sync::{Arc, RwLock};
 // instead of only surfacing as a slow query in production.
 #[cfg(test)]
 const BOUNTIES_INDEX_MIGRATION: &str = include_str!("../migrations/0001_add_bounties_indexes.sql");
+#[cfg(test)]
+const WEBHOOK_SUBSCRIPTIONS_MIGRATION: &str =
+    include_str!("../migrations/0002_create_webhook_subscriptions.sql");
 
 /// Lightweight in-memory store used during development / integration tests.
 /// Production deployments replace this with a real database pool.
@@ -50,6 +53,8 @@ pub struct DbStore {
     /// stores the flat id -> JSON blobs used by the dispute/self-claim
     /// flows) since it has its own queryable shape.
     pub bounties: Vec<Bounty>,
+    /// Active and inactive webhook subscriptions (#881)
+    pub webhook_subscriptions: HashMap<String, WebhookSubscription>,
 }
 
 // ---------------------------------------------------------------------------
@@ -316,13 +321,97 @@ mod tests {
         let guard = acquire_idempotency(&store);
         assert!(guard.entries.is_empty(), "recovered store should be intact");
     }
+
+    #[test]
+    fn test_webhook_subscriptions_migration_covers_schema() {
+        let migration = WEBHOOK_SUBSCRIPTIONS_MIGRATION.to_lowercase();
+        assert!(migration.contains("create table if not exists webhook_subscriptions"));
+        assert!(migration.contains("idx_webhook_subscriptions_active"));
+    }
+
+    #[test]
+    fn test_webhook_subscriptions_crud() {
+        let db = new_shared_db();
+        let sub = add_webhook_subscription(
+            &db,
+            "sub-1".to_string(),
+            "https://example.com/webhook".to_string(),
+            "secret-123".to_string(),
+            vec!["bounty_claimed".to_string()],
+        );
+
+        assert_eq!(sub.id, "sub-1");
+        assert_eq!(sub.url, "https://example.com/webhook");
+
+        let fetched = get_webhook_subscription(&db, "sub-1");
+        assert_eq!(fetched, Some(sub.clone()));
+
+        let list = list_webhook_subscriptions(&db);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "sub-1");
+
+        let deleted = delete_webhook_subscription(&db, "sub-1");
+        assert!(deleted);
+        assert_eq!(get_webhook_subscription(&db, "sub-1"), None);
+        assert!(list_webhook_subscriptions(&db).is_empty());
+    }
 }
 
 /// Get a single bounty by id
-pub fn get_bounty(
-    db: &SharedDb,
-    id: &str,
-) -> Option<Bounty> {
+pub fn get_bounty(db: &SharedDb, id: &str) -> Option<Bounty> {
     let guard = read_db(db);
     guard.bounties.iter().find(|b| b.id == id).cloned()
+}
+
+/// A registered webhook subscription for receiving bounty event notifications.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookSubscription {
+    pub id: String,
+    pub url: String,
+    pub secret: String,
+    pub event_types: Vec<String>,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Register a new webhook subscription in the database.
+pub fn add_webhook_subscription(
+    db: &SharedDb,
+    id: String,
+    url: String,
+    secret: String,
+    event_types: Vec<String>,
+) -> WebhookSubscription {
+    let mut guard = acquire_db(db);
+    let sub = WebhookSubscription {
+        id: id.clone(),
+        url,
+        secret,
+        event_types,
+        active: true,
+        created_at: Utc::now(),
+    };
+    guard.webhook_subscriptions.insert(id, sub.clone());
+    sub
+}
+
+/// Retrieve all registered webhook subscriptions ordered by creation time descending.
+pub fn list_webhook_subscriptions(db: &SharedDb) -> Vec<WebhookSubscription> {
+    let guard = read_db(db);
+    let mut subs: Vec<WebhookSubscription> =
+        guard.webhook_subscriptions.values().cloned().collect();
+    subs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    subs
+}
+
+/// Look up a specific webhook subscription by unique identifier.
+pub fn get_webhook_subscription(db: &SharedDb, id: &str) -> Option<WebhookSubscription> {
+    let guard = read_db(db);
+    guard.webhook_subscriptions.get(id).cloned()
+}
+
+/// Remove a webhook subscription by unique identifier.
+pub fn delete_webhook_subscription(db: &SharedDb, id: &str) -> bool {
+    let mut guard = acquire_db(db);
+    guard.webhook_subscriptions.remove(id).is_some()
 }
