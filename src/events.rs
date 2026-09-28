@@ -81,3 +81,15 @@ pub fn emit_milestone_completed(
     env.events()
         .publish((topic, milestone_index), (bounty_id.clone(), *amount));
 }
+
+/// Emit a `deadline_extended` event when a bounty's deadline is extended.
+pub fn emit_deadline_extended(
+    env: &Env,
+    bounty_id: &BountyId,
+    creator: &Address,
+    new_deadline: u32,
+) {
+    let topic = Symbol::new(env, "deadline_extended");
+    env.events()
+        .publish((topic, creator.clone()), (bounty_id.clone(), new_deadline));
+}

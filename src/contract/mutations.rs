@@ -876,4 +876,56 @@ impl MergeMintContract {
 
         events::emit_bounty_expired(&env, &bounty_id, &bounty.creator);
     }
+
+    /// Extend the deadline of an active bounty.
+    ///
+    /// Restricted to the bounty creator. The bounty must have an existing deadline
+    /// that has not yet passed, and the new deadline must be strictly greater than
+    /// the current deadline.
+    ///
+    /// # Arguments
+    /// * `creator` - The wallet that created the bounty.
+    /// * `bounty_id` - The identifier of the bounty to extend.
+    /// * `new_deadline` - The new ledger sequence deadline.
+    ///
+    /// # Panics
+    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
+    /// * If `creator` is not the bounty creator (`ContractError::NotBountyCreator`).
+    /// * If the bounty has no deadline (`ContractError::BountyNoDeadline`).
+    /// * If the current deadline has already passed (`ContractError::BountyDeadlinePassed`).
+    /// * If `new_deadline` is not strictly later than the current deadline (`ContractError::BountyDeadlinePassed`).
+    ///
+    /// # Authorization
+    /// Requires auth from `creator`.
+    pub fn extend_deadline(env: Env, creator: Address, bounty_id: BountyId, new_deadline: u32) {
+        creator.require_auth();
+
+        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => fail(ContractError::BountyNotFound),
+        };
+
+        if creator != bounty.creator {
+            fail(ContractError::NotBountyCreator);
+        }
+
+        let current_deadline = match bounty.deadline {
+            Some(d) => d,
+            None => fail(ContractError::BountyNoDeadline),
+        };
+
+        if env.ledger().sequence() > current_deadline {
+            fail(ContractError::BountyDeadlinePassed);
+        }
+
+        if new_deadline <= current_deadline {
+            fail(ContractError::BountyDeadlinePassed);
+        }
+
+        bounty.deadline = Some(new_deadline);
+        storage::store_bounty(&env, &bounty_id, &bounty);
+
+        events::emit_deadline_extended(&env, &bounty_id, &creator, new_deadline);
+    }
 }
+
