@@ -22,7 +22,8 @@ use std::sync::Arc;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};
 
 use crate::db::{
-    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage,
+    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, Bounty,
+    BountyPage, BountySortField, SortOrder,
 };
 use crate::routes::tx::AppState;
 
@@ -32,6 +33,12 @@ use crate::routes::tx::AppState;
 pub struct ListParams {
     pub limit: Option<i64>,
     pub cursor: Option<DateTime<Utc>>,
+    /// Column to order results by. Whitelisted as a Rust enum so an unknown
+    /// value is rejected by the extractor with a 400 rather than interpolated
+    /// into a query. Defaults to `created`.
+    pub sort: Option<BountySortField>,
+    /// Sort direction. Whitelisted like `sort`; defaults to `desc`.
+    pub order: Option<SortOrder>,
 }
 
 /// Maximum page size any listing endpoint here will accept, regardless of
@@ -40,20 +47,40 @@ pub struct ListParams {
 /// unbounded page and force an expensive full-table scan/sort.
 const MAX_LIST_LIMIT: i64 = 100;
 
+/// Cursor pagination is keyed on `created_at` (see `db::paginate`), so it is
+/// only coherent with the default newest-first ordering. Combining a `cursor`
+/// with any other `sort` / `order` would return a page that overlaps or skips
+/// rows, so it is rejected instead of silently corrupting the listing.
+fn cursor_supported(sort: BountySortField, order: SortOrder) -> bool {
+    sort == BountySortField::Created && order == SortOrder::Desc
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// `GET /bounties`
 pub async fn list_bounties(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
-) -> Json<BountyPage> {
+) -> Result<Json<BountyPage>, (StatusCode, Json<serde_json::Value>)> {
+    let sort = params.sort.unwrap_or_default();
+    let order = params.order.unwrap_or_default();
+    if params.cursor.is_some() && !cursor_supported(sort, order) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cursor pagination is only supported with the default ordering (sort=created&order=desc)"
+            })),
+        ));
+    }
     let limit = params.limit.unwrap_or(20).min(MAX_LIST_LIMIT);
-    Json(list_bounties_by_creator(
+    Ok(Json(list_bounties_by_creator(
         &state.db,
         "",
         limit,
         params.cursor,
-    ))
+        sort,
+        order,
+    )))
 }
 
 /// `GET /bounties/assignee/{address}`
@@ -78,11 +105,23 @@ pub async fn list_bounties_by_assignee(
     }
 
     let limit = params.limit.unwrap_or(20).min(MAX_LIST_LIMIT);
+    let sort = params.sort.unwrap_or_default();
+    let order = params.order.unwrap_or_default();
+    if params.cursor.is_some() && !cursor_supported(sort, order) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cursor pagination is only supported with the default ordering (sort=created&order=desc)"
+            })),
+        ));
+    }
     Ok(Json(db_list_bounties_by_assignee(
         &state.db,
         &address,
         limit,
         params.cursor,
+        sort,
+        order,
     )))
 }
 
@@ -136,7 +175,6 @@ pub async fn claim_bounty(
     }))
 }
 
-
 /// `GET /bounties/{id}`
 pub async fn get_bounty_route(
     State(state): State<Arc<AppState>>,
@@ -176,12 +214,45 @@ mod tests {
                 creator: "carol".to_string(),
                 assignee: None,
                 created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+                reward: i as i128,
+                deadline: None,
             });
         }
     }
 
     fn valid_address() -> String {
         format!("G{}", "A".repeat(55))
+    }
+
+    /// Seed a single bounty with explicit sort keys.
+    fn seed_bounty(
+        state: &AppState,
+        id: &str,
+        reward: i128,
+        deadline: Option<DateTime<Utc>>,
+        created_at: DateTime<Utc>,
+    ) {
+        acquire_db(&state.db).bounties.push(Bounty {
+            id: id.to_string(),
+            creator: "carol".to_string(),
+            assignee: None,
+            created_at,
+            reward,
+            deadline,
+        });
+    }
+
+    fn params(sort: Option<BountySortField>, order: Option<SortOrder>) -> ListParams {
+        ListParams {
+            limit: None,
+            cursor: None,
+            sort,
+            order,
+        }
+    }
+
+    fn ids(page: &BountyPage) -> Vec<String> {
+        page.bounties.iter().map(|b| b.id.clone()).collect()
     }
 
     #[test]
@@ -216,6 +287,8 @@ mod tests {
             Query(ListParams {
                 limit: None,
                 cursor: None,
+                sort: None,
+                order: None,
             }),
         )
         .await;
@@ -237,6 +310,8 @@ mod tests {
             Query(ListParams {
                 limit: None,
                 cursor: None,
+                sort: None,
+                order: None,
             }),
         )
         .await
@@ -259,9 +334,12 @@ mod tests {
             Query(ListParams {
                 limit: Some(10_000),
                 cursor: None,
+                sort: None,
+                order: None,
             }),
         )
-        .await;
+        .await
+        .expect("an oversized limit is still a valid listing request");
 
         assert_eq!(
             page.bounties.len(),
@@ -285,23 +363,232 @@ mod tests {
             Query(ListParams {
                 limit: Some(5),
                 cursor: None,
+                sort: None,
+                order: None,
             }),
         )
-        .await;
+        .await
+        .expect("a within-bounds limit is a valid listing request");
 
         assert_eq!(page.bounties.len(), 5);
     }
 
+    /// No `sort` / `order` supplied must keep the historical newest-first
+    /// (created, descending) ordering so existing clients are unaffected.
+    #[tokio::test]
+    async fn list_bounties_defaults_to_newest_first() {
+        let state = test_state();
+        seed_bounties(&state, 3);
+
+        let page = list_bounties(State(state), Query(params(None, None)))
+            .await
+            .expect("default listing must succeed");
+
+        assert_eq!(ids(&page), vec!["2", "1", "0"]);
+    }
+
+    /// `sort=reward` orders by reward amount in the requested direction.
+    #[tokio::test]
+    async fn list_bounties_sorts_by_reward() {
+        let state = test_state();
+        let now = Utc::now();
+        seed_bounty(&state, "a", 10, None, now);
+        seed_bounty(&state, "b", 300, None, now);
+        seed_bounty(&state, "c", 50, None, now);
+
+        let desc = list_bounties(
+            State(state.clone()),
+            Query(params(Some(BountySortField::Reward), Some(SortOrder::Desc))),
+        )
+        .await
+        .expect("reward sort must succeed");
+        assert_eq!(ids(&desc), vec!["b", "c", "a"]);
+
+        let asc = list_bounties(
+            State(state),
+            Query(params(Some(BountySortField::Reward), Some(SortOrder::Asc))),
+        )
+        .await
+        .expect("reward sort must succeed");
+        assert_eq!(ids(&asc), vec!["a", "c", "b"]);
+    }
+
+    /// `sort=deadline` orders soonest-expiring first; bounties with no deadline
+    /// sort last in both directions rather than leading the list.
+    #[tokio::test]
+    async fn list_bounties_sorts_by_deadline_with_none_last() {
+        let state = test_state();
+        let now = Utc::now();
+        seed_bounty(
+            &state,
+            "soon",
+            0,
+            Some(now + chrono::Duration::seconds(10)),
+            now,
+        );
+        seed_bounty(
+            &state,
+            "late",
+            0,
+            Some(now + chrono::Duration::seconds(100)),
+            now,
+        );
+        seed_bounty(&state, "never", 0, None, now);
+
+        let asc = list_bounties(
+            State(state.clone()),
+            Query(params(
+                Some(BountySortField::Deadline),
+                Some(SortOrder::Asc),
+            )),
+        )
+        .await
+        .expect("deadline sort must succeed");
+        assert_eq!(ids(&asc), vec!["soon", "late", "never"]);
+
+        let desc = list_bounties(
+            State(state),
+            Query(params(
+                Some(BountySortField::Deadline),
+                Some(SortOrder::Desc),
+            )),
+        )
+        .await
+        .expect("deadline sort must succeed");
+        assert_eq!(ids(&desc), vec!["late", "soon", "never"]);
+    }
+
+    /// `sort=created&order=asc` reverses the default newest-first order.
+    #[tokio::test]
+    async fn list_bounties_sorts_by_created_ascending() {
+        let state = test_state();
+        seed_bounties(&state, 3);
+
+        let page = list_bounties(
+            State(state),
+            Query(params(Some(BountySortField::Created), Some(SortOrder::Asc))),
+        )
+        .await
+        .expect("created sort must succeed");
+
+        assert_eq!(ids(&page), vec!["0", "1", "2"]);
+    }
+
+    /// An unknown `sort` value must be rejected with 400 by the query extractor
+    /// before the handler runs, so user input can never reach the query layer.
+    #[tokio::test]
+    async fn list_bounties_rejects_unknown_sort_and_order_values() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        fn app(state: Arc<AppState>) -> axum::Router {
+            axum::Router::new()
+                .route("/bounties", axum::routing::get(list_bounties))
+                .with_state(state)
+        }
+
+        let res = app(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/bounties?sort=drop_table")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let res = app(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/bounties?order=sideways")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A whitelisted `sort` / `order` pair is accepted by the extractor and
+    /// returns 200.
+    #[tokio::test]
+    async fn list_bounties_accepts_whitelisted_sort_params() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route("/bounties", axum::routing::get(list_bounties))
+            .with_state(test_state());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/bounties?sort=reward&order=asc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// `cursor` pagination is only coherent with the default newest-first
+    /// ordering; combining it with a non-default sort must 400 rather than
+    /// return a page that skips or repeats rows.
+    #[tokio::test]
+    async fn list_bounties_rejects_cursor_with_non_default_sort() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route("/bounties", axum::routing::get(list_bounties))
+            .with_state(test_state());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/bounties?sort=reward&cursor=2020-01-01T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A `cursor` with the default ordering is still accepted.
+    #[tokio::test]
+    async fn list_bounties_accepts_cursor_with_default_order() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route("/bounties", axum::routing::get(list_bounties))
+            .with_state(test_state());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/bounties?cursor=2020-01-01T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
 
     #[tokio::test]
     async fn get_bounty_route_returns_bounty_if_found() {
         let state = test_state();
         seed_bounties(&state, 1);
 
-        let result = get_bounty_route(
-            State(state),
-            Path("0".to_string()),
-        ).await;
+        let result = get_bounty_route(State(state), Path("0".to_string())).await;
 
         let Json(bounty) = result.expect("must return bounty");
         assert_eq!(bounty.id, "0");
@@ -312,10 +599,7 @@ mod tests {
     async fn get_bounty_route_returns_404_if_not_found() {
         let state = test_state();
 
-        let result = get_bounty_route(
-            State(state),
-            Path("999".to_string()),
-        ).await;
+        let result = get_bounty_route(State(state), Path("999".to_string())).await;
 
         let (status, Json(body)) = result.expect_err("must return 404");
         assert_eq!(status, StatusCode::NOT_FOUND);

@@ -66,6 +66,34 @@ pub struct Bounty {
     pub creator: String,
     pub assignee: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Reward amount, mirrored from the contract's `Bounty::reward_amount`.
+    pub reward: i128,
+    /// Optional expiry, mirrored from the contract's `Bounty::deadline`. `None`
+    /// means the bounty never expires.
+    pub deadline: Option<DateTime<Utc>>,
+}
+
+/// Columns a bounty listing may be sorted by. Deserialization is restricted to
+/// this whitelist (`#[serde(rename_all = "lowercase")]`), so an unknown
+/// `sort=` value is rejected by the query extractor and can never reach the
+/// query layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BountySortField {
+    #[default]
+    Created,
+    Reward,
+    Deadline,
+}
+
+/// Direction applied to the selected [`BountySortField`]. Whitelisted the same
+/// way, so only `asc` / `desc` are ever accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    Asc,
+    #[default]
+    Desc,
 }
 
 /// One page of a cursor-paginated bounty listing.
@@ -75,9 +103,9 @@ pub struct BountyPage {
     pub next_cursor: Option<String>,
 }
 
-/// List bounties created by `creator`, newest-first, paginated by `cursor`.
-/// An empty `creator` matches every bounty — used by the unfiltered
-/// `GET /bounties` listing.
+/// List bounties created by `creator`, ordered by `sort` / `order` (newest
+/// first by default), paginated by `cursor`. An empty `creator` matches every
+/// bounty — used by the unfiltered `GET /bounties` listing.
 ///
 /// `limit` is trusted to already be clamped by the caller (see the
 /// max-limit clamp in `routes::bounties::list_bounties`); this function
@@ -87,6 +115,8 @@ pub fn list_bounties_by_creator(
     creator: &str,
     limit: i64,
     cursor: Option<DateTime<Utc>>,
+    sort: BountySortField,
+    order: SortOrder,
 ) -> BountyPage {
     let guard = read_db(db);
     let mut matches: Vec<Bounty> = guard
@@ -96,17 +126,19 @@ pub fn list_bounties_by_creator(
         .filter(|b| cursor.is_none_or(|c| b.created_at < c))
         .cloned()
         .collect();
-    matches.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    apply_sort(&mut matches, sort, order);
     paginate(matches, limit)
 }
 
-/// List bounties where `assignee` matches the recorded assignee, newest-first,
-/// paginated by `cursor`.
+/// List bounties where `assignee` matches the recorded assignee, newest-first
+/// by default, paginated by `cursor`.
 pub fn list_bounties_by_assignee(
     db: &SharedDb,
     assignee: &str,
     limit: i64,
     cursor: Option<DateTime<Utc>>,
+    sort: BountySortField,
+    order: SortOrder,
 ) -> BountyPage {
     let guard = read_db(db);
     let mut matches: Vec<Bounty> = guard
@@ -116,8 +148,40 @@ pub fn list_bounties_by_assignee(
         .filter(|b| cursor.is_none_or(|c| b.created_at < c))
         .cloned()
         .collect();
-    matches.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    apply_sort(&mut matches, sort, order);
     paginate(matches, limit)
+}
+
+/// Order `bounties` in place by `sort` / `order`. Sorting is stable, and the
+/// default (`Created` + `Desc`) reproduces the historical newest-first order.
+/// Bounties without a `deadline` sort after those that have one, in both
+/// directions, so "soonest expiring first" lists never lead with non-expiring
+/// bounties.
+fn apply_sort(bounties: &mut [Bounty], sort: BountySortField, order: SortOrder) {
+    bounties.sort_by(|a, b| {
+        if sort == BountySortField::Deadline {
+            return match (a.deadline, b.deadline) {
+                (Some(x), Some(y)) => match order {
+                    SortOrder::Asc => x.cmp(&y),
+                    SortOrder::Desc => y.cmp(&x),
+                },
+                // Bounties without a deadline always trail those that have
+                // one, regardless of direction.
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            };
+        }
+        let ord = match sort {
+            BountySortField::Created => a.created_at.cmp(&b.created_at),
+            BountySortField::Reward => a.reward.cmp(&b.reward),
+            BountySortField::Deadline => unreachable!("handled above"),
+        };
+        match order {
+            SortOrder::Asc => ord,
+            SortOrder::Desc => ord.reverse(),
+        }
+    });
 }
 
 /// Trim `bounties` to at most `limit` entries, returning the next cursor
@@ -214,6 +278,12 @@ pub fn read_idempotency(
     store: &SharedIdempotencyStore,
 ) -> std::sync::RwLockReadGuard<'_, IdempotencyStore> {
     store.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Get a single bounty by id
+pub fn get_bounty(db: &SharedDb, id: &str) -> Option<Bounty> {
+    let guard = read_db(db);
+    guard.bounties.iter().find(|b| b.id == id).cloned()
 }
 
 #[cfg(test)]
@@ -316,13 +386,4 @@ mod tests {
         let guard = acquire_idempotency(&store);
         assert!(guard.entries.is_empty(), "recovered store should be intact");
     }
-}
-
-/// Get a single bounty by id
-pub fn get_bounty(
-    db: &SharedDb,
-    id: &str,
-) -> Option<Bounty> {
-    let guard = read_db(db);
-    guard.bounties.iter().find(|b| b.id == id).cloned()
 }
