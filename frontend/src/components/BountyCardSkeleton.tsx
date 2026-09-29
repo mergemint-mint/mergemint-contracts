@@ -1,38 +1,45 @@
 import React from 'react';
+import styles from './BountyCardSkeleton.module.css';
 
 export interface BountyCardSkeletonProps {
-  className?: string;
   count?: number;
+  className?: string;
 }
 
 /**
- * Skeleton placeholder matching BountyCard dimensions, displayed while bounty lists load.
- * Respects prefers-reduced-motion preferences and provides accessible loading semantics.
- *
- * @param props.className - Optional additional CSS class names.
- * @param props.count - Number of skeleton cards to render (defaults to 1).
- * @returns Skeleton card element or elements.
+ * Skeleton loader matching bounty card dimensions.
+ * Respects user's reduced motion preferences.
  */
-export function BountyCardSkeleton({ className, count = 1 }: BountyCardSkeletonProps = {}) {
-  const cards = Array.from({ length: Math.max(1, count) }, (_, index) => (
-    <div
-      key={index}
-      className={`bounty-card bounty-card--loading${className ? ` ${className}` : ''}`}
-      aria-busy="true"
-      aria-label="Loading bounty"
-    >
-      <span className="bounty-card__id bounty-card__skeleton-line" />
-      <span className="bounty-card__creator bounty-card__skeleton-line" />
-      <span className="bounty-card__reward bounty-card__skeleton-line" />
-      <span className="bounty-card__status bounty-card__skeleton-line" />
-    </div>
-  ));
+const Skeleton: React.FC<{ className?: string }> = ({ className }) => (
+  <div className={`${styles.skeleton} ${className || ''}`} aria-hidden="true" />
+);
 
-  if (count === 1) {
-    return cards[0];
-  }
+export const BountyCardSkeleton: React.FC<BountyCardSkeletonProps> = ({ count = 1, className }) => {
+  return (
+    <>
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className={`${styles.card} ${className || ''}`}>
+          <div className={styles.header}>
+            <Skeleton className={styles.titleSkeleton} />
+            <Skeleton className={styles.statusSkeleton} />
+          </div>
 
-  return <>{cards}</>;
-}
+          <div className={styles.content}>
+            <Skeleton className={styles.descriptionSkeleton} />
+            <Skeleton className={styles.descriptionSkeleton} />
+          </div>
+
+          <div className={styles.footer}>
+            <div className={styles.leftFooter}>
+              <Skeleton className={styles.avatarSkeleton} />
+              <Skeleton className={styles.nameSkeleton} />
+            </div>
+            <Skeleton className={styles.amountSkeleton} />
+          </div>
+        </div>
+      ))}
+    </>
+  );
+};
 
 export default BountyCardSkeleton;

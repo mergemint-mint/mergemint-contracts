@@ -21,7 +21,7 @@ function Nav() {
   return (
     <nav>
       <Link to="/">Bounties</Link>
-      <Link to="/create">Create Bounty</Link>
+      <Link to="/create" role="button">Create Bounty</Link>
       <WalletConnectButton address={address} onConnect={connect} />
     </nav>
   );
