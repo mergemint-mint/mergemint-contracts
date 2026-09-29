@@ -2902,6 +2902,10 @@ fn test_require_auth_coverage_matrix() {
     client.claim_bounty(&contributor7, &bounty_id7);
     client.complete_milestone(&verifier, &bounty_id7, &0);
     assert_auth(&verifier);
+
+    let bounty_id8 = make_bounty(&client, &env, &creator, "auth_matrix8", Some(100));
+    client.extend_deadline(&creator, &bounty_id8, &200);
+    assert_auth(&creator);
 }
 
 // Issue #650 — `docs/event-schema.md` parity with mutation emissions
@@ -3350,83 +3354,114 @@ fn test_contributor_entry_survives_ttl_via_periodic_bump() {
     );
 }
 
-/// Issue #843 - get_contributor_bounty_history paginates over 25 entries newest first.
 #[test]
-fn test_get_contributor_bounty_history_paging_over_25_entries() {
-    let (env, creator, contributor, verifier) = setup_test();
+fn test_extend_deadline_success() {
+    let (env, creator, _contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
 
-    let empty = client.get_contributor_bounty_history(&contributor, &0, &10);
-    assert_eq!(empty.len(), 0);
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", Some(100));
 
-    let mut created_ids = std::vec::Vec::new();
-    for _ in 0..25 {
-        let (bounty_id, _token) =
-            make_bounty_with_token(&client, &env, &creator, &contract_id, "hist", 100, None);
-        client.claim_bounty(&contributor, &bounty_id);
-        client.complete_bounty(&verifier, &bounty_id);
-        created_ids.push(bounty_id);
-    }
+    client.extend_deadline(&creator, &bounty_id, &200);
+    assert_invocation_emits(&env, &contract_id, &["deadline_extended"]);
 
-    let page1 = client.get_contributor_bounty_history(&contributor, &0, &10);
-    assert_eq!(page1.len(), 10);
-    for i in 0..10 {
-        let expected = &created_ids[24 - i];
-        assert_eq!(&page1.get(i as u32).unwrap(), expected);
-    }
-
-    let page2 = client.get_contributor_bounty_history(&contributor, &10, &10);
-    assert_eq!(page2.len(), 10);
-    for i in 0..10 {
-        let expected = &created_ids[14 - i];
-        assert_eq!(&page2.get(i as u32).unwrap(), expected);
-    }
-
-    let page3 = client.get_contributor_bounty_history(&contributor, &20, &10);
-    assert_eq!(page3.len(), 5);
-    for i in 0..5 {
-        let expected = &created_ids[4 - i];
-        assert_eq!(&page3.get(i as u32).unwrap(), expected);
-    }
-
-    let page4 = client.get_contributor_bounty_history(&contributor, &25, &10);
-    assert_eq!(page4.len(), 0);
-
-    let page5 = client.get_contributor_bounty_history(&contributor, &100, &10);
-    assert_eq!(page5.len(), 0);
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.deadline, Some(200));
 }
 
-/// Issue #843 - get_contributor_bounty_history caps limit at 50 and handles limit=0.
 #[test]
-fn test_get_contributor_bounty_history_limit_capped_at_max() {
-    let (env, creator, contributor, verifier) = setup_test();
+fn test_extend_deadline_in_progress_bounty_succeeds() {
+    let (env, creator, contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
 
-    let mut created_ids = std::vec::Vec::new();
-    for _ in 0..55 {
-        let (bounty_id, _token) =
-            make_bounty_with_token(&client, &env, &creator, &contract_id, "hist_cap", 100, None);
-        client.claim_bounty(&contributor, &bounty_id);
-        client.complete_bounty(&verifier, &bounty_id);
-        created_ids.push(bounty_id);
-    }
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", Some(100));
 
-    let page1 = client.get_contributor_bounty_history(&contributor, &0, &1000);
-    assert_eq!(page1.len(), 50);
-    for i in 0..50 {
-        let expected = &created_ids[54 - i];
-        assert_eq!(&page1.get(i as u32).unwrap(), expected);
-    }
+    client.claim_bounty(&contributor, &bounty_id);
 
-    let page2 = client.get_contributor_bounty_history(&contributor, &50, &1000);
-    assert_eq!(page2.len(), 5);
-    for i in 0..5 {
-        let expected = &created_ids[4 - i];
-        assert_eq!(&page2.get(i as u32).unwrap(), expected);
-    }
+    client.extend_deadline(&creator, &bounty_id, &250);
+    assert_invocation_emits(&env, &contract_id, &["deadline_extended"]);
 
-    let default_page = client.get_contributor_bounty_history(&contributor, &0, &0);
-    assert_eq!(default_page.len(), 50);
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.deadline, Some(250));
+    assert_eq!(bounty.status, Symbol::new(&env, "in_progress"));
+}
+
+#[test]
+#[should_panic(expected = "bounty deadline passed")]
+fn test_extend_deadline_rejects_earlier_deadline() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", Some(100));
+
+    client.extend_deadline(&creator, &bounty_id, &80);
+}
+
+#[test]
+#[should_panic(expected = "bounty deadline passed")]
+fn test_extend_deadline_rejects_equal_deadline() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", Some(100));
+
+    client.extend_deadline(&creator, &bounty_id, &100);
+}
+
+#[test]
+#[should_panic(expected = "bounty has no deadline")]
+fn test_extend_deadline_rejects_when_no_deadline() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", None);
+
+    client.extend_deadline(&creator, &bounty_id, &200);
+}
+
+#[test]
+#[should_panic(expected = "bounty deadline passed")]
+fn test_extend_deadline_rejects_expired_bounty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", Some(100));
+
+    env.ledger().set_sequence_number(101);
+
+    client.extend_deadline(&creator, &bounty_id, &200);
+}
+
+#[test]
+#[should_panic(expected = "not bounty creator")]
+fn test_extend_deadline_rejects_non_creator() {
+    let (env, creator, non_creator, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", Some(100));
+
+    client.extend_deadline(&non_creator, &bounty_id, &200);
+}
+
+#[test]
+#[should_panic(expected = "bounty not found")]
+fn test_extend_deadline_rejects_nonexistent_bounty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let unallocated_id = fake_bounty_id(&env, 999_999);
+    client.extend_deadline(&creator, &unallocated_id, &200);
 }

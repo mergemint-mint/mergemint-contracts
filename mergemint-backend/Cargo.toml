@@ -3,15 +3,13 @@ name = "mergemint-backend"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "mergemint-backend"
-path = "src/main.rs"
-
 [dependencies]
-axum = { version = "0.7", features = ["macros"] }
+axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "limit", "request-id", "timeout", "trace"] }
+tower-http = { version = "0.5", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono"] }
@@ -24,8 +22,11 @@ dotenvy = "0.15"
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum-extra = { version = "0.9", features = ["typed-header"] }
 futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
 tempfile = "3.10"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

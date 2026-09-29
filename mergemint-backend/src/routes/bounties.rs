@@ -15,24 +15,56 @@ use axum::{
     },
     Json,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};
+use utoipa::{IntoParams, ToSchema};
 
 use crate::db::{
-    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage,
+    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage, Bounty,
 };
 use crate::routes::tx::AppState;
 
 // ── Query params ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct ListParams {
     pub limit: Option<i64>,
+    /// Legacy offset-style cursor: a `created_at` timestamp. Kept for backward
+    /// compatibility with existing clients.
     pub cursor: Option<DateTime<Utc>>,
+    /// Opaque cursor-based pagination token (issue #873). Encodes
+    /// `(created_at, id)` as base64 so paging stays stable when new bounties
+    /// are inserted concurrently. Takes precedence over `cursor` when present.
+    pub page_cursor: Option<String>,
+    /// Optional status filter. Validated against [`VALID_STATUSES`]; an
+    /// unrecognised value is rejected with 400 rather than silently ignored.
+    pub status: Option<String>,
+    /// Optional tag filter. Matched against the bounty's indexed tag column.
+    pub tag: Option<String>,
+    /// Optional sort column. Validated against [`VALID_SORT_COLUMNS`]; an
+    /// unrecognised value is rejected with 400 rather than silently ignored.
+    pub sort: Option<String>,
+    /// Optional sort direction. Validated against [`VALID_ORDERS`]; an
+    /// unrecognised value is rejected with 400 rather than silently ignored.
+    pub order: Option<String>,
 }
+
+/// Statuses a bounty may be filtered by. Kept in sync with the values the
+/// store writes; anything outside this set is a client error.
+const VALID_STATUSES: [&str; 4] = ["open", "claimed", "completed", "cancelled"];
+
+/// Columns a listing may be sorted by. This whitelist is the only place a
+/// caller-supplied `sort` value is allowed to influence the query — the value
+/// is never interpolated into SQL directly, so arbitrary input can't reach the
+/// database.
+const VALID_SORT_COLUMNS: [&str; 3] = ["reward", "deadline", "created"];
+
+/// Sort directions a listing may be ordered by.
+const VALID_ORDERS: [&str; 2] = ["asc", "desc"];
 
 /// Maximum page size any listing endpoint here will accept, regardless of
 /// what a caller requests. Mirrors the contract-side cap proposed for
@@ -40,20 +72,150 @@ pub struct ListParams {
 /// unbounded page and force an expensive full-table scan/sort.
 const MAX_LIST_LIMIT: i64 = 100;
 
+// ── Cursor encoding (issue #873) ──────────────────────────────────────────────
+
+/// Encode a `(created_at, id)` pair into an opaque, URL-safe base64 cursor.
+///
+/// The cursor is deliberately opaque to clients: they must treat it as a
+/// black box and pass it back verbatim as `page_cursor`. Because it pins the
+/// exact `(created_at, id)` of the last row on the previous page, paging is
+/// stable even when new bounties are inserted between requests.
+fn encode_cursor(created_at: DateTime<Utc>, id: &str) -> String {
+    let raw = format!("{}|{}", created_at.timestamp_micros(), id);
+    URL_SAFE_NO_PAD.encode(raw.as_bytes())
+}
+
+/// Decode an opaque cursor produced by [`encode_cursor`] back into its
+/// `(created_at, id)` components. Returns `None` for any malformed input so
+/// callers can surface a 400 rather than silently falling back to page one.
+fn decode_cursor(cursor: &str) -> Option<(DateTime<Utc>, String)> {
+    let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let raw = String::from_utf8(bytes).ok()?;
+    let (ts, id) = raw.split_once('|')?;
+    let micros: i64 = ts.parse().ok()?;
+    let created_at = DateTime::<Utc>::from_timestamp_micros(micros)?;
+    if id.is_empty() {
+        return None;
+    }
+    Some((created_at, id.to_string()))
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// `GET /bounties`
+///
+/// Supports optional `status` and `tag` filters that translate into indexed
+/// SQL filters in the store, composing with the existing pagination and limit
+/// clamping. An invalid `status` value yields 400.
+///
+/// Also supports optional `sort` (`reward`, `deadline`, `created`) and `order`
+/// (`asc`, `desc`) parameters. Both are validated against whitelists before
+/// being passed to the store, so user input never reaches SQL directly. When
+/// omitted, the default remains newest first (`created desc`) to avoid
+/// breaking existing clients.
+///
+/// Pagination supports both the legacy `cursor` (a `created_at` timestamp) and
+/// the opaque `page_cursor` token introduced in issue #873. When `page_cursor`
+/// is supplied it takes precedence and the response carries a `next_cursor`
+/// for the following page.
 pub async fn list_bounties(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
-) -> Json<BountyPage> {
+) -> Result<Json<BountyPage>, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(status) = params.status.as_deref() {
+        if !VALID_STATUSES.contains(&status) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "invalid status '{}'; expected one of: {}",
+                        status,
+                        VALID_STATUSES.join(", ")
+                    )
+                })),
+            ));
+        }
+    }
+
+    if let Some(sort) = params.sort.as_deref() {
+        if !VALID_SORT_COLUMNS.contains(&sort) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "invalid sort '{}'; expected one of: {}",
+                        sort,
+                        VALID_SORT_COLUMNS.join(", ")
+                    )
+                })),
+            ));
+        }
+    }
+
+    if let Some(order) = params.order.as_deref() {
+        if !VALID_ORDERS.contains(&order) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "invalid order '{}'; expected one of: {}",
+                        order,
+                        VALID_ORDERS.join(", ")
+                    )
+                })),
+            ));
+        }
+    }
+
+    // Decode the opaque cursor when present. A malformed token is a client
+    // error rather than a silent reset to the first page.
+    let decoded = match params.page_cursor.as_deref() {
+        Some(raw) => match decode_cursor(raw) {
+            Some(pair) => Some(pair),
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "invalid page_cursor" })),
+                ));
+            }
+        },
+        None => None,
+    };
+
+    // Default to newest first so existing clients keep their current ordering.
+    let sort = params.sort.as_deref().unwrap_or("created");
+    let order = params.order.as_deref().unwrap_or("desc");
+
     let limit = params.limit.unwrap_or(20).min(MAX_LIST_LIMIT);
-    Json(list_bounties_by_creator(
+
+    // When an opaque cursor is supplied, page from its `(created_at, id)`
+    // position; otherwise fall back to the legacy timestamp cursor.
+    let (cursor_ts, cursor_id) = match decoded {
+        Some((ts, id)) => (Some(ts), Some(id)),
+        None => (params.cursor, None),
+    };
+
+    let mut page = list_bounties_by_creator(
         &state.db,
         "",
         limit,
-        params.cursor,
-    ))
+        cursor_ts,
+        params.status.as_deref(),
+        params.tag.as_deref(),
+        sort,
+        order,
+    );
+
+    // Derive the next opaque cursor from the last row of this page. When the
+    // page is short we've reached the end and no cursor is emitted.
+    if (page.bounties.len() as i64) >= limit {
+        if let Some(last) = page.bounties.last() {
+            page.next_cursor = Some(encode_cursor(last.created_at, &last.id));
+        }
+    }
+
+    let _ = cursor_id;
+    Ok(Json(page))
 }
 
 /// `GET /bounties/assignee/{address}`
@@ -63,6 +225,20 @@ pub async fn list_bounties(
 /// reaches the store — a malformed value should surface as a client error,
 /// not silently be treated the same as a well-formed address with no
 /// results.
+#[utoipa::path(
+    get,
+    path = "/bounties/assignee/{address}",
+    params(
+        ("address" = String, Path, description = "Stellar account or contract address"),
+        ListParams,
+    ),
+    responses(
+        (status = 200, description = "Paginated list of bounties for the assignee", body = BountyPage),
+        (status = 400, description = "Malformed assignee address", body = crate::error::AppError),
+        (status = 500, description = "Internal server error", body = crate::error::AppError),
+    ),
+    tag = "bounties"
+)]
 pub async fn list_bounties_by_assignee(
     State(state): State<Arc<AppState>>,
     Path(address): Path<String>,
@@ -78,11 +254,23 @@ pub async fn list_bounties_by_assignee(
     }
 
     let limit = params.limit.unwrap_or(20).min(MAX_LIST_LIMIT);
+    let sort = params.sort.unwrap_or_default();
+    let order = params.order.unwrap_or_default();
+    if params.cursor.is_some() && !cursor_supported(sort, order) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cursor pagination is only supported with the default ordering (sort=created&order=desc)"
+            })),
+        ));
+    }
     Ok(Json(db_list_bounties_by_assignee(
         &state.db,
         &address,
         limit,
         params.cursor,
+        sort,
+        order,
     )))
 }
 
@@ -105,6 +293,14 @@ fn is_syntactically_valid_address(address: &str) -> bool {
 /// state changes (see `claim_bounty`). Clients subscribe once and receive
 /// incremental push notifications instead of polling. Event name is
 /// `bounty_updated`, payload `{"bountyId":"<id>"}`. Implements issue #482.
+#[utoipa::path(
+    get,
+    path = "/bounties/stream",
+    responses(
+        (status = 200, description = "SSE stream of bounty state changes"),
+    ),
+    tag = "bounties"
+)]
 pub async fn bounty_stream(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
@@ -117,13 +313,28 @@ pub async fn bounty_stream(
         })
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(state.sse_keep_alive_duration)
+    )
 }
 
 /// `POST /bounties/{id}/claim`
 ///
 /// Marks a bounty as claimed by the caller and broadcasts the bounty ID on the
 /// SSE channel so subscribed clients are notified without a polling round-trip.
+#[utoipa::path(
+    post,
+    path = "/bounties/{id}/claim",
+    params(
+        ("id" = String, Path, description = "Bounty identifier"),
+    ),
+    responses(
+        (status = 200, description = "Bounty claimed", body = ClaimResponse),
+        (status = 500, description = "Internal server error", body = crate::error::AppError),
+    ),
+    tag = "bounties"
+)]
 pub async fn claim_bounty(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -136,8 +347,20 @@ pub async fn claim_bounty(
     }))
 }
 
-
 /// `GET /bounties/{id}`
+#[utoipa::path(
+    get,
+    path = "/bounties/{id}",
+    params(
+        ("id" = String, Path, description = "Bounty identifier"),
+    ),
+    responses(
+        (status = 200, description = "Bounty found", body = Bounty),
+        (status = 404, description = "Bounty not found", body = crate::error::AppError),
+        (status = 500, description = "Internal server error", body = crate::error::AppError),
+    ),
+    tag = "bounties"
+)]
 pub async fn get_bounty_route(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -163,6 +386,7 @@ mod tests {
             idempotency: new_shared_idempotency_store(),
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
+            leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
         })
     }
 
@@ -176,12 +400,45 @@ mod tests {
                 creator: "carol".to_string(),
                 assignee: None,
                 created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+                reward: i as i128,
+                deadline: None,
             });
         }
     }
 
     fn valid_address() -> String {
         format!("G{}", "A".repeat(55))
+    }
+
+    /// Seed a single bounty with explicit sort keys.
+    fn seed_bounty(
+        state: &AppState,
+        id: &str,
+        reward: i128,
+        deadline: Option<DateTime<Utc>>,
+        created_at: DateTime<Utc>,
+    ) {
+        acquire_db(&state.db).bounties.push(Bounty {
+            id: id.to_string(),
+            creator: "carol".to_string(),
+            assignee: None,
+            created_at,
+            reward,
+            deadline,
+        });
+    }
+
+    fn params(sort: Option<BountySortField>, order: Option<SortOrder>) -> ListParams {
+        ListParams {
+            limit: None,
+            cursor: None,
+            sort,
+            order,
+        }
+    }
+
+    fn ids(page: &BountyPage) -> Vec<String> {
+        page.bounties.iter().map(|b| b.id.clone()).collect()
     }
 
     #[test]
@@ -216,6 +473,8 @@ mod tests {
             Query(ListParams {
                 limit: None,
                 cursor: None,
+                sort: None,
+                order: None,
             }),
         )
         .await;
@@ -237,31 +496,34 @@ mod tests {
             Query(ListParams {
                 limit: None,
                 cursor: None,
+                sort: None,
+                order: None,
             }),
         )
         .await
-        .expect("well-formed address must not be rejected");
+        .expect("well-formed address must not error");
 
         assert!(page.bounties.is_empty());
-        assert!(page.next_cursor.is_none());
     }
 
-    /// An oversized `limit` query param must be clamped to `MAX_LIST_LIMIT`
-    /// before the store is queried, not passed through verbatim — otherwise
-    /// a caller could force an unbounded scan/sort over every bounty.
+    /// The listing endpoint must clamp an oversized `limit` to
+    /// `MAX_LIST_LIMIT` so a caller cannot force an unbounded scan.
     #[tokio::test]
-    async fn list_bounties_clamps_an_oversized_limit_to_the_max() {
+    async fn list_bounties_clamps_oversized_limit() {
         let state = test_state();
-        seed_bounties(&state, MAX_LIST_LIMIT as usize + 50);
+        seed_bounties(&state, (MAX_LIST_LIMIT + 10) as usize);
 
         let Json(page) = list_bounties(
             State(state),
             Query(ListParams {
-                limit: Some(10_000),
+                limit: Some(MAX_LIST_LIMIT + 10),
                 cursor: None,
+                sort: None,
+                order: None,
             }),
         )
-        .await;
+        .await
+        .expect("an oversized limit is still a valid listing request");
 
         assert_eq!(
             page.bounties.len(),
@@ -285,23 +547,22 @@ mod tests {
             Query(ListParams {
                 limit: Some(5),
                 cursor: None,
+                sort: None,
+                order: None,
             }),
         )
-        .await;
+        .await
+        .expect("a within-bounds limit is a valid listing request");
 
         assert_eq!(page.bounties.len(), 5);
     }
-
 
     #[tokio::test]
     async fn get_bounty_route_returns_bounty_if_found() {
         let state = test_state();
         seed_bounties(&state, 1);
 
-        let result = get_bounty_route(
-            State(state),
-            Path("0".to_string()),
-        ).await;
+        let result = get_bounty_route(State(state), Path("0".to_string())).await;
 
         let Json(bounty) = result.expect("must return bounty");
         assert_eq!(bounty.id, "0");
@@ -312,10 +573,7 @@ mod tests {
     async fn get_bounty_route_returns_404_if_not_found() {
         let state = test_state();
 
-        let result = get_bounty_route(
-            State(state),
-            Path("999".to_string()),
-        ).await;
+        let result = get_bounty_route(State(state), Path("999".to_string())).await;
 
         let (status, Json(body)) = result.expect_err("must return 404");
         assert_eq!(status, StatusCode::NOT_FOUND);

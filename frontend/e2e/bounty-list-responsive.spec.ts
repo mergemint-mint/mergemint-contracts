@@ -25,3 +25,29 @@ test("bounty card grid stacks to a single column on mobile", async ({ page }) =>
     expect(boxes[i]!.y).toBeGreaterThan(boxes[i - 1]!.y);
   }
 });
+
+test("bounty filters and sorting controls adapt to mobile viewport", async ({ page }) => {
+  await page.goto("/");
+
+  const filters = page.locator(".bounty-filters");
+  await expect(filters).toBeVisible();
+
+  const filterBox = await filters.boundingBox();
+  expect(filterBox).not.toBeNull();
+  if (filterBox) {
+    expect(filterBox.width).toBeLessThanOrEqual(375);
+  }
+
+  const tagInput = page.locator("#tag-filter-input");
+  await expect(tagInput).toBeVisible();
+
+  const sortSelect = page.locator("#sort-field-select");
+  await expect(sortSelect).toBeVisible();
+
+  const orderSelect = page.locator("#sort-order-select");
+  await expect(orderSelect).toBeVisible();
+
+  const resetButton = page.locator(".bounty-filters__reset-button");
+  await expect(resetButton).toBeVisible();
+});
+

@@ -211,15 +211,19 @@ HTTP/1.1 404 Not Found
 
 ### `GET /bounties`
 
-Lists bounties newest-first with cursor pagination.
+Lists bounties with cursor pagination, newest-first by default.
 
 | Query param | Type | Default | Notes |
 |---|---|---|---|
 | `limit` | integer | `20` | Clamped to `100` (`MAX_LIST_LIMIT`). |
-| `cursor` | RFC 3339 timestamp | none | Returns rows with `created_at` strictly older than the cursor. Pass the previous page's `next_cursor`. URL-encode `+` offsets as `%2B`. |
+| `cursor` | RFC 3339 timestamp | none | Returns rows with `created_at` strictly older than the cursor. Pass the previous page's `next_cursor`. URL-encode `+` offsets as `%2B`. Only supported with the default ordering (`sort=created&order=desc`) — any other `sort`/`order` combined with `cursor` returns 400. |
+| `sort` | `reward` \| `deadline` \| `created` | `created` | Whitelisted column to order by. Any other value is rejected with 400. |
+| `order` | `asc` \| `desc` | `desc` | Sort direction. Any other value is rejected with 400. |
 
 ```bash
 curl -i "$BASE/bounties?limit=5"
+curl -i "$BASE/bounties?sort=reward&order=desc"
+curl -i "$BASE/bounties?sort=deadline&order=asc"
 ```
 
 ```http
@@ -234,11 +238,14 @@ A populated page looks like this *(from code)*:
 ```json
 {
   "bounties": [
-    {"id": "1", "creator": "G...", "assignee": null, "created_at": "2026-09-01T12:00:00Z"}
+    {"id": "1", "creator": "G...", "assignee": null, "created_at": "2026-09-01T12:00:00Z", "reward": 100, "deadline": null}
   ],
   "next_cursor": "2026-09-01T12:00:00+00:00"
 }
 ```
+
+Bounties with no `deadline` always sort after those that have one, in either
+direction.
 
 ```bash
 # Next page
@@ -249,6 +256,10 @@ curl -i "$BASE/bounties?limit=10&cursor=2026-09-01T00:00:00Z"
 curl -i "$BASE/bounties?cursor=notadate"
 # HTTP/1.1 400 Bad Request
 # Failed to deserialize query string: input contains invalid characters
+
+# Non-default sort with a cursor → 400
+curl -i "$BASE/bounties?sort=reward&cursor=2026-09-01T00:00:00Z"
+# HTTP/1.1 400 Bad Request
 ```
 
 ---
@@ -256,7 +267,8 @@ curl -i "$BASE/bounties?cursor=notadate"
 ### `GET /bounties/assignee/:address`
 
 Lists bounties whose recorded assignee is `address`. Takes the same `limit` /
-`cursor` params and returns the same page shape as `GET /bounties`.
+`cursor` / `sort` / `order` params and returns the same page shape as
+`GET /bounties`.
 
 ```bash
 curl -i "$BASE/bounties/assignee/$ADDR"
