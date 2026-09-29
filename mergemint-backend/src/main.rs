@@ -48,7 +48,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    http::{header::CONTENT_TYPE, HeaderValue, Method},
+    extract::State,
+    http::{header::CONTENT_TYPE, HeaderValue, Method, StatusCode},
+    response::IntoResponse,
     routing::{get, post},
     Router,
 };
@@ -161,6 +163,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/tx/resolve-dispute", post(resolve_dispute))
         .route("/tx/self-claim", post(self_claim))
         .route("/admin/audit-logs", get(query_audit_logs))
@@ -273,8 +276,22 @@ fn read_sse_keep_alive_duration() -> Duration {
 }
 
 /// Liveness probe used by container healthchecks.
+///
+/// Keeps checks lightweight and cheap; does not touch the database (#870).
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Readiness probe used by orchestrators (Kubernetes / Docker Compose) (#870).
+///
+/// Pings the database connection and returns:
+///  * `200 ready` if the database is open and reachable
+///  * `503 database unavailable` if the database is closed or unreachable
+async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match db::ping_db(&state.db) {
+        Ok(()) => (StatusCode::OK, "ready"),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
+    }
 }
 
 /// Issue `GET /health` against `addr` and succeed only on an HTTP 200.
@@ -489,5 +506,81 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         drop(listener);
         assert!(healthcheck(&addr).is_err());
+    }
+
+    #[tokio::test]
+    async fn ready_returns_200_when_db_is_healthy() {
+        let shared_db = crate::db::new_shared_db();
+        let idempotency = crate::db::new_shared_idempotency_store();
+        let (bounty_broadcast, _) = tokio::sync::broadcast::channel(10);
+        let state = std::sync::Arc::new(super::AppState {
+            db: shared_db,
+            idempotency,
+            rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
+            bounty_broadcast,
+        });
+
+        let app = axum::Router::new()
+            .route("/ready", axum::routing::get(super::ready))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"ready");
+    }
+
+    #[tokio::test]
+    async fn ready_returns_503_when_db_is_closed() {
+        let shared_db = crate::db::new_shared_db();
+        crate::db::close_db(&shared_db);
+
+        let idempotency = crate::db::new_shared_idempotency_store();
+        let (bounty_broadcast, _) = tokio::sync::broadcast::channel(10);
+        let state = std::sync::Arc::new(super::AppState {
+            db: shared_db,
+            idempotency,
+            rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
+            bounty_broadcast,
+        });
+
+        let app = axum::Router::new()
+            .route("/ready", axum::routing::get(super::ready))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"database unavailable");
+    }
+
+    #[tokio::test]
+    async fn health_stays_cheap_and_independent_of_db() {
+        assert_eq!(health().await, "ok");
     }
 }

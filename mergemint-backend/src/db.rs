@@ -234,6 +234,26 @@ pub fn read_db(db: &SharedDb) -> std::sync::RwLockReadGuard<'_, DbStore> {
     db.read().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Ping the database connection (#870).
+///
+/// Returns `Ok(())` if the database is open and reachable, or `Err("database connection is closed")`
+/// if the database has been closed or disconnected.
+pub fn ping_db(db: &SharedDb) -> Result<(), &'static str> {
+    let guard = read_db(db);
+    if guard.is_closed {
+        Err("database connection is closed")
+    } else {
+        Ok(())
+    }
+}
+
+/// Mark the database connection pool as closed (simulates database downtime/disconnection, #870).
+#[allow(dead_code)]
+pub fn close_db(db: &SharedDb) {
+    let mut guard = acquire_db(db);
+    guard.is_closed = true;
+}
+
 // ---------------------------------------------------------------------------
 // Idempotency-key store
 // ---------------------------------------------------------------------------
@@ -284,6 +304,11 @@ pub fn read_idempotency(
     store: &SharedIdempotencyStore,
 ) -> std::sync::RwLockReadGuard<'_, IdempotencyStore> {
     store.read().unwrap_or_else(|e| e.into_inner())
+}
+/// Get a single bounty by id
+pub fn get_bounty(db: &SharedDb, id: &str) -> Option<Bounty> {
+    let guard = read_db(db);
+    guard.bounties.iter().find(|b| b.id == id).cloned()
 }
 
 #[cfg(test)]
@@ -497,10 +522,14 @@ mod tests {
     }
 }
 
-/// Get a single bounty by id
-pub fn get_bounty(db: &SharedDb, id: &str) -> Option<Bounty> {
-    let guard = read_db(db);
-    guard.bounties.iter().find(|b| b.id == id).cloned()
+    #[test]
+    fn test_ping_db_healthy_and_closed() {
+        let db = new_shared_db();
+        assert!(ping_db(&db).is_ok());
+
+        close_db(&db);
+        assert_eq!(ping_db(&db), Err("database connection is closed"));
+    }
 }
 
 // ---------------------------------------------------------------------------

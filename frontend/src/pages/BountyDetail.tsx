@@ -23,7 +23,11 @@ function BountyDetailInner() {
   const [loading, setLoading] = useState(true);
   const [showTopUp, setShowTopUp] = useState(false);
 
-  useEffect(() => {
+  // Modal/dialog visibility flags.
+  const [showTopUp, setShowTopUp] = useState(false);
+  const [showCancel, setShowCancel] = useState(false);
+
+  function fetchBounty() {
     if (!id) return;
     setLoading(true);
     api
@@ -31,7 +35,11 @@ function BountyDetailInner() {
       .then(setBounty)
       .catch((err) => setError(mapErrorMessage(err instanceof Error ? err.message : String(err))))
       .finally(() => setLoading(false));
-  }, [id]);
+  }
+
+  useEffect(() => {
+    fetchBounty();
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleClaim = useCallback(async () => {
     if (!id) return;
@@ -63,6 +71,10 @@ function BountyDetailInner() {
   const isCreator = Boolean(
     address && bounty.creator && address.toLowerCase() === bounty.creator.toLowerCase()
   );
+
+  const isCreator =
+    walletAddress !== null && walletAddress.toLowerCase() === bounty.creator.toLowerCase();
+  const isOpen = bounty.status === 'open';
 
   return (
     <div className="bounty-detail-page">
