@@ -45,6 +45,20 @@ pub fn emit_bounty_expired(env: &Env, bounty_id: &BountyId, creator: &Address) {
         .publish((topic, creator.clone()), bounty_id.clone());
 }
 
+pub fn emit_bounty_topped_up(
+    env: &Env,
+    bounty_id: &BountyId,
+    creator: &Address,
+    amount: &i128,
+    new_reward: &i128,
+) {
+    let topic = Symbol::new(env, "bounty_topped_up");
+    env.events().publish(
+        (topic, creator.clone()),
+        (bounty_id.clone(), *amount, *new_reward),
+    );
+}
+
 pub fn emit_approval_recorded(
     env: &Env,
     bounty_id: &BountyId,
@@ -80,4 +94,10 @@ pub fn emit_milestone_completed(
     let topic = Symbol::new(env, "milestone_completed");
     env.events()
         .publish((topic, milestone_index), (bounty_id.clone(), *amount));
+}
+
+pub fn emit_contributor_metadata_updated(env: &Env, contributor: &Address, metadata: &BytesN<32>) {
+    let topic = Symbol::new(env, "contributor_metadata_updated");
+    env.events()
+        .publish((topic, contributor.clone()), metadata.clone());
 }

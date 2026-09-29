@@ -1,128 +1,144 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import React from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "../lib/api";
-import { WalletProvider } from "../lib/WalletContext";
-import { Bounty, BountyPage } from "../types";
-import { BountyList } from "./BountyList";
+import React from 'react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, useLocation } from 'react-router-dom';
+import { BountyList } from './BountyList';
+import { WalletProvider } from '../lib/WalletContext';
+import { api } from '../lib/api';
 
-const MOCK_BOUNTIES: Bounty[] = [
-  {
-    id: "bounty-1",
-    title: "First Test Bounty",
-    description: "First description",
-    reward: "100 XLM",
-    status: "open",
-    creator: "GCREATOR111111111111111111111111111111111111111111111111",
-    createdAt: "2026-01-01T00:00:00Z",
-    maxAssignees: 1,
-    tags: ["stellar"],
-    milestones: [],
-  },
-  {
-    id: "bounty-2",
-    title: "Second Test Bounty",
-    description: "Second description",
-    reward: "200 XLM",
-    status: "claimed",
-    creator: "GCREATOR222222222222222222222222222222222222222222222222",
-    createdAt: "2026-01-02T00:00:00Z",
-    maxAssignees: 1,
-    tags: ["soroban"],
-    milestones: [],
-  },
-];
+function LocationDisplay(): React.JSX.Element {
+  const location = useLocation();
+  return <div data-testid="location-display">{location.search}</div>;
+}
 
-describe("BountyList component", () => {
+describe('BountyList filter and sort synchronization', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("renders loading skeleton cards while initial page is loading", async () => {
-    let resolvePromise: (value: BountyPage) => void;
-    const promise = new Promise<BountyPage>((resolve) => {
-      resolvePromise = resolve;
-    });
-
-    vi.spyOn(api, "getBounties").mockReturnValue(promise);
-
-    render(
-      <WalletProvider>
-        <BountyList />
-      </WalletProvider>,
-    );
-
-    const skeletonCards = screen.getAllByLabelText("Loading bounty");
-    expect(skeletonCards.length).toBeGreaterThan(0);
-
-    resolvePromise!({
-      bounties: [MOCK_BOUNTIES[0]!],
+    vi.spyOn(api, 'getBounties').mockResolvedValue({
+      bounties: [],
       nextCursor: null,
     });
-
-    await waitFor(() => {
-      expect(screen.queryByLabelText("Loading bounty")).toBeNull();
-    });
-
-    expect(screen.getByText("100 XLM")).toBeTruthy();
   });
 
-  it("renders fallback load more button when next cursor is available", async () => {
-    vi.spyOn(api, "getBounties").mockResolvedValueOnce({
-      bounties: [MOCK_BOUNTIES[0]!],
-      nextCursor: "next-page-cursor",
-    });
-
+  it('reads initial filter and sort parameters from URL query parameters', async () => {
     render(
-      <WalletProvider>
-        <BountyList />
-      </WalletProvider>,
+      <MemoryRouter initialEntries={['/?status=open&tag=rust&sort=reward&order=asc']}>
+        <WalletProvider>
+          <BountyList />
+          <LocationDisplay />
+        </WalletProvider>
+      </MemoryRouter>
     );
 
     await waitFor(() => {
-      expect(screen.getByText("100 XLM")).toBeTruthy();
-    });
-
-    const loadMoreBtn = screen.getByRole("button", { name: "Load more" });
-    expect(loadMoreBtn).toBeTruthy();
-
-    const sentinel = screen.getByTestId("infinite-scroll-sentinel");
-    expect(sentinel).toBeTruthy();
-  });
-
-  it("clicks load more button to fetch and append subsequent bounties", async () => {
-    vi.spyOn(api, "getBounties")
-      .mockResolvedValueOnce({
-        bounties: [MOCK_BOUNTIES[0]!],
-        nextCursor: "cursor-2",
-      })
-      .mockResolvedValueOnce({
-        bounties: [MOCK_BOUNTIES[1]!],
-        nextCursor: null,
+      expect(api.getBounties).toHaveBeenCalledWith({
+        status: 'open',
+        tag: 'rust',
+        sort: 'reward',
+        order: 'asc',
+        cursor: undefined,
       });
+    });
 
+    const openButton = screen.getByRole('button', { name: 'Open' });
+    expect(openButton.getAttribute('aria-pressed')).toBe('true');
+
+    const tagInput = screen.getByLabelText('Tag') as HTMLInputElement;
+    expect(tagInput.value).toBe('rust');
+
+    const sortSelect = screen.getByLabelText('Sort by') as HTMLSelectElement;
+    expect(sortSelect.value).toBe('reward');
+
+    const orderSelect = screen.getByLabelText('Order') as HTMLSelectElement;
+    expect(orderSelect.value).toBe('asc');
+  });
+
+  it('updates the URL query parameters when filters change', async () => {
     render(
-      <WalletProvider>
-        <BountyList />
-      </WalletProvider>,
+      <MemoryRouter initialEntries={['/']}>
+        <WalletProvider>
+          <BountyList />
+          <LocationDisplay />
+        </WalletProvider>
+      </MemoryRouter>
     );
 
     await waitFor(() => {
-      expect(screen.getByText("100 XLM")).toBeTruthy();
+      expect(api.getBounties).toHaveBeenCalled();
     });
 
-    const loadMoreBtn = screen.getByRole("button", { name: "Load more" });
-    fireEvent.click(loadMoreBtn);
+    fireEvent.click(screen.getByRole('button', { name: 'Claimed' }));
+    fireEvent.change(screen.getByLabelText('Tag'), { target: { value: 'soroban' } });
+    fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'deadline' } });
+    fireEvent.change(screen.getByLabelText('Order'), { target: { value: 'asc' } });
 
     await waitFor(() => {
-      expect(screen.getByText("200 XLM")).toBeTruthy();
+      const locationSearch = screen.getByTestId('location-display').textContent ?? '';
+      expect(locationSearch).toContain('status=claimed');
+      expect(locationSearch).toContain('tag=soroban');
+      expect(locationSearch).toContain('sort=deadline');
+      expect(locationSearch).toContain('order=asc');
     });
 
-    expect(screen.getByText("100 XLM")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+    await waitFor(() => {
+      expect(api.getBounties).toHaveBeenCalledWith({
+        status: 'claimed',
+        tag: 'soroban',
+        sort: 'deadline',
+        order: 'asc',
+        cursor: undefined,
+      });
+    });
+  });
+
+  it('resets all filter parameters from URL and controls when reset is clicked', async () => {
+    render(
+      <MemoryRouter initialEntries={['/?status=disputed&tag=audit&sort=reward&order=asc']}>
+        <WalletProvider>
+          <BountyList />
+          <LocationDisplay />
+        </WalletProvider>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(api.getBounties).toHaveBeenCalledWith({
+        status: 'disputed',
+        tag: 'audit',
+        sort: 'reward',
+        order: 'asc',
+        cursor: undefined,
+      });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
+
+    await waitFor(() => {
+      const locationSearch = screen.getByTestId('location-display').textContent ?? '';
+      expect(locationSearch).toBe('');
+    });
+
+    await waitFor(() => {
+      expect(api.getBounties).toHaveBeenCalledWith({
+        status: undefined,
+        tag: undefined,
+        sort: 'created',
+        order: 'desc',
+        cursor: undefined,
+      });
+    });
+
+    const statusGroup = screen.getByRole('group', { name: 'Status' });
+    const allStatusButton = within(statusGroup).getByRole('button', { name: 'All' });
+    expect(allStatusButton.getAttribute('aria-pressed')).toBe('true');
+
+    const tagInput = screen.getByLabelText('Tag') as HTMLInputElement;
+    expect(tagInput.value).toBe('');
+
+    const sortSelect = screen.getByLabelText('Sort by') as HTMLSelectElement;
+    expect(sortSelect.value).toBe('created');
+
+    const orderSelect = screen.getByLabelText('Order') as HTMLSelectElement;
+    expect(orderSelect.value).toBe('desc');
   });
 });

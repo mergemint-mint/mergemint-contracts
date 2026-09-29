@@ -53,6 +53,31 @@ Any change to those signatures — argument types, return types, function names 
 a **breaking change** and requires a MAJOR bump. Storage layout changes that prevent
 existing data from being read correctly also require a MAJOR bump.
 
+## Contract Version Query
+
+The contract exposes a cheap `version(env) -> Symbol` query in
+`src/contract/queries.rs` that returns the deployed contract version as a semver
+string. The value is sourced from a single constant (`CONTRACT_VERSION`) so the
+contract, the SDK and the docs cannot drift apart.
+
+Clients (frontend, SDK, backend indexer) should call `version()` on startup and
+compare the result against the version they were built for, warning the user when
+they are pointed at an unexpected contract version instead of surfacing a
+confusing runtime error later.
+
+### Bumping the version
+
+When a release is tagged, update the version in **both** places in the same pull
+request, keeping them identical:
+
+1. `CONTRACT_VERSION` in `src/contract/queries.rs` — the value returned by `version()`.
+2. The `[Unreleased]` section in [CHANGELOG.md](../CHANGELOG.md), renamed to the new
+   version as described below.
+
+Choose the new value using the bump rules above (MAJOR / MINOR / PATCH). The
+`version()` query itself is a backwards-compatible addition, so introducing it is a
+MINOR bump; subsequent changes follow the rules for the change being made.
+
 ## Changelog Discipline
 
 Every pull request that changes contract behaviour must add an entry under
@@ -71,4 +96,5 @@ and a fresh `[Unreleased]` section is added at the top.
 ## Current Version
 
 See [CHANGELOG.md](../CHANGELOG.md) for the current released version and the list
-of unreleased changes on `main`.
+of unreleased changes on `main`. The value returned by the on-chain `version()`
+query must always match the latest released version documented there.

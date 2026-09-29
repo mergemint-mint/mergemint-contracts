@@ -63,3 +63,17 @@ Contract events emitted for indexer integration.
 - **Data**: `(bounty_id, amount)`
 - **Trigger**: A milestone is completed and its staged reward paid
 - **Purpose**: Notify indexer of milestone-level progress
+
+### contributor_metadata_updated
+- **Topics**: `(Symbol("contributor_metadata_updated"), contributor_address)`
+- **Data**: `metadata`
+- **Trigger**: Contributor metadata is updated via `update_contributor_metadata`
+- **Purpose**: Notify indexer of contributor profile changes so cached profiles stay fresh
+
+## Queries
+
+### get_contributor_bounty_history
+- **Params**: `(contributor_address, offset: u32, limit: u32)`
+- **Returns**: `Vec<BountyId>` — the contributor's bounties, newest first
+- **Paging**: `offset` skips the most recent `offset` entries; `limit` caps the page size and is clamped to `MAX_HISTORY_PAGE_SIZE`
+- **Purpose**: Bounded, paginated lookup of a contributor's bounty history for profile pages and SDK consumers
