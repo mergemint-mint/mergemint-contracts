@@ -1,5 +1,5 @@
 {
-  "$comment": "Shared fixture asserting app/src/lib/validation.ts and mergemint-backend agree on the reward-amount and description-length rules. Edit both consumers (app/src/lib/validation.test.ts, mergemint-backend/src/validation.rs) if you change a case here.",
+  "$comment": "Shared fixture asserting frontend/src/lib/validation.ts and mergemint-backend agree on the reward-amount and description-length rules. Edit both consumers (frontend/src/lib/validation.test.ts, mergemint-backend/src/validation.rs) if you change a case here.",
   "rewardAmount": [
     { "value": "10", "valid": true, "reason": "plain positive integer" },
     { "value": "10.5", "valid": true, "reason": "one decimal place" },

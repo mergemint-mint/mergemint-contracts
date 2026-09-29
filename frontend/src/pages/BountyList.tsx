@@ -2,21 +2,35 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { Bounty, BountyStatus } from '../types';
 import { BountyCard } from '../components/BountyCard';
+import { BountyCardSkeleton } from '../components/BountyCardSkeleton';
 import { useWallet } from '../lib/WalletContext';
 import { mapErrorMessage } from '../utils/format';
+import { useBountyStream } from '../hooks/useBountyStream';
 
 const STATUSES: Array<BountyStatus | 'all'> = ['all', 'open', 'claimed', 'disputed', 'completed', 'cancelled'];
 
 type OwnershipFilter = 'all' | 'created' | 'assigned';
 
+/**
+ * Page component displaying filtered bounty cards with pagination, status filters,
+ * ownership toggles, and skeleton placeholders during loading states.
+ *
+ * @returns BountyList page element.
+ */
 export function BountyList() {
   const { address } = useWallet();
+  const { t } = useTranslation();
   const [status, setStatus] = useState<BountyStatus | 'all'>('all');
   const [ownership, setOwnership] = useState<OwnershipFilter>('all');
   const [bounties, setBounties] = useState<Bounty[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const { isHighlighted } = useBountyStream({
+    setBounties,
+    filterStatus: status,
+  });
 
   // Ownership toggles only make sense for a connected wallet; fall back to
   // "all" if the wallet disconnects while a scoped filter is active.
@@ -53,20 +67,19 @@ export function BountyList() {
 
   useEffect(() => {
     fetchPage();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, ownership, address]);
+  }, [fetchPage]);
 
   return (
     <div>
       <div className="ownership-toggles">
         <button disabled={!address} aria-pressed={ownership === 'all'} onClick={() => setOwnership('all')}>
-          All
+          {t('filter_all')}
         </button>
         <button disabled={!address} aria-pressed={ownership === 'created'} onClick={() => setOwnership('created')}>
-          Created by me
+          {t('filter_created_by_me')}
         </button>
         <button disabled={!address} aria-pressed={ownership === 'assigned'} onClick={() => setOwnership('assigned')}>
-          Assigned to me
+          {t('filter_assigned_to_me')}
         </button>
       </div>
 
@@ -82,13 +95,17 @@ export function BountyList() {
 
       <div className="bounty-grid">
         {bounties.map((bounty) => (
-          <BountyCard key={bounty.id} bounty={bounty} />
+          <BountyCard
+            key={bounty.id}
+            bounty={bounty}
+            highlighted={isHighlighted(bounty.id)}
+          />
         ))}
       </div>
 
       {nextCursor && (
         <button onClick={() => fetchPage(nextCursor)} disabled={loading}>
-          {loading ? 'Loading...' : 'Load more'}
+          {loading ? t('loading') : t('load_more')}
         </button>
       )}
     </div>
