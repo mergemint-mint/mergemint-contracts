@@ -475,7 +475,7 @@ exhausted.
 | <a id="get_open_bounties_paged"></a>`get_open_bounties_paged` | `(offset: u32, limit: u32) -> Vec<BountyId>` | Legacy offset/limit wrapper around `get_open_bounties`. Prefer the cursor version. | none |
 | <a id="get_bounties_by_tag"></a>`get_bounties_by_tag` | `(tag: Symbol) -> Vec<BountyId>` | **Open** bounties carrying `tag`. Unpaginated, O(open bounties). | `InvalidTag` → `"invalid bounty tag"` |
 | <a id="get_contributor_active_bounty"></a>`get_contributor_active_bounty` | `(address: Address) -> Option<BountyId>` | The first `in_progress` bounty that lists `address` as an assignee. | none |
-| <a id="get_contributor_bounty_history"></a>`get_contributor_bounty_history` | `(address: Address) -> Vec<BountyId>` | Bounties where `address` was an assignee when they reached `completed`/`cancelled`. | none |
+| <a id="get_contributor_bounty_history"></a>`get_contributor_bounty_history` | `(address: Address, offset: u32, limit: u32) -> Vec<BountyId>` | Bounded page of bounties where `address` was an assignee when they reached `completed`/`cancelled`, newest first. Limit capped at 50. | none |
 | <a id="get_bounties_by_creator"></a>`get_bounties_by_creator` | `(creator: Address, cursor: Option<u32>, limit: u32) -> (Vec<BountyId>, Option<u32>)` | One page of the bounties created by `creator`, in creation order. | none |
 
 ---

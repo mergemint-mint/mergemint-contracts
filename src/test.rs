@@ -3349,3 +3349,84 @@ fn test_contributor_entry_survives_ttl_via_periodic_bump() {
          mid-window read bumped its TTL"
     );
 }
+
+/// Issue #843 - get_contributor_bounty_history paginates over 25 entries newest first.
+#[test]
+fn test_get_contributor_bounty_history_paging_over_25_entries() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let empty = client.get_contributor_bounty_history(&contributor, &0, &10);
+    assert_eq!(empty.len(), 0);
+
+    let mut created_ids = std::vec::Vec::new();
+    for _ in 0..25 {
+        let (bounty_id, _token) =
+            make_bounty_with_token(&client, &env, &creator, &contract_id, "hist", 100, None);
+        client.claim_bounty(&contributor, &bounty_id);
+        client.complete_bounty(&verifier, &bounty_id);
+        created_ids.push(bounty_id);
+    }
+
+    let page1 = client.get_contributor_bounty_history(&contributor, &0, &10);
+    assert_eq!(page1.len(), 10);
+    for i in 0..10 {
+        let expected = &created_ids[24 - i];
+        assert_eq!(&page1.get(i as u32).unwrap(), expected);
+    }
+
+    let page2 = client.get_contributor_bounty_history(&contributor, &10, &10);
+    assert_eq!(page2.len(), 10);
+    for i in 0..10 {
+        let expected = &created_ids[14 - i];
+        assert_eq!(&page2.get(i as u32).unwrap(), expected);
+    }
+
+    let page3 = client.get_contributor_bounty_history(&contributor, &20, &10);
+    assert_eq!(page3.len(), 5);
+    for i in 0..5 {
+        let expected = &created_ids[4 - i];
+        assert_eq!(&page3.get(i as u32).unwrap(), expected);
+    }
+
+    let page4 = client.get_contributor_bounty_history(&contributor, &25, &10);
+    assert_eq!(page4.len(), 0);
+
+    let page5 = client.get_contributor_bounty_history(&contributor, &100, &10);
+    assert_eq!(page5.len(), 0);
+}
+
+/// Issue #843 - get_contributor_bounty_history caps limit at 50 and handles limit=0.
+#[test]
+fn test_get_contributor_bounty_history_limit_capped_at_max() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut created_ids = std::vec::Vec::new();
+    for _ in 0..55 {
+        let (bounty_id, _token) =
+            make_bounty_with_token(&client, &env, &creator, &contract_id, "hist_cap", 100, None);
+        client.claim_bounty(&contributor, &bounty_id);
+        client.complete_bounty(&verifier, &bounty_id);
+        created_ids.push(bounty_id);
+    }
+
+    let page1 = client.get_contributor_bounty_history(&contributor, &0, &1000);
+    assert_eq!(page1.len(), 50);
+    for i in 0..50 {
+        let expected = &created_ids[54 - i];
+        assert_eq!(&page1.get(i as u32).unwrap(), expected);
+    }
+
+    let page2 = client.get_contributor_bounty_history(&contributor, &50, &1000);
+    assert_eq!(page2.len(), 5);
+    for i in 0..5 {
+        let expected = &created_ids[4 - i];
+        assert_eq!(&page2.get(i as u32).unwrap(), expected);
+    }
+
+    let default_page = client.get_contributor_bounty_history(&contributor, &0, &0);
+    assert_eq!(default_page.len(), 50);
+}

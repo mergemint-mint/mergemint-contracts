@@ -294,6 +294,31 @@ export class MergeMintSDK {
   }
 
   /**
+   * Reads a bounded page of a contributor's bounty history (completed or cancelled bounties).
+   *
+   * @param address - Stellar account address (`G...`) or contract address (`C...`).
+   * @param offset - Zero-based offset of the first item to return (default: 0).
+   * @param limit - Maximum items to return, capped at 50 (default: 50).
+   * @returns Bounty ids as hex-encoded strings, newest first; an empty array
+   * when the contract account is unreachable, simulation errors, or no records match.
+   * @throws Error if `address` is not a valid Stellar address, or if the RPC
+   * transport fails on every attempt allowed by the configured retry policy.
+   */
+  async getContributorBountyHistory(
+    address: string,
+    offset = 0,
+    limit = 50,
+  ): Promise<string[]> {
+    const result = await this.simulateReadCall(
+      "get_contributor_bounty_history",
+      [addressToScVal(address), u32ToScVal(offset), u32ToScVal(limit)],
+    );
+    if (!result) return [];
+    const ids = scValToNative(result) as Buffer[];
+    return ids.map((b) => Buffer.from(b).toString("hex"));
+  }
+
+  /**
    * Reads the total number of bounties ever created by the contract.
    *
    * @returns The count as a `bigint`; `0n` when the contract account is

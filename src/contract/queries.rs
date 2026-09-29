@@ -188,17 +188,51 @@ impl MergeMintContract {
         None
     }
 
-    /// Return every bounty ID `address` was an assignee on that has reached a
-    /// terminal status (`"completed"` or `"cancelled"`).
+    /// Return a bounded page of bounty IDs `address` was an assignee on that
+    /// have reached a terminal status (`"completed"` or `"cancelled"`).
     ///
     /// Unlike `get_contributor_active_bounty` (which only surfaces the
-    /// current in-progress claim), this surfaces the contributor's full
-    /// bounty history. The index is maintained incrementally in
+    /// current in-progress claim), this surfaces the contributor's bounty
+    /// history. The index is maintained incrementally in
     /// `storage::move_bounty_status` as bounties transition status, so this
-    /// call is O(1) rather than a scan. Returns an empty `Vec` if the
-    /// contributor has no completed or cancelled bounties.
-    pub fn get_contributor_bounty_history(env: Env, address: Address) -> Vec<BountyId> {
-        storage::get_contributor_history(&env, &address)
+    /// call is O(1) rather than a scan.
+    ///
+    /// Results are returned newest first (most recently completed or cancelled
+    /// bounties first). `offset` is the zero-based index of the first item to
+    /// return; `limit` is capped at `MAX_LIMIT` (50) to bound ledger CPU cost.
+    /// Returns an empty vec when `offset` is beyond the end of the history.
+    pub fn get_contributor_bounty_history(
+        env: Env,
+        address: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<BountyId> {
+        let all = storage::get_contributor_history(&env, &address);
+        let effective_limit = if limit == 0 || limit > MAX_LIMIT {
+            MAX_LIMIT
+        } else {
+            limit
+        };
+        let total = all.len();
+        let mut result = Vec::new(&env);
+        if offset >= total {
+            return result;
+        }
+        let end = {
+            let e = offset + effective_limit;
+            if e > total {
+                total
+            } else {
+                e
+            }
+        };
+        let mut k = offset;
+        while k < end {
+            let idx = total - 1 - k;
+            result.push_back(all.get(idx).unwrap());
+            k += 1;
+        }
+        result
     }
 
     /// Return a bounded page of bounty IDs created by a specific creator address.
