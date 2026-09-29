@@ -9,6 +9,8 @@ test_snapshots/
 .vscode/
 .idea/
 *.iml
+*.swp
+*.swo
 
 # OS artefacts
 .DS_Store
@@ -21,6 +23,9 @@ somzilla.md
 node_modules/
 dist/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # Test snapshots (Jest / Vitest)
 *.snap
@@ -29,6 +34,7 @@ __snapshots__/
 # Code coverage
 coverage/
 .nyc_output/
+lcov.info
 
 # End-to-end test artefacts
 playwright-report/
@@ -42,7 +48,15 @@ pkg/
 .turbo/
 .next/
 .parcel-cache/
+.eslintcache
+.tsbuildinfo
+*.tsbuildinfo
 
 # Environment secrets (keep .env.example tracked)
 .env
+.env.local
+.env.*.local
 storybook-static/
+
+# TypeScript incremental build info
+tsconfig.tsbuildinfo

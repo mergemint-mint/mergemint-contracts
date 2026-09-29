@@ -6,20 +6,22 @@ import { mapErrorMessage } from '../utils/format';
 import { StatusBadge } from '../components/StatusBadge';
 import { BountyDetailSkeleton } from '../components/BountyDetailSkeleton';
 import { BountyErrorBoundary } from '../components/BountyErrorBoundary';
-import { CancelBountyDialog } from '../components/CancelBountyDialog';
+import { TopUpModal } from '../components/TopUpModal';
+import { useWallet } from '../lib/WalletContext';
 
 /**
- * Inner component rendering the bounty details, claim action, and cancel confirmation flow.
+ * Inner component rendering the bounty details, claim action, and creator top-up controls.
  *
  * @returns React element displaying bounty details or loading/error states.
  */
 function BountyDetailInner() {
   const { id } = useParams<{ id: string }>();
+  const { address } = useWallet();
   const [bounty, setBounty] = useState<Bounty | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [claiming, setClaiming] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [showCancelDialog, setShowCancelDialog] = useState(false);
+  const [showTopUp, setShowTopUp] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -45,41 +47,55 @@ function BountyDetailInner() {
     }
   }, [id]);
 
-  const handleCancel = useCallback(async () => {
-    if (!id) return;
-    const updated = await api.cancelBounty(id);
-    setBounty(updated);
-  }, [id]);
+  const handleTopUp = useCallback(
+    async (amount: string) => {
+      if (!id) return;
+      const updated = await api.topUpBounty(id, amount);
+      setBounty(updated);
+    },
+    [id]
+  );
 
   if (loading && !bounty) return <BountyDetailSkeleton />;
   if (error && !bounty) return <p role="alert">{error}</p>;
   if (!bounty) return <p>Loading...</p>;
 
+  const isCreator = Boolean(
+    address && bounty.creator && address.toLowerCase() === bounty.creator.toLowerCase()
+  );
+
   return (
-    <div>
+    <div className="bounty-detail-page">
       <h1>{bounty.title}</h1>
       <StatusBadge status={bounty.status} />
       <p>{bounty.description}</p>
+      <div className="bounty-reward">
+        <strong>Reward:</strong> {bounty.reward} XLM
+      </div>
+      <div className="bounty-creator">
+        <strong>Creator:</strong> {bounty.creator}
+      </div>
       {error && <p role="alert">{error}</p>}
       <button onClick={handleClaim} disabled={claiming || bounty.status !== 'open'}>
         {claiming ? 'Claiming...' : 'Claim Bounty'}
       </button>
-      {bounty.status === 'open' && (
+      {isCreator && bounty.status === 'open' && (
         <button
           type="button"
-          onClick={() => setShowCancelDialog(true)}
-          className="cancel-bounty-open-button"
+          onClick={() => setShowTopUp(true)}
+          className="topup-open-button"
         >
-          Cancel Bounty
+          Top Up Bounty
         </button>
       )}
-      <CancelBountyDialog
-        isOpen={showCancelDialog}
-        onClose={() => setShowCancelDialog(false)}
+      <TopUpModal
+        isOpen={showTopUp}
+        onClose={() => setShowTopUp(false)}
         bountyId={bounty.id}
-        bountyTitle={bounty.title}
-        refundAmount={bounty.reward}
-        onConfirm={handleCancel}
+        currentReward={bounty.reward}
+        rewardToken="XLM"
+        isCreator={isCreator}
+        onTopUp={handleTopUp}
       />
     </div>
   );
@@ -97,3 +113,4 @@ export function BountyDetail() {
     </BountyErrorBoundary>
   );
 }
+

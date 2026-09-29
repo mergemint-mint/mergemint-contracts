@@ -58,6 +58,11 @@
   background: var(--mm-bg);
   color: var(--mm-fg);
   border: 1px solid var(--mm-border);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+.bounty-card--highlighted {
+  border-color: var(--mm-accent);
+  box-shadow: 0 0 0 2px var(--mm-accent);
 }
 .bounty-card__id,
 .bounty-card__creator {
@@ -163,8 +168,8 @@
   color: var(--mm-error-fg);
 }
 
-/* CancelBountyDialog.tsx */
-.cancel-bounty-dialog-overlay {
+/* TopUpModal.tsx */
+.topup-modal-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
@@ -175,7 +180,7 @@
   backdrop-filter: blur(2px);
 }
 
-.cancel-bounty-dialog {
+.topup-modal {
   background: var(--mm-bg);
   color: var(--mm-fg);
   border: 1px solid var(--mm-border);
@@ -186,7 +191,7 @@
   overflow: hidden;
 }
 
-.cancel-bounty-dialog__header {
+.topup-modal__header {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -194,14 +199,13 @@
   border-bottom: 1px solid var(--mm-border);
 }
 
-.cancel-bounty-dialog__header h3 {
+.topup-modal__header h3 {
   margin: 0;
   font-size: 1.2rem;
   font-weight: 600;
-  color: var(--mm-fg);
 }
 
-.cancel-bounty-dialog__close-button {
+.topup-modal__close-button {
   background: transparent;
   border: none;
   font-size: 1.5rem;
@@ -212,89 +216,135 @@
   border-radius: 4px;
 }
 
-.cancel-bounty-dialog__close-button:hover:not(:disabled) {
+.topup-modal__close-button:hover {
   color: var(--mm-fg);
   background: var(--mm-bg-subtle);
 }
 
-.cancel-bounty-dialog__close-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.cancel-bounty-dialog__body {
+.topup-modal__body {
   padding: 20px;
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
-.cancel-bounty-dialog__warning {
+.topup-modal__description {
   margin: 0;
-  padding: 12px;
-  background: var(--mm-error-bg);
-  color: var(--mm-error-fg);
-  border-radius: 6px;
+  color: var(--mm-fg-muted);
   font-size: 0.9rem;
-  line-height: 1.4;
 }
 
-.cancel-bounty-dialog__refund-info {
+.topup-modal__balance-info {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  font-size: 0.95rem;
+  font-size: 0.875rem;
+  color: var(--mm-fg-muted);
   background: var(--mm-bg-subtle);
-  border: 1px solid var(--mm-border);
-  padding: 10px 14px;
+  padding: 8px 12px;
   border-radius: 6px;
 }
 
-.cancel-bounty-dialog__refund-label {
-  color: var(--mm-fg-muted);
-}
-
-.cancel-bounty-dialog__refund-value {
-  color: var(--mm-fg);
-  font-size: 1.05rem;
-}
-
-.cancel-bounty-dialog__confirm-group {
+.topup-modal__input-group {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
-.cancel-bounty-dialog__confirm-label {
+.topup-modal__input-group label {
   font-size: 0.875rem;
+  font-weight: 500;
   color: var(--mm-fg);
-  line-height: 1.4;
 }
 
-.cancel-bounty-dialog__input {
+.topup-modal__input-wrapper {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.topup-modal__input {
   width: 100%;
   padding: 10px 12px;
   background: var(--mm-bg);
   border: 1px solid var(--mm-border);
   border-radius: 6px;
   color: var(--mm-fg);
-  font-size: 0.95rem;
+  font-size: 1rem;
   box-sizing: border-box;
 }
 
-.cancel-bounty-dialog__input:focus {
+.topup-modal__input:focus {
   outline: none;
   border-color: var(--mm-accent);
 }
 
-.cancel-bounty-dialog__error {
-  margin: 0;
-  padding: 8px 12px;
+.topup-modal__max-button {
+  position: absolute;
+  right: 8px;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: var(--mm-bg-subtle);
+  border: 1px solid var(--mm-border);
+  border-radius: 4px;
+  color: var(--mm-accent);
+  cursor: pointer;
+}
+
+.topup-modal__max-button:hover {
+  background: var(--mm-accent);
+  color: #ffffff;
+}
+
+.topup-modal__error {
+  margin: 4px 0 0 0;
+  padding: 6px 10px;
   border-radius: 4px;
   font-size: 0.85rem;
 }
 
-.cancel-bounty-dialog__actions {
+.topup-modal__summary {
+  background: var(--mm-bg-subtle);
+  border: 1px solid var(--mm-border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.topup-modal__summary-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.9rem;
+  color: var(--mm-fg);
+}
+
+.topup-modal__summary-total {
+  font-size: 1rem;
+  color: var(--mm-accent);
+}
+
+.topup-modal__divider {
+  border: 0;
+  border-top: 1px solid var(--mm-border);
+  margin: 4px 0;
+}
+
+.topup-modal__confirm-text {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--mm-fg-muted);
+}
+
+.topup-modal__submit-error {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.topup-modal__actions {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
@@ -303,57 +353,32 @@
   background: var(--mm-bg-subtle);
 }
 
-.cancel-bounty-dialog__cancel-button {
+.topup-modal__cancel-button {
   padding: 8px 16px;
   background: transparent;
   border: 1px solid var(--mm-border);
   border-radius: 6px;
   color: var(--mm-fg-muted);
-  font-weight: 500;
   cursor: pointer;
 }
 
-.cancel-bounty-dialog__cancel-button:hover:not(:disabled) {
+.topup-modal__cancel-button:hover {
   color: var(--mm-fg);
   background: var(--mm-bg);
 }
 
-.cancel-bounty-dialog__confirm-button {
+.topup-open-button {
   padding: 8px 16px;
-  background: var(--mm-error-fg);
+  background: var(--mm-accent);
   color: #ffffff;
-  border: 1px solid transparent;
+  border: none;
   border-radius: 6px;
   font-weight: 500;
   cursor: pointer;
+  margin-top: 12px;
 }
 
-.cancel-bounty-dialog__confirm-button:hover:not(:disabled) {
+.topup-open-button:hover {
   opacity: 0.9;
-}
-
-.cancel-bounty-dialog__confirm-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.cancel-bounty-open-button {
-  padding: 8px 16px;
-  background: transparent;
-  color: var(--mm-error-fg);
-  border: 1px solid var(--mm-error-fg);
-  border-radius: 6px;
-  font-weight: 500;
-  cursor: pointer;
-  margin-left: 8px;
-}
-
-.cancel-bounty-open-button:hover:not(:disabled) {
-  background: var(--mm-error-bg);
-}
-
-.cancel-bounty-open-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 

@@ -4,6 +4,7 @@ import { Bounty, BountyStatus } from '../types';
 import { BountyCard } from '../components/BountyCard';
 import { useWallet } from '../lib/WalletContext';
 import { mapErrorMessage } from '../utils/format';
+import { useBountyStream } from '../hooks/useBountyStream';
 
 const STATUSES: Array<BountyStatus | 'all'> = ['all', 'open', 'claimed', 'disputed', 'completed', 'cancelled'];
 
@@ -17,6 +18,11 @@ export function BountyList() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const { isHighlighted } = useBountyStream({
+    setBounties,
+    filterStatus: status,
+  });
 
   // Ownership toggles only make sense for a connected wallet; fall back to
   // "all" if the wallet disconnects while a scoped filter is active.
@@ -82,7 +88,11 @@ export function BountyList() {
 
       <div className="bounty-grid">
         {bounties.map((bounty) => (
-          <BountyCard key={bounty.id} bounty={bounty} />
+          <BountyCard
+            key={bounty.id}
+            bounty={bounty}
+            highlighted={isHighlighted(bounty.id)}
+          />
         ))}
       </div>
 
