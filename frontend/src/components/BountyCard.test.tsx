@@ -37,4 +37,9 @@ describe("BountyCard", () => {
     expect(markup).toContain("bounty-card--loading");
     expect(markup).toContain('aria-busy="true"');
   });
+
+  it("applies highlight class when highlighted is true", () => {
+    const markup = renderToStaticMarkup(<BountyCard bounty={BOUNTY} highlighted />);
+    expect(markup).toContain("bounty-card--highlighted");
+  });
 });

@@ -111,7 +111,7 @@ Soroban supports replacing a contract's Wasm blob in-place via
 `env.deployer().update_current_contract_wasm(new_wasm_hash)`. The contract address
 and all existing storage slots are preserved; only the executable code changes.
 
-1. Add an `upgrade(admin: Address, new_wasm_hash: BytesN<32>)` function.
+1. Add an `upgrade(env: Env, new_wasm_hash: BytesN<32>)` function.
 2. The operator uploads the patched Wasm (`stellar contract install`), obtaining its hash.
 3. `upgrade` is called with that hash; subsequent invocations execute the new Wasm.
 
@@ -142,7 +142,11 @@ pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
     if admin != stored {
         panic!("not admin");
     }
-    env.deployer().update_current_contract_wasm(new_wasm_hash);
+    if !storage::get_paused(&env) {
+        panic!("contract must be paused before upgrade");
+    }
+    env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+    events::emit_contract_upgraded(&env, &new_wasm_hash);
 }
 ```
 
