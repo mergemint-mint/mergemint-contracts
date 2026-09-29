@@ -39,13 +39,13 @@ jobs:
     env:
       STELLAR_CLI_VERSION: ${{ vars.STELLAR_CLI_VERSION || '28.0.0' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Install Rust toolchain from rust-toolchain.toml
         run: rustup toolchain install
 
       - name: Cache cargo registry and wasm build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -112,7 +112,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload contract ID artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: testnet-contract-id
           path: |
