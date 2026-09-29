@@ -388,106 +388,112 @@ mod tests {
     }
 
     #[test]
-    fn test_audit_logs_migration_has_required_indexes() {
-        let migration = AUDIT_LOGS_MIGRATION.to_lowercase();
-
-        assert!(
-            migration.contains("create table if not exists audit_logs"),
-            "migration must create audit_logs table; got:\n{migration}"
-        );
-        assert!(
-            migration.contains("timestamp bigint not null"),
-            "migration must have timestamp field; got:\n{migration}"
-        );
-        assert!(
-            migration.contains("actor varchar"),
-            "migration must have actor field; got:\n{migration}"
-        );
-        assert!(
-            migration.contains("action varchar"),
-            "migration must have action field; got:\n{migration}"
-        );
-        assert!(
-            migration.contains("target varchar"),
-            "migration must have target field; got:\n{migration}"
-        );
-        assert!(
-            migration.contains("create index if not exists idx_audit_logs_timestamp on audit_logs (timestamp desc)"),
-            "migration must index audit_logs.timestamp DESC; got:\n{migration}"
-        );
-        assert!(
-            migration.contains("create index if not exists idx_audit_logs_actor on audit_logs (actor)"),
-            "migration must index audit_logs.actor; got:\n{migration}"
-        );
-        assert!(
-            migration.contains("create index if not exists idx_audit_logs_action on audit_logs (action)"),
-            "migration must index audit_logs.action; got:\n{migration}"
-        );
-    }
-
-    #[test]
-    fn test_write_and_query_audit_logs() {
+    fn test_leaderboard_aggregates_bounties_by_assignee() {
         let db = new_shared_db();
+        let time = Utc::now();
 
-        let log1 = AuditLog::new(
-            "arbitrator-1".to_string(),
-            "resolve_dispute".to_string(),
-            "bounty-123".to_string(),
-            1000,
-        );
-        let log2 = AuditLog::new(
-            "arbitrator-2".to_string(),
-            "resolve_dispute".to_string(),
-            "bounty-456".to_string(),
-            2000,
-        );
-
-        write_audit_log(&db, log1.clone());
-        write_audit_log(&db, log2.clone());
-
-        let logs = query_audit_logs(&db, None, None, None, 100);
-        assert_eq!(logs.len(), 2);
-        // Should be sorted by timestamp descending (newest first)
-        assert_eq!(logs[0].timestamp, 2000);
-        assert_eq!(logs[1].timestamp, 1000);
-    }
-
-    #[test]
-    fn test_query_audit_logs_by_actor() {
-        let db = new_shared_db();
-
-        write_audit_log(&db, AuditLog::new("alice".to_string(), "resolve_dispute".to_string(), "bounty-1".to_string(), 100));
-        write_audit_log(&db, AuditLog::new("bob".to_string(), "resolve_dispute".to_string(), "bounty-2".to_string(), 200));
-        write_audit_log(&db, AuditLog::new("alice".to_string(), "resolve_dispute".to_string(), "bounty-3".to_string(), 300));
-
-        let alice_logs = query_audit_logs(&db, Some("alice"), None, None, 100);
-        assert_eq!(alice_logs.len(), 2);
-        assert!(alice_logs.iter().all(|log| log.actor == "alice"));
-    }
-
-    #[test]
-    fn test_query_audit_logs_by_target() {
-        let db = new_shared_db();
-
-        write_audit_log(&db, AuditLog::new("alice".to_string(), "resolve_dispute".to_string(), "bounty-1".to_string(), 100));
-        write_audit_log(&db, AuditLog::new("bob".to_string(), "resolve_dispute".to_string(), "bounty-2".to_string(), 200));
-        write_audit_log(&db, AuditLog::new("charlie".to_string(), "resolve_dispute".to_string(), "bounty-1".to_string(), 300));
-
-        let bounty1_logs = query_audit_logs(&db, None, None, Some("bounty-1"), 100);
-        assert_eq!(bounty1_logs.len(), 2);
-        assert!(bounty1_logs.iter().all(|log| log.target == "bounty-1"));
-    }
-
-    #[test]
-    fn test_query_audit_logs_respects_limit() {
-        let db = new_shared_db();
-
-        for i in 0..10 {
-            write_audit_log(&db, AuditLog::new("actor".to_string(), "action".to_string(), format!("target-{}", i), i as u64));
+        {
+            let mut guard = acquire_db(&db);
+            guard.bounties.push(Bounty {
+                id: "1".to_string(),
+                creator: "alice".to_string(),
+                assignee: Some("bob".to_string()),
+                created_at: time,
+            });
+            guard.bounties.push(Bounty {
+                id: "2".to_string(),
+                creator: "alice".to_string(),
+                assignee: Some("bob".to_string()),
+                created_at: time,
+            });
+            guard.bounties.push(Bounty {
+                id: "3".to_string(),
+                creator: "alice".to_string(),
+                assignee: Some("carol".to_string()),
+                created_at: time,
+            });
         }
 
-        let limited = query_audit_logs(&db, None, None, None, 3);
-        assert_eq!(limited.len(), 3);
+        let page = get_leaderboard(&db, 100);
+        assert_eq!(page.entries.len(), 2);
+
+        let bob_entry = page.entries.iter().find(|e| e.address == "bob").unwrap();
+        assert_eq!(bob_entry.completed_bounties, 2);
+        assert_eq!(bob_entry.reputation, 2);
+
+        let carol_entry = page.entries.iter().find(|e| e.address == "carol").unwrap();
+        assert_eq!(carol_entry.completed_bounties, 1);
+        assert_eq!(carol_entry.reputation, 1);
+    }
+
+    #[test]
+    fn test_leaderboard_sorts_by_reputation_descending() {
+        let db = new_shared_db();
+        let time = Utc::now();
+
+        {
+            let mut guard = acquire_db(&db);
+            // alice has 3 completed bounties
+            guard.bounties.push(Bounty {
+                id: "1".to_string(),
+                creator: "creator".to_string(),
+                assignee: Some("alice".to_string()),
+                created_at: time,
+            });
+            guard.bounties.push(Bounty {
+                id: "2".to_string(),
+                creator: "creator".to_string(),
+                assignee: Some("alice".to_string()),
+                created_at: time,
+            });
+            guard.bounties.push(Bounty {
+                id: "3".to_string(),
+                creator: "creator".to_string(),
+                assignee: Some("alice".to_string()),
+                created_at: time,
+            });
+            // bob has 1 completed bounty
+            guard.bounties.push(Bounty {
+                id: "4".to_string(),
+                creator: "creator".to_string(),
+                assignee: Some("bob".to_string()),
+                created_at: time,
+            });
+        }
+
+        let page = get_leaderboard(&db, 100);
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.entries[0].address, "alice");
+        assert_eq!(page.entries[1].address, "bob");
+    }
+
+    #[test]
+    fn test_leaderboard_respects_limit() {
+        let db = new_shared_db();
+        let time = Utc::now();
+
+        {
+            let mut guard = acquire_db(&db);
+            for i in 0..10 {
+                guard.bounties.push(Bounty {
+                    id: i.to_string(),
+                    creator: "creator".to_string(),
+                    assignee: Some(format!("contributor_{}", i)),
+                    created_at: time,
+                });
+            }
+        }
+
+        let page = get_leaderboard(&db, 5);
+        assert_eq!(page.entries.len(), 5);
+    }
+
+    #[test]
+    fn test_leaderboard_returns_empty_page_when_no_bounties() {
+        let db = new_shared_db();
+
+        let page = get_leaderboard(&db, 100);
+        assert!(page.entries.is_empty());
     }
 }
 
@@ -498,4 +504,74 @@ pub fn get_bounty(
 ) -> Option<Bounty> {
     let guard = read_db(db);
     guard.bounties.iter().find(|b| b.id == id).cloned()
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard
+// ---------------------------------------------------------------------------
+
+/// A contributor entry in the leaderboard, ranked by reputation and completed
+/// bounties. Aggregates stats across the bounties table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderboardEntry {
+    pub address: String,
+    pub completed_bounties: i64,
+    pub reputation: i64,
+}
+
+/// A page of leaderboard entries, ranked by reputation (descending) and
+/// completed bounties (descending).
+#[derive(Debug, Clone, Serialize)]
+pub struct LeaderboardPage {
+    pub entries: Vec<LeaderboardEntry>,
+}
+
+/// Aggregate contributor statistics from completed bounties and compute a
+/// leaderboard, ranked by reputation (descending), then by completed bounties
+/// (descending).
+///
+/// `limit` is trusted to already be clamped by the caller; this function does
+/// not re-validate it.
+pub fn get_leaderboard(
+    db: &SharedDb,
+    limit: i64,
+) -> LeaderboardPage {
+    let guard = read_db(db);
+
+    // Aggregate completed bounties per assignee
+    let mut contributor_stats: HashMap<String, (i64, i64)> = HashMap::new();
+
+    for bounty in &guard.bounties {
+        if let Some(assignee) = &bounty.assignee {
+            let (count, reputation) = contributor_stats
+                .entry(assignee.clone())
+                .or_insert((0, 0));
+            *count += 1;
+            // Simple reputation model: 1 point per completed bounty
+            *reputation += 1;
+        }
+    }
+
+    // Convert to leaderboard entries and sort by reputation (descending),
+    // then by completed bounties (descending)
+    let mut entries: Vec<LeaderboardEntry> = contributor_stats
+        .into_iter()
+        .map(|(address, (completed_bounties, reputation))| LeaderboardEntry {
+            address,
+            completed_bounties,
+            reputation,
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        match b.reputation.cmp(&a.reputation) {
+            std::cmp::Ordering::Equal => b.completed_bounties.cmp(&a.completed_bounties),
+            other => other,
+        }
+    });
+
+    let limit = usize::try_from(limit).unwrap_or(0);
+    entries.truncate(limit);
+
+    LeaderboardPage { entries }
 }

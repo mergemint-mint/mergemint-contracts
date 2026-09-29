@@ -68,7 +68,8 @@ mod routes;
 
 use db::{new_shared_db, new_shared_idempotency_store};
 use routes::bounties::{get_bounty_route, bounty_stream, claim_bounty, list_bounties, list_bounties_by_assignee};
-use routes::tx::{new_shared_rate_limiter, resolve_dispute, self_claim, query_audit_logs, AppState};
+use routes::leaderboard::get_leaderboard_route;
+use routes::tx::{new_shared_rate_limiter, resolve_dispute, self_claim, AppState};
 
 /// Maximum allowed request body size (1 MiB).
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -95,6 +96,11 @@ const ALLOWLISTED_REWARD_TOKENS_ENV: &str = "ALLOWLISTED_REWARD_TOKENS";
 /// cross-origin requests, e.g.
 /// "https://app.mergemint.xyz,https://staging.mergemint.xyz".
 const CORS_ALLOWED_ORIGINS_ENV: &str = "CORS_ALLOWED_ORIGINS";
+
+/// SSE keep-alive interval (seconds) to prevent idle connections from being
+/// closed by proxies and load balancers. Defaults to 15 seconds.
+const SSE_KEEP_ALIVE_SECS_ENV: &str = "SSE_KEEP_ALIVE_SECS";
+const SSE_KEEP_ALIVE_SECS_DEFAULT: u64 = 15;
 
 #[tokio::main]
 async fn main() {
@@ -132,11 +138,13 @@ async fn main() {
     let shared_db = new_shared_db();
     let idempotency = new_shared_idempotency_store();
     let (bounty_broadcast, _) = tokio::sync::broadcast::channel(100);
+    let sse_keep_alive_duration = read_sse_keep_alive_duration();
     let state = Arc::new(AppState {
         db: shared_db,
         idempotency,
         rate_limiter: new_shared_rate_limiter(),
         bounty_broadcast,
+        leaderboard_cache: routes::leaderboard::new_leaderboard_cache(),
     });
 
     let app = Router::new()
@@ -150,6 +158,7 @@ async fn main() {
             "/bounties/assignee/:address",
             get(list_bounties_by_assignee),
         )
+        .route("/leaderboard", get(get_leaderboard_route))
         // ── Bounty push channel (#482) ─────────────────────────────────────
         .route("/bounties/:id/claim", post(claim_bounty))
         .route("/bounties/stream", get(bounty_stream))
@@ -211,6 +220,36 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+}
+
+/// Read SSE keep-alive interval from environment, defaulting to 15 seconds.
+fn read_sse_keep_alive_duration() -> Duration {
+    match std::env::var(SSE_KEEP_ALIVE_SECS_ENV) {
+        Ok(val) => match val.parse::<u64>() {
+            Ok(secs) => {
+                tracing::info!(
+                    secs = secs,
+                    "SSE keep-alive interval configured from environment"
+                );
+                Duration::from_secs(secs)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    value = val,
+                    default_secs = SSE_KEEP_ALIVE_SECS_DEFAULT,
+                    "SSE_KEEP_ALIVE_SECS is not a valid integer, using default"
+                );
+                Duration::from_secs(SSE_KEEP_ALIVE_SECS_DEFAULT)
+            }
+        },
+        Err(_) => {
+            tracing::debug!(
+                default_secs = SSE_KEEP_ALIVE_SECS_DEFAULT,
+                "SSE_KEEP_ALIVE_SECS not set, using default"
+            );
+            Duration::from_secs(SSE_KEEP_ALIVE_SECS_DEFAULT)
+        }
+    }
 }
 
 /// Liveness probe used by container healthchecks.
