@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};
 
 use crate::db::{
-    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage,
+    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage, Bounty,
 };
 use crate::routes::tx::AppState;
 
@@ -278,12 +278,204 @@ pub async fn bounty_stream(
         })
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(state.sse_keep_alive_duration)
+    )
 }
 
 /// `POST /bounties/{id}/claim`
 ///
 /// Marks a bounty as claimed by the caller and broadcasts the bounty ID on the
-/// SSE channel so subscribed clients are notified w
+/// SSE channel so subscribed clients are notified without a polling round-trip.
+pub async fn claim_bounty(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let _ = state.bounty_broadcast.send(id.clone());
 
-/* … truncated 2359 chars — edit only what you need near the top … */
+    Json(serde_json::json!({
+        "id": id,
+        "status": "claimed"
+    }))
+}
+
+/// `GET /bounties/{id}`
+pub async fn get_bounty_route(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Bounty>, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(bounty) = crate::db::get_bounty(&state.db, &id) {
+        Ok(Json(bounty))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "bounty not found" })),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{acquire_db, new_shared_db, new_shared_idempotency_store, Bounty};
+
+    fn test_state() -> Arc<AppState> {
+        Arc::new(AppState {
+            db: new_shared_db(),
+            idempotency: new_shared_idempotency_store(),
+            rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
+            bounty_broadcast: tokio::sync::broadcast::channel(16).0,
+            leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
+        })
+    }
+
+    /// Seed `count` bounties into `state`'s store so a page can actually be
+    /// cut short by the limit clamp.
+    fn seed_bounties(state: &AppState, count: usize) {
+        let mut guard = acquire_db(&state.db);
+        for i in 0..count {
+            guard.bounties.push(Bounty {
+                id: i.to_string(),
+                creator: "carol".to_string(),
+                assignee: None,
+                created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+            });
+        }
+    }
+
+    fn valid_address() -> String {
+        format!("G{}", "A".repeat(55))
+    }
+
+    #[test]
+    fn rejects_empty_and_malformed_addresses() {
+        assert!(!is_syntactically_valid_address(""));
+        assert!(!is_syntactically_valid_address("not-an-address"));
+        assert!(!is_syntactically_valid_address("GA")); // too short
+        assert!(!is_syntactically_valid_address(
+            &valid_address().to_lowercase()
+        )); // wrong case
+        assert!(!is_syntactically_valid_address(&"1".repeat(56))); // wrong prefix + alphabet
+    }
+
+    #[test]
+    fn accepts_well_formed_account_and_contract_addresses() {
+        assert!(is_syntactically_valid_address(&valid_address()));
+        assert!(is_syntactically_valid_address(&format!(
+            "C{}",
+            "A".repeat(55)
+        )));
+    }
+
+    /// A malformed assignee address must yield a 400 Bad Request, never a
+    /// panic or a 500 — the handler must reject it before touching the store.
+    #[tokio::test]
+    async fn list_bounties_by_assignee_returns_400_for_malformed_address() {
+        let state = test_state();
+
+        let result = list_bounties_by_assignee(
+            State(state),
+            Path("not-a-valid-address".to_string()),
+            Query(ListParams {
+                limit: None,
+                cursor: None,
+            }),
+        )
+        .await;
+
+        let (status, Json(body)) = result.expect_err("malformed address must be rejected");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.get("error").is_some());
+    }
+
+    /// A well-formed address with no matching bounties must return an empty
+    /// page, not a 500 — the endpoint has nothing to error on here.
+    #[tokio::test]
+    async fn list_bounties_by_assignee_returns_empty_page_for_unknown_address() {
+        let state = test_state();
+
+        let Json(page) = list_bounties_by_assignee(
+            State(state),
+            Path(valid_address()),
+            Query(ListParams {
+                limit: None,
+                cursor: None,
+            }),
+        )
+        .await
+        .expect("well-formed address must not be rejected");
+
+        assert!(page.bounties.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    /// An oversized `limit` query param must be clamped to `MAX_LIST_LIMIT`
+    /// before the store is queried, not passed through verbatim — otherwise
+    /// a caller could force an unbounded scan/sort over every bounty.
+    #[tokio::test]
+    async fn list_bounties_clamps_an_oversized_limit_to_the_max() {
+        let state = test_state();
+        seed_bounties(&state, MAX_LIST_LIMIT as usize + 50);
+
+        let Json(page) = list_bounties(
+            State(state),
+            Query(ListParams {
+                limit: Some(10_000),
+                cursor: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            page.bounties.len(),
+            MAX_LIST_LIMIT as usize,
+            "an oversized limit must be clamped to MAX_LIST_LIMIT"
+        );
+        assert!(
+            page.next_cursor.is_some(),
+            "a clamped page shorter than the full result set must carry a next_cursor"
+        );
+    }
+
+    /// A caller-supplied limit within bounds must be honored as-is.
+    #[tokio::test]
+    async fn list_bounties_honors_a_limit_within_bounds() {
+        let state = test_state();
+        seed_bounties(&state, 20);
+
+        let Json(page) = list_bounties(
+            State(state),
+            Query(ListParams {
+                limit: Some(5),
+                cursor: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(page.bounties.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn get_bounty_route_returns_bounty_if_found() {
+        let state = test_state();
+        seed_bounties(&state, 1);
+
+        let result = get_bounty_route(State(state), Path("0".to_string())).await;
+
+        let Json(bounty) = result.expect("must return bounty");
+        assert_eq!(bounty.id, "0");
+        assert_eq!(bounty.creator, "carol");
+    }
+
+    #[tokio::test]
+    async fn get_bounty_route_returns_404_if_not_found() {
+        let state = test_state();
+
+        let result = get_bounty_route(State(state), Path("999".to_string())).await;
+
+        let (status, Json(body)) = result.expect_err("must return 404");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.get("error").is_some());
+    }
+}

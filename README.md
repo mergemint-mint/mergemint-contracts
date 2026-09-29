@@ -153,5 +153,5 @@ contract, read [docs/security.md](docs/security.md) first.
 
 ## Handsoff notes
 
-<!-- handsoff-issue-875 -->
-- #875: [Backend] Contributor profile route
+<!-- handsoff-issue-869 -->
+- #869: [Backend] Request ID middleware

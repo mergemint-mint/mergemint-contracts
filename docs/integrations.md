@@ -167,3 +167,154 @@ function ClaimButton({ bountyId, contributorAddress }) {
 - **Deep-link size**: Very large XDR envelopes (rare for single-operation
   invocations) may exceed browser URL length limits. The assembled Soroban
   transaction for `claim_bounty` is well within typical limits (~2–4 KB).
+
+---
+
+## Webhook Notifications
+
+### Overview
+
+MergeMint backend provides real-time HTTP POST webhook notifications for bounty state transitions. External consumers (such as Discord bots, analytics monitors, and notification services) subscribe to bounty events and receive signed payloads with exponential backoff delivery retries.
+
+Supported events:
+- `bounty_created`: Emitted when a new bounty is published.
+- `bounty_claimed`: Emitted when a contributor claims an open bounty.
+- `bounty_completed`: Emitted when milestone or final completion is verified.
+- `bounty_cancelled`: Emitted when an open bounty is cancelled by its creator.
+- `bounty_updated`: Emitted when bounty metadata or state transitions occur.
+- `*`: Wildcard subscription to receive all bounty events.
+
+---
+
+### Subscription Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/webhooks/subscriptions` | Register a new webhook endpoint URL and shared secret |
+| `GET` | `/webhooks/subscriptions` | List registered webhook subscriptions |
+| `GET` | `/webhooks/subscriptions/:id` | Retrieve subscription details by ID |
+| `DELETE` | `/webhooks/subscriptions/:id` | Delete an existing webhook subscription |
+
+#### Create Subscription Request
+
+`POST /webhooks/subscriptions`
+
+```json
+{
+  "url": "https://example.com/api/mergemint-webhook",
+  "secret": "your-secure-webhook-secret-key",
+  "event_types": ["bounty_claimed", "bounty_completed"]
+}
+```
+
+Validation constraints:
+- `url`: Must be a valid absolute HTTP or HTTPS URL.
+- `secret`: Non-empty string used as the HMAC-SHA256 pre-shared key.
+- `event_types`: Optional array of event names or `["*"]` for wildcard. Defaults to wildcard if omitted or empty.
+
+---
+
+### Delivery Headers & Payload
+
+Each delivery POST request includes standard delivery and security headers:
+
+| Header | Description |
+|---|---|
+| `X-MergeMint-Signature` | Hex-encoded HMAC-SHA256 digest formatted as `sha256=<hex>` |
+| `X-Hub-Signature-256` | Standard GitHub-compatible signature formatted as `sha256=<hex>` |
+| `X-MergeMint-Event` | The event name (e.g. `bounty_claimed`) |
+| `X-MergeMint-Delivery` | Unique UUID v4 identifying the delivery attempt |
+| `Content-Type` | `application/json` |
+
+#### Payload Schema
+
+```json
+{
+  "id": "e4f3a76e-57b1-4cfa-93d8-5f042db6cae2",
+  "event": "bounty_claimed",
+  "timestamp": 1740000000,
+  "bounty_id": "0x4a2e8c9b...",
+  "data": {
+    "id": "0x4a2e8c9b...",
+    "creator": "GB...",
+    "title": "Build soroban integration",
+    "description": "Implement SDK integration",
+    "reward_amount": "100000000",
+    "reward_token": "native",
+    "status": "in_progress",
+    "assignee": "GC...",
+    "deadline": 1750000000,
+    "tags": ["soroban", "rust"],
+    "created_at": 1739000000
+  }
+}
+```
+
+---
+
+### Signature Verification
+
+Subscribers verify payload authenticity by recomputing the HMAC-SHA256 signature using the shared secret and comparing it against the header using constant-time comparison to prevent timing attacks.
+
+#### Node.js / TypeScript Example
+
+```ts
+import * as crypto from "crypto";
+
+export function verifyMergeMintWebhook(
+  rawBody: Buffer | string,
+  signatureHeader: string,
+  secret: string
+): boolean {
+  if (!signatureHeader.startsWith("sha256=")) {
+    return false;
+  }
+  const receivedHex = signatureHeader.slice(7);
+  const expectedHex = crypto
+    .createHmac("sha256", secret)
+    .update(rawBody)
+    .digest("hex");
+
+  const receivedBuffer = Buffer.from(receivedHex, "hex");
+  const expectedBuffer = Buffer.from(expectedHex, "hex");
+
+  if (receivedBuffer.length !== expectedBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+}
+```
+
+#### Rust Example
+
+```rust
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+pub fn verify_signature(secret: &str, raw_body: &[u8], header_value: &str) -> bool {
+    let Some(signature_hex) = header_value.strip_prefix("sha256=") else {
+        return false;
+    };
+    let Ok(expected_bytes) = hex::decode(signature_hex) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(raw_body);
+    mac.verify_slice(&expected_bytes).is_ok()
+}
+```
+
+---
+
+### Retry Policy & Error Handling
+
+Deliveries follow an exponential backoff retry strategy:
+- **Success Criteria**: HTTP status codes in the 2xx range (`200 OK` - `299`).
+- **Transient Failures (Retried)**: HTTP 5xx server errors, HTTP 429 rate limit responses, and network connection/timeout failures.
+  - Initial delay: 200 ms
+  - Backoff multiplier: 2.0x
+  - Maximum attempts: 3
+- **Permanent Failures (Not Retried)**: HTTP 4xx client errors (excluding 429) indicate an invalid endpoint or client rejection; delivery aborts immediately without consuming retry quotas.
+

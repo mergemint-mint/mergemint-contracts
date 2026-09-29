@@ -3,6 +3,7 @@ pub mod indexer;
 pub mod rate_limit;
 pub mod routes;
 pub mod validation;
+pub mod webhooks;
 
 pub use routes::tx::AppState;
 
