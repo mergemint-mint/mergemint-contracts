@@ -7,22 +7,21 @@ import { StatusBadge } from '../components/StatusBadge';
 import { BountyDetailSkeleton } from '../components/BountyDetailSkeleton';
 import { BountyErrorBoundary } from '../components/BountyErrorBoundary';
 import { TopUpModal } from '../components/TopUpModal';
-import { ExtendDeadline } from '../components/ExtendDeadline';
-import { CancelBountyDialog } from '../components/CancelBountyDialog';
 import { useWallet } from '../lib/WalletContext';
 
-// The network is read from the Vite env so the page doesn't need a prop.
-// Falls back to "testnet" for local development.
-const NETWORK = (import.meta.env.VITE_NETWORK ?? 'testnet') as 'testnet' | 'mainnet';
-
+/**
+ * Inner component rendering the bounty details, claim action, and creator top-up controls.
+ *
+ * @returns React element displaying bounty details or loading/error states.
+ */
 function BountyDetailInner() {
   const { id } = useParams<{ id: string }>();
-  const { address: walletAddress } = useWallet();
-
+  const { address } = useWallet();
   const [bounty, setBounty] = useState<Bounty | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [claiming, setClaiming] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [showTopUp, setShowTopUp] = useState(false);
 
   // Modal/dialog visibility flags.
   const [showTopUp, setShowTopUp] = useState(false);
@@ -56,87 +55,70 @@ function BountyDetailInner() {
     }
   }, [id]);
 
+  const handleTopUp = useCallback(
+    async (amount: string) => {
+      if (!id) return;
+      const updated = await api.topUpBounty(id, amount);
+      setBounty(updated);
+    },
+    [id]
+  );
+
   if (loading && !bounty) return <BountyDetailSkeleton />;
   if (error && !bounty) return <p role="alert">{error}</p>;
-  if (!bounty) return <p>Loading...</p>;
+  if (!bounty) return <p>{t('loading')}</p>;
+
+  const isCreator = Boolean(
+    address && bounty.creator && address.toLowerCase() === bounty.creator.toLowerCase()
+  );
 
   const isCreator =
     walletAddress !== null && walletAddress.toLowerCase() === bounty.creator.toLowerCase();
   const isOpen = bounty.status === 'open';
 
   return (
-    <div>
+    <div className="bounty-detail-page">
       <h1>{bounty.title}</h1>
       <StatusBadge status={bounty.status} />
       <p>{bounty.description}</p>
-
+      <div className="bounty-reward">
+        <strong>Reward:</strong> {bounty.reward} XLM
+      </div>
+      <div className="bounty-creator">
+        <strong>Creator:</strong> {bounty.creator}
+      </div>
       {error && <p role="alert">{error}</p>}
-
-      {/* Claim — visible to non-creator contributors when bounty is open */}
-      {!isCreator && (
-        <button onClick={handleClaim} disabled={claiming || !isOpen}>
-          {claiming ? 'Claiming...' : 'Claim Bounty'}
+      <MilestoneTracker milestones={bounty.milestones} totalReward={bounty.reward} />
+      <button onClick={handleClaim} disabled={claiming || bounty.status !== 'open'}>
+        {claiming ? t('claiming') : t('claim_bounty')}
+      </button>
+      {isCreator && bounty.status === 'open' && (
+        <button
+          type="button"
+          onClick={() => setShowTopUp(true)}
+          className="topup-open-button"
+        >
+          Top Up Bounty
         </button>
       )}
-
-      {/* Creator-only actions */}
-      {isCreator && isOpen && (
-        <div className="bounty-detail__creator-actions">
-          {/* Top-up — #900 */}
-          <button type="button" onClick={() => setShowTopUp(true)}>
-            Top up reward
-          </button>
-
-          {/* Cancel — #902 */}
-          <button
-            type="button"
-            className="bounty-detail__cancel-btn"
-            onClick={() => setShowCancel(true)}
-          >
-            Cancel bounty
-          </button>
-        </div>
-      )}
-
-      {/* Extend deadline — #901 (creator only, open bounties) */}
-      {isCreator && isOpen && (
-        <ExtendDeadline
-          bounty={bounty}
-          network={NETWORK}
-          onSuccess={fetchBounty}
-        />
-      )}
-
-      {/* Top-up modal — #900 */}
-      {showTopUp && walletAddress && (
-        <TopUpModal
-          bounty={bounty}
-          network={NETWORK}
-          walletAddress={walletAddress}
-          onClose={() => setShowTopUp(false)}
-          onSuccess={() => {
-            setShowTopUp(false);
-            fetchBounty();
-          }}
-        />
-      )}
-
-      {/* Cancel confirmation dialog — #902 */}
-      {showCancel && (
-        <CancelBountyDialog
-          bounty={bounty}
-          network={NETWORK}
-          onClose={() => setShowCancel(false)}
-          onSuccess={() => {
-            setShowCancel(false);
-            fetchBounty();
-          }}
-        />
-      )}
+      <TopUpModal
+        isOpen={showTopUp}
+        onClose={() => setShowTopUp(false)}
+        bountyId={bounty.id}
+        currentReward={bounty.reward}
+        rewardToken="XLM"
+        isCreator={isCreator}
+        onTopUp={handleTopUp}
+      />
     </div>
   );
 }
 
+/**
+ * Root BountyDetail page wrapped with BountyErrorBoundary.
+ *
+ * @returns React element for the routed bounty detail page.
+ */
 export function BountyDetail() {
   return (
     <BountyErrorBoundary>
@@ -144,3 +126,4 @@ export function BountyDetail() {
     </BountyErrorBoundary>
   );
 }
+
