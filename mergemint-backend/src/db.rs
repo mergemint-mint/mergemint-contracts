@@ -40,8 +40,7 @@ use std::sync::{Arc, RwLock};
 #[cfg(test)]
 const BOUNTIES_INDEX_MIGRATION: &str = include_str!("../migrations/0001_add_bounties_indexes.sql");
 #[cfg(test)]
-const WEBHOOK_SUBSCRIPTIONS_MIGRATION: &str =
-    include_str!("../migrations/0002_create_webhook_subscriptions.sql");
+const AUDIT_LOGS_MIGRATION: &str = include_str!("../migrations/0002_create_audit_logs_table.sql");
 
 /// Lightweight in-memory store used during development / integration tests.
 /// Production deployments replace this with a real database pool.
@@ -53,8 +52,37 @@ pub struct DbStore {
     /// stores the flat id -> JSON blobs used by the dispute/self-claim
     /// flows) since it has its own queryable shape.
     pub bounties: Vec<Bounty>,
-    /// Active and inactive webhook subscriptions (#881)
-    pub webhook_subscriptions: HashMap<String, WebhookSubscription>,
+    /// Audit log entries tracking administrative actions like resolve_dispute.
+    pub audit_logs: Vec<AuditLog>,
+}
+
+// ---------------------------------------------------------------------------
+// Audit Logging
+// ---------------------------------------------------------------------------
+
+/// An audit log entry recording an administrative action (e.g., resolve_dispute).
+///
+/// Fields match the database schema defined in migrations/0002_create_audit_logs_table.sql.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditLog {
+    pub id: Option<i64>,
+    pub actor: String,
+    pub action: String,
+    pub target: String,
+    pub timestamp: u64,
+}
+
+impl AuditLog {
+    /// Create a new audit log entry with the given fields.
+    pub fn new(actor: String, action: String, target: String, timestamp: u64) -> Self {
+        AuditLog {
+            id: None,
+            actor,
+            action,
+            target,
+            timestamp,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +168,43 @@ fn paginate(mut bounties: Vec<Bounty>, limit: i64) -> BountyPage {
         bounties,
         next_cursor,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Audit log queries
+// ---------------------------------------------------------------------------
+
+/// Query audit logs, optionally filtering by actor, action, or target.
+/// Results are sorted by timestamp descending (newest first).
+pub fn query_audit_logs(
+    db: &SharedDb,
+    actor: Option<&str>,
+    action: Option<&str>,
+    target: Option<&str>,
+    limit: i64,
+) -> Vec<AuditLog> {
+    let guard = read_db(db);
+    let mut logs: Vec<AuditLog> = guard
+        .audit_logs
+        .iter()
+        .filter(|log| actor.is_none_or(|a| log.actor == a))
+        .filter(|log| action.is_none_or(|a| log.action == a))
+        .filter(|log| target.is_none_or(|t| log.target == t))
+        .cloned()
+        .collect();
+    
+    // Sort by timestamp descending (newest first)
+    logs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    logs.truncate(limit);
+    logs
+}
+
+/// Add an audit log entry to the store.
+pub fn write_audit_log(db: &SharedDb, log: AuditLog) {
+    let mut guard = acquire_db(db);
+    guard.audit_logs.push(log);
 }
 
 /// Shared, thread-safe handle to the database store.
@@ -323,37 +388,112 @@ mod tests {
     }
 
     #[test]
-    fn test_webhook_subscriptions_migration_covers_schema() {
-        let migration = WEBHOOK_SUBSCRIPTIONS_MIGRATION.to_lowercase();
-        assert!(migration.contains("create table if not exists webhook_subscriptions"));
-        assert!(migration.contains("idx_webhook_subscriptions_active"));
+    fn test_leaderboard_aggregates_bounties_by_assignee() {
+        let db = new_shared_db();
+        let time = Utc::now();
+
+        {
+            let mut guard = acquire_db(&db);
+            guard.bounties.push(Bounty {
+                id: "1".to_string(),
+                creator: "alice".to_string(),
+                assignee: Some("bob".to_string()),
+                created_at: time,
+            });
+            guard.bounties.push(Bounty {
+                id: "2".to_string(),
+                creator: "alice".to_string(),
+                assignee: Some("bob".to_string()),
+                created_at: time,
+            });
+            guard.bounties.push(Bounty {
+                id: "3".to_string(),
+                creator: "alice".to_string(),
+                assignee: Some("carol".to_string()),
+                created_at: time,
+            });
+        }
+
+        let page = get_leaderboard(&db, 100);
+        assert_eq!(page.entries.len(), 2);
+
+        let bob_entry = page.entries.iter().find(|e| e.address == "bob").unwrap();
+        assert_eq!(bob_entry.completed_bounties, 2);
+        assert_eq!(bob_entry.reputation, 2);
+
+        let carol_entry = page.entries.iter().find(|e| e.address == "carol").unwrap();
+        assert_eq!(carol_entry.completed_bounties, 1);
+        assert_eq!(carol_entry.reputation, 1);
     }
 
     #[test]
-    fn test_webhook_subscriptions_crud() {
+    fn test_leaderboard_sorts_by_reputation_descending() {
         let db = new_shared_db();
-        let sub = add_webhook_subscription(
-            &db,
-            "sub-1".to_string(),
-            "https://example.com/webhook".to_string(),
-            "secret-123".to_string(),
-            vec!["bounty_claimed".to_string()],
-        );
+        let time = Utc::now();
 
-        assert_eq!(sub.id, "sub-1");
-        assert_eq!(sub.url, "https://example.com/webhook");
+        {
+            let mut guard = acquire_db(&db);
+            // alice has 3 completed bounties
+            guard.bounties.push(Bounty {
+                id: "1".to_string(),
+                creator: "creator".to_string(),
+                assignee: Some("alice".to_string()),
+                created_at: time,
+            });
+            guard.bounties.push(Bounty {
+                id: "2".to_string(),
+                creator: "creator".to_string(),
+                assignee: Some("alice".to_string()),
+                created_at: time,
+            });
+            guard.bounties.push(Bounty {
+                id: "3".to_string(),
+                creator: "creator".to_string(),
+                assignee: Some("alice".to_string()),
+                created_at: time,
+            });
+            // bob has 1 completed bounty
+            guard.bounties.push(Bounty {
+                id: "4".to_string(),
+                creator: "creator".to_string(),
+                assignee: Some("bob".to_string()),
+                created_at: time,
+            });
+        }
 
-        let fetched = get_webhook_subscription(&db, "sub-1");
-        assert_eq!(fetched, Some(sub.clone()));
+        let page = get_leaderboard(&db, 100);
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.entries[0].address, "alice");
+        assert_eq!(page.entries[1].address, "bob");
+    }
 
-        let list = list_webhook_subscriptions(&db);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, "sub-1");
+    #[test]
+    fn test_leaderboard_respects_limit() {
+        let db = new_shared_db();
+        let time = Utc::now();
 
-        let deleted = delete_webhook_subscription(&db, "sub-1");
-        assert!(deleted);
-        assert_eq!(get_webhook_subscription(&db, "sub-1"), None);
-        assert!(list_webhook_subscriptions(&db).is_empty());
+        {
+            let mut guard = acquire_db(&db);
+            for i in 0..10 {
+                guard.bounties.push(Bounty {
+                    id: i.to_string(),
+                    creator: "creator".to_string(),
+                    assignee: Some(format!("contributor_{}", i)),
+                    created_at: time,
+                });
+            }
+        }
+
+        let page = get_leaderboard(&db, 5);
+        assert_eq!(page.entries.len(), 5);
+    }
+
+    #[test]
+    fn test_leaderboard_returns_empty_page_when_no_bounties() {
+        let db = new_shared_db();
+
+        let page = get_leaderboard(&db, 100);
+        assert!(page.entries.is_empty());
     }
 }
 
@@ -363,55 +503,72 @@ pub fn get_bounty(db: &SharedDb, id: &str) -> Option<Bounty> {
     guard.bounties.iter().find(|b| b.id == id).cloned()
 }
 
-/// A registered webhook subscription for receiving bounty event notifications.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WebhookSubscription {
-    pub id: String,
-    pub url: String,
-    pub secret: String,
-    pub event_types: Vec<String>,
-    pub active: bool,
-    pub created_at: DateTime<Utc>,
+// ---------------------------------------------------------------------------
+// Leaderboard
+// ---------------------------------------------------------------------------
+
+/// A contributor entry in the leaderboard, ranked by reputation and completed
+/// bounties. Aggregates stats across the bounties table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderboardEntry {
+    pub address: String,
+    pub completed_bounties: i64,
+    pub reputation: i64,
 }
 
-/// Register a new webhook subscription in the database.
-pub fn add_webhook_subscription(
+/// A page of leaderboard entries, ranked by reputation (descending) and
+/// completed bounties (descending).
+#[derive(Debug, Clone, Serialize)]
+pub struct LeaderboardPage {
+    pub entries: Vec<LeaderboardEntry>,
+}
+
+/// Aggregate contributor statistics from completed bounties and compute a
+/// leaderboard, ranked by reputation (descending), then by completed bounties
+/// (descending).
+///
+/// `limit` is trusted to already be clamped by the caller; this function does
+/// not re-validate it.
+pub fn get_leaderboard(
     db: &SharedDb,
-    id: String,
-    url: String,
-    secret: String,
-    event_types: Vec<String>,
-) -> WebhookSubscription {
-    let mut guard = acquire_db(db);
-    let sub = WebhookSubscription {
-        id: id.clone(),
-        url,
-        secret,
-        event_types,
-        active: true,
-        created_at: Utc::now(),
-    };
-    guard.webhook_subscriptions.insert(id, sub.clone());
-    sub
-}
-
-/// Retrieve all registered webhook subscriptions ordered by creation time descending.
-pub fn list_webhook_subscriptions(db: &SharedDb) -> Vec<WebhookSubscription> {
+    limit: i64,
+) -> LeaderboardPage {
     let guard = read_db(db);
-    let mut subs: Vec<WebhookSubscription> =
-        guard.webhook_subscriptions.values().cloned().collect();
-    subs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    subs
-}
 
-/// Look up a specific webhook subscription by unique identifier.
-pub fn get_webhook_subscription(db: &SharedDb, id: &str) -> Option<WebhookSubscription> {
-    let guard = read_db(db);
-    guard.webhook_subscriptions.get(id).cloned()
-}
+    // Aggregate completed bounties per assignee
+    let mut contributor_stats: HashMap<String, (i64, i64)> = HashMap::new();
 
-/// Remove a webhook subscription by unique identifier.
-pub fn delete_webhook_subscription(db: &SharedDb, id: &str) -> bool {
-    let mut guard = acquire_db(db);
-    guard.webhook_subscriptions.remove(id).is_some()
+    for bounty in &guard.bounties {
+        if let Some(assignee) = &bounty.assignee {
+            let (count, reputation) = contributor_stats
+                .entry(assignee.clone())
+                .or_insert((0, 0));
+            *count += 1;
+            // Simple reputation model: 1 point per completed bounty
+            *reputation += 1;
+        }
+    }
+
+    // Convert to leaderboard entries and sort by reputation (descending),
+    // then by completed bounties (descending)
+    let mut entries: Vec<LeaderboardEntry> = contributor_stats
+        .into_iter()
+        .map(|(address, (completed_bounties, reputation))| LeaderboardEntry {
+            address,
+            completed_bounties,
+            reputation,
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        match b.reputation.cmp(&a.reputation) {
+            std::cmp::Ordering::Equal => b.completed_bounties.cmp(&a.completed_bounties),
+            other => other,
+        }
+    });
+
+    let limit = usize::try_from(limit).unwrap_or(0);
+    entries.truncate(limit);
+
+    LeaderboardPage { entries }
 }
