@@ -4,6 +4,13 @@
 /// needs to read more than two storage pages.
 const MAX_LIMIT: u32 = 50;
 
+/// The deployed contract version, as a semver string.
+///
+/// This is the single source of truth for the contract version. Bump it here
+/// (and keep `docs/versioning.md` in sync) whenever behavior changes between
+/// releases so clients can detect mismatches via `version()`.
+const CONTRACT_VERSION: &str = "1.0.0";
+
 /// Resolve a `cursor` + `limit` window into a flat slice of IDs.
 ///
 /// `all_ids` is the full ordered list (collected across pages when needed).
@@ -46,6 +53,15 @@ fn paginate(
 
 #[contractimpl]
 impl MergeMintContract {
+    /// Return the deployed contract version as a semver string.
+    ///
+    /// Sourced from the single `CONTRACT_VERSION` constant so the value stays
+    /// in sync with `docs/versioning.md`. Cheap to call; lets the frontend,
+    /// SDK and indexer warn when pointed at an unexpected contract version.
+    pub fn version(env: Env) -> Symbol {
+        Symbol::new(&env, CONTRACT_VERSION)
+    }
+
     /// Return a single bounty by its ID, or `None` if it does not exist.
     pub fn get_bounty(env: Env, bounty_id: BountyId) -> Option<Bounty> {
         // Never-allocated IDs (sequence >= count) and pruned entries (sequence
@@ -145,20 +161,43 @@ impl MergeMintContract {
         items
     }
 
-    /// Return all open bounty IDs that carry the requested tag.
+    /// Return a bounded page of bounty IDs that carry the requested tag.
     ///
     /// Supports `GET /api/bounties?tag=<tag>`. Iterates the open-bounties index
-    /// and looks up each bounty to check `bounty.tags`; callers can page the
-    /// result with `get_open_bounties` first and apply filtering client-side
-    /// for large lists.
-    pub fn get_bounties_by_tag(env: Env, tag: Symbol) -> Vec<BountyId> {
+    /// and looks up each bounty to check `bounty.tags`. `offset` is the
+    /// zero-based index of the first item to return; `limit` is capped at
+    /// `MAX_LIMIT` (50) to bound ledger CPU cost. Returns an empty vec when
+    /// `offset` is beyond the end of the list.
+    ///
+    /// Invalid tags fail with `InvalidTag`, matching `create_bounty` validation.
+    pub fn get_bounties_by_tag(env: Env, tag: Symbol, offset: u32, limit: u32) -> Vec<BountyId> {
         crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Tag, &tag);
-        let open_ids = storage::get_open_bounties(&env);
-        let mut result = Vec::new(&env);
+        let all = Self::collect_bounties_by_tag(&env, &tag);
+        let (items, _) = paginate(&env, all, Some(offset), limit);
+        items
+    }
+
+    /// Return the total number of bounties that carry the requested tag.
+    ///
+    /// Companion to `get_bounties_by_tag` so clients can render totals and
+    /// page counts. Invalid tags fail with `InvalidTag`, matching
+    /// `create_bounty` validation.
+    pub fn get_tag_count(env: Env, tag: Symbol) -> u32 {
+        crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Tag, &tag);
+        Self::collect_bounties_by_tag(&env, &tag).len()
+    }
+
+    /// Collect every open bounty ID carrying `tag`, in index order.
+    ///
+    /// Shared by `get_bounties_by_tag` and `get_tag_count` so both agree on
+    /// the same set. Assumes `tag` has already been validated.
+    fn collect_bounties_by_tag(env: &Env, tag: &Symbol) -> Vec<BountyId> {
+        let open_ids = storage::get_open_bounties(env);
+        let mut result = Vec::new(env);
         for id in open_ids.iter() {
-            if let Some(bounty) = storage::get_bounty(&env, &id) {
+            if let Some(bounty) = storage::get_bounty(env, &id) {
                 for t in bounty.tags.iter() {
-                    if t == tag {
+                    if t == *tag {
                         result.push_back(id.clone());
                         break;
                     }
@@ -188,35 +227,16 @@ impl MergeMintContract {
         None
     }
 
-    /// Return every bounty ID `address` was an assignee on that has reached a
-    /// terminal status (`"completed"` or `"cancelled"`).
+    /// Return a bounded page of bounty IDs `address` was an assignee on that
+    /// have reached a terminal status (`"completed"` or `"cancelled"`).
     ///
     /// Unlike `get_contributor_active_bounty` (which only surfaces the
-    /// current in-progress claim), this surfaces the contributor's full
-    /// bounty history. The index is maintained incrementally in
+    /// current in-progress claim), this surfaces the contributor's bounty
+    /// history. The index is maintained incrementally in
     /// `storage::move_bounty_status` as bounties transition status, so this
-    /// call is O(1) rather than a scan. Returns an empty `Vec` if the
-    /// contributor has no completed or cancelled bounties.
-    pub fn get_contributor_bounty_history(env: Env, address: Address) -> Vec<BountyId> {
-        storage::get_contributor_history(&env, &address)
-    }
+    /// call is O(1) rather than a scan.
+    ///
+    /// Results are returned newest first (most recently completed/cancelled
+  
 
-    /// Return a bounded page of bounty IDs created by a specific creator address.
-    ///
-    /// `cursor` is the zero-based offset; `limit` capped at 50.
-    /// Returns `(items, next_cursor)`. Pass `next_cursor` as `cursor` on the
-    /// next call to advance pages. `next_cursor` is `None` when exhausted.
-    ///
-    /// The list is maintained in `DataKey::ContributorBounties(creator)` and
-    /// appended to on each `create_bounty` call. Returns an empty `Vec` if the
-    /// address has never created a bounty.
-    pub fn get_bounties_by_creator(
-        env: Env,
-        creator: Address,
-        cursor: Option<u32>,
-        limit: u32,
-    ) -> (Vec<BountyId>, Option<u32>) {
-        let all = storage::get_creator_bounties(&env, &creator);
-        paginate(&env, all, cursor, limit)
-    }
-}
+/* … truncated 732 chars — edit only what you need near the top … */

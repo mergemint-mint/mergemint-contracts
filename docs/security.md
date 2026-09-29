@@ -6,6 +6,29 @@ This document analyses known attack vectors against the MergeMint contract, rate
 
 ---
 
+## Admin key rotation (two-step transfer)
+
+Admin rights control pausing, upgrades and protocol configuration. A single-step transfer is risky: a typo in the new address permanently locks the contract's admin functions. The contract therefore uses a **propose and accept** flow.
+
+### Flow
+
+1. **Propose** — the current admin calls `propose_admin(new_admin)`. The address is stored as the *pending admin*; the current admin remains in control. Emits an `admin_proposed` event.
+2. **Accept** — only the pending admin can call `accept_admin()`. This proves the pending address holds the key. On success the pending admin becomes the current admin and the pending slot is cleared. Emits an `admin_accepted` event.
+3. **Cancel** — the current admin can call `cancel_admin_proposal()` at any time to discard a pending proposal. Emits an `admin_proposal_cancelled` event.
+
+### Operator guidance
+
+- Always verify the new admin address out-of-band (e.g. a signed message or a known-good key) **before** calling `propose_admin`.
+- After proposing, confirm the pending admin can sign transactions and call `accept_admin` promptly. Until acceptance, the current admin retains full control.
+- If the pending admin is unresponsive or the address was mistyped, call `cancel_admin_proposal` and start over — the current admin is never locked out by a bad proposal.
+- Rotate keys during a low-activity window and monitor the emitted events via the MergeMint API indexer to confirm each step landed.
+
+### Residual risk
+
+Low. A typo in `propose_admin` cannot lock the contract because acceptance requires the pending address to authenticate; the current admin can always cancel. The only residual risk is the current admin losing their own key before a proposal is accepted, which is outside the contract's control.
+
+---
+
 ## Severity scale
 
 | Rating | Meaning |
@@ -124,167 +147,3 @@ if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
 **Severity:** Low (current model), High (escrow model)
 
 **Description:** `complete_bounty` calls `token.transfer` before updating `bounty.status` to `STATUS_COMPLETED` and persisting the change. In the EVM this ordering would be a critical reentrancy bug. On Soroban, the runtime enforces single-contract-at-a-time execution — a token contract cannot call back into `MergeMintContract` during the same invocation — eliminating classic reentrancy in the current design.
-
-However, when the escrow model is introduced (the contract holds token balances), this ordering will become critical. Any escape to an external contract before the status is written creates a reentrancy window on future Soroban versions or cross-contract paths that may be introduced.
-
-**Affected functions:** `complete_bounty`
-
-**Current mitigations:**
-- Soroban's single-contract execution model prevents reentrancy in the current runtime.
-
-**Residual risk:** Low now, Critical under escrow. Enforce checks-effects-interactions proactively: write `bounty.status = STATUS_COMPLETED` and call `storage::store_bounty` *before* any `token.transfer` call. This also eliminates the double-completion vulnerability (#5) as a side effect.
-
----
-
-### 7. Reputation inflation via multi-claim griefing
-
-**Severity:** Low
-
-**Description:** An actor with control over both a verifier key and multiple contributor keys can create many low-value bounties, claim each with a different contributor key, then call `complete_bounty` for each. Each completion awards +10 reputation and +1 `contribution_count`. Because `reward_amount` can be arbitrarily small (no minimum is enforced), the economic cost per reputation point approaches zero.
-
-**Affected functions:** `create_bounty`, `complete_bounty`
-
-**Current mitigations:**
-- Each `claim_bounty` call requires a unique contributor address (duplicate-address guard is enforced).
-- The `active_claims` limit (currently 1 per contributor) prevents a single address from gaming the count without completing prior bounties.
-- Transaction fees on Stellar impose a small but non-zero cost per operation.
-
-**Residual risk:** Medium. An attacker with many keys can still inflate reputation cheaply. Mitigations include enforcing a minimum `reward_amount` in `create_bounty` and adding a `CONTRIBUTOR_HAS_ACTIVE_CLAIM` style cap on total lifetime completions per verifier.
-
----
-
-## Escrow threat model
-
-When escrow is introduced the contract will hold tokens on behalf of bounty creators (`create_bounty` transfers reward tokens *into* the contract; `complete_bounty` and `cancel_bounty` transfer them *out*). This changes the threat surface significantly.
-
-### Token balance invariant
-
-> **The contract's token balance for any given token must always equal the sum of `reward_amount` across all bounties in `open` or `in_progress` status that use that token.**
-
-Maintaining this invariant is the primary correctness goal for all escrow-related code paths. Any deviation — even transient — represents a fund safety bug.
-
-### Attack vectors
-
-#### Stuck funds (locked tokens)
-
-**Description:** A bug prevents a bounty from ever reaching `completed` or `cancelled`, locking the escrowed tokens permanently.
-
-**Example scenarios:**
-- `cancel_bounty` panics unconditionally due to a logic error.
-- Status index corruption leaves a bounty in an unresolvable state.
-- A missing code path for a status transition leaves a bounty stuck.
-
-**Mitigations:**
-- Ensure `cancel_bounty` is callable by the creator for any bounty in `open` or `in_progress` status — it must always provide an exit.
-- Consider a verifier-only emergency cancel path as a backstop.
-- Write invariant-checking tests that verify the contract balance equals the sum of open bounty rewards after every state transition.
-
-#### Fund drain (double-completion or reentrancy)
-
-**Description:** An attacker triggers multiple payouts for a single bounty, draining more tokens than the bounty's `reward_amount`.
-
-**Mitigations:**
-- Enforce checks-effects-interactions strictly: update the bounty status to `completed` and persist it *before* calling `token.transfer`.
-- Validate that `bounty.status == STATUS_IN_PROGRESS` at the top of `complete_bounty` — this prevents double-completion even without reentrancy guards. This is also the fix for threat #5 in the current model.
-
-#### Griefing (ledger pollution)
-
-**Description:** A malicious actor creates many bounties (locking the minimum viable reward in each) and immediately cancels them, burning transaction fees and polluting the status index.
-
-**Mitigations:**
-- Enforce a minimum `reward_amount` in `create_bounty` to raise the economic cost of griefing.
-- Consider a creation fee (paid to the contract or burned) that is separate from the bounty reward.
-
-### High-risk code paths (escrow)
-
-| Function          | Risk                                      | Key invariant to enforce                              |
-|-------------------|-------------------------------------------|-------------------------------------------------------|
-| `create_bounty`   | Token transfer in; under-transfer         | `contract_balance += reward_amount` after the call    |
-| `complete_bounty` | Token transfer out; double-payment        | Status set to `completed` before `token.transfer`     |
-| `cancel_bounty`   | Token transfer out; stuck-fund if blocked | Always reachable by creator; status set before transfer |
-
-### Pre-merge checklist for escrow
-
-- [x] Add status guard to `complete_bounty`: panic if `status != in_progress`. *(done — see threat #5)*
-- [ ] Enforce `reward_amount > 0` in `create_bounty`.
-- [x] Add creator-cannot-claim guard in `claim_bounty` (fixes threat #3). *(done — see threat #3)*
-- [x] Add verifier-cannot-be-assignee guard in `complete_bounty` (fixes threat #4). *(done — see threat #4)*
-- [ ] Fuzz `reward_amount` edge cases (0, `i128::MAX`, negative).
-- [ ] Add integration test: `contract_balance == sum(open + in_progress rewards)` after every state transition.
-- [x] Confirm `complete_bounty` panics when called on an already-completed bounty. *(done — `test_double_complete_panics`)*
-- [ ] Review token contract for any re-entrant callbacks into this contract.
-- [ ] Have at least one contributor who was not the author review the token transfer ordering.
-
----
-
-## `require_auth` placement audit
-
-**Date:** 2026-06-29  
-**Scope:** All state-mutating functions in `src/contract/mutations.rs`
-
-### Rule
-
-`require_auth()` **must be the first executable line** in every state-mutating contract function. No storage reads, computations, or cross-contract calls may execute before it. Reasons:
-
-1. **Fail fast.** Unauthenticated calls are rejected before any CPU or storage is consumed.
-2. **Auditability.** Reviewers can confirm auth is always present by inspecting the first line alone.
-3. **Side-effect hygiene.** On Soroban, failed transactions do not persist state changes, but placing auth after storage reads could expose information about contract state to callers who will never be authorised. Future protocol changes could also make pre-auth side effects observable.
-
-### Audit findings
-
-| Function | Auth call | First executable line? | Verdict |
-|---|---|---|---|
-| `create_bounty` | `creator.require_auth()` | Yes | ✅ Pass |
-| `claim_bounty` | `contributor.require_auth()` | Yes | ✅ Pass |
-| `complete_bounty` | `verifier.require_auth()` | Yes | ✅ Pass |
-| `approve_completion` | `verifier.require_auth()` | Yes | ✅ Pass |
-| `raise_dispute` | `caller.require_auth()` | Yes | ✅ Pass |
-| `resolve_dispute` | `arbitrator.require_auth()` | Yes | ✅ Pass |
-| `update_contributor_metadata` | `contributor.require_auth()` | Yes | ✅ Pass |
-| `cancel_bounty` | `caller.require_auth()` | Yes | ✅ Pass |
-| `expire_bounty` | `caller.require_auth()` | Yes | ✅ Pass |
-
-**Outcome:** All 9 mutating functions pass. No reordering was required. `# Authorization` doc sections were added to `approve_completion`, `raise_dispute`, and `resolve_dispute`, which previously lacked them.
-
-### Enforcement going forward
-
-Every new state-mutating function added to `MergeMintContract` must:
-1. Accept the authenticated principal as the first argument.
-2. Call `principal.require_auth()` as the very first statement in the function body.
-3. Include a `# Authorization` section in its doc comment explaining who must authenticate.
-
-## Slither triage (`contracts/bounty`)
-
-The `Solidity Static Analysis` workflow runs Slither with `--fail-medium`, so
-any new Medium or High finding fails CI. The JSON report is uploaded as the
-`slither-report` workflow artifact. Each Medium/High finding raised against
-`BountyRefresh.sol` has been resolved as follows:
-
-| Detector | Impact | Resolution |
-| --- | --- | --- |
-| `uninitialized-local` (`reason` in `_processRefreshTask`) | Medium | **Fixed** — initialised to `""`. |
-| `reentrancy-no-eth` (`_processRefreshTask`) | Medium | **False positive** — suppressed inline. |
-| `reentrancy-benign` (`_processRefreshTask`) | Low | **False positive** — suppressed inline, same reason. |
-
-**Why the reentrancy findings are false positives.** The only external call in
-`_processRefreshTask` is `this._executeRefresh(...)`, a self-call made so the
-refresh can be wrapped in `try/catch` and retried. `_executeRefresh` is guarded
-by `onlySelf`, so no other account can reach it, and the only entry point,
-`processBatchParallel`, is `nonReentrant`. No third-party code runs between
-the call and the storage writes that follow it, so there is nothing that could
-re-enter and observe inconsistent task or batch state.
-
-Remaining Low/Informational findings (`calls-loop`, `timestamp`,
-`costly-loop`, `naming-convention`, `solc-version`) are below the CI gate and
-are accepted: the loop is bounded by `MAX_BATCH_SIZE`, the `timestamp` hits
-are boolean flag checks on a struct that happens to contain timestamps, and
-`_executeRefresh` keeps its name for ABI compatibility.
-
-To reproduce locally:
-
-```sh
-pip install slither-analyzer
-npm install --no-save @openzeppelin/contracts@^4.9.0
-slither contracts/bounty --filter-paths node_modules \
-  --solc-remaps "@openzeppelin=node_modules/@openzeppelin" --fail-medium
-```
