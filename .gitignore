@@ -11,10 +11,6 @@ test_snapshots/
 *.iml
 *.swp
 *.swo
-*~
-.project
-.classpath
-.settings/
 
 # OS artefacts
 .DS_Store
@@ -34,10 +30,6 @@ build/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-pnpm-debug.log*
-.npm/
-.yarn/
-.pnp.*
 
 # Test snapshots (Jest / Vitest) — auto-generated, should not be committed
 *.snap
@@ -47,7 +39,6 @@ pnpm-debug.log*
 coverage/
 .nyc_output/
 lcov.info
-*.lcov
 
 # End-to-end test artefacts
 playwright-report/
@@ -63,23 +54,15 @@ pkg/
 .turbo/
 .next/
 .parcel-cache/
-.vite/
-.rollup.cache/
-
-# TypeScript incremental build info
+.eslintcache
+.tsbuildinfo
 *.tsbuildinfo
 
 # Environment secrets (keep .env.example tracked)
 .env
 .env.local
 .env.*.local
-.env.production
-
-# Storybook static output
 storybook-static/
 
-# Temporary files
-*.tmp
-*.temp
-.cache/
-tmp/
+# TypeScript incremental build info
+tsconfig.tsbuildinfo
