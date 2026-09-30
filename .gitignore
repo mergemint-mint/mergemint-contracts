@@ -35,6 +35,10 @@ yarn-error.log*
 *.snap
 **/__snapshots__/
 
+# Vitest cache and temp files
+.vitest-cache/
+*.tmp
+
 # Code coverage
 coverage/
 .nyc_output/
@@ -64,5 +68,8 @@ pkg/
 .env.*.local
 storybook-static/
 
+# AI assistant working files
+.claude/settings.local.json.tmp*
+fix.js
 # TypeScript incremental build info
 tsconfig.tsbuildinfo
