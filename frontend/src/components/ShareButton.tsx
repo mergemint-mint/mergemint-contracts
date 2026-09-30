@@ -2,29 +2,44 @@ import { useState } from 'react';
 import { CopyButton } from './CopyButton';
 import { useTranslation } from '../i18n';
 
-interface ShareButtonProps {
+/**
+ * Properties for the ShareButton component.
+ */
+export interface ShareButtonProps {
   /** The URL to share. Defaults to window.location.href. */
   url?: string;
   /** The title passed to the Web Share API. */
   title?: string;
-  /** The text passed to the Web Share API. */
+  /** The text description passed to the Web Share API. */
   text?: string;
+  /** Optional additional CSS class names. */
+  className?: string;
 }
 
 /**
- * ShareButton — uses the Web Share API where available, falls back to
- * copying the URL to the clipboard via CopyButton.
+ * ShareButton component that utilizes the Web Share API when supported,
+ * falling back to clipboard copying via CopyButton.
  *
- * Issue #913.
+ * @param props Component properties.
+ * @returns React element for sharing or copying the URL.
  */
-export function ShareButton({ url, title, text }: ShareButtonProps) {
+export function ShareButton({ url, title, text, className }: ShareButtonProps) {
   const { t } = useTranslation();
   const shareUrl = url ?? (typeof window !== 'undefined' ? window.location.href : '');
-  const canShare =
-    typeof navigator !== 'undefined' &&
-    typeof navigator.share === 'function' &&
-    typeof navigator.canShare === 'function' &&
-    navigator.canShare({ url: shareUrl });
+
+  const canShare = (() => {
+    if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') {
+      return false;
+    }
+    if (typeof navigator.canShare === 'function') {
+      try {
+        return navigator.canShare({ url: shareUrl });
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  })();
 
   const [sharing, setSharing] = useState(false);
   const [shareError, setShareError] = useState(false);
@@ -35,7 +50,6 @@ export function ShareButton({ url, title, text }: ShareButtonProps) {
     try {
       await navigator.share({ url: shareUrl, title, text });
     } catch (err) {
-      // AbortError means the user dismissed the share sheet — not a real error.
       if (err instanceof Error && err.name !== 'AbortError') {
         setShareError(true);
         setTimeout(() => setShareError(false), 2000);
@@ -46,10 +60,11 @@ export function ShareButton({ url, title, text }: ShareButtonProps) {
   }
 
   if (canShare) {
+    const buttonClass = className ? `share-button ${className}` : 'share-button';
     return (
       <button
         type="button"
-        className="share-button"
+        className={buttonClass}
         onClick={handleShare}
         disabled={sharing}
         aria-label={t('share')}
@@ -59,6 +74,5 @@ export function ShareButton({ url, title, text }: ShareButtonProps) {
     );
   }
 
-  // Fallback: reuse CopyButton to copy the URL.
   return <CopyButton value={shareUrl} />;
 }
