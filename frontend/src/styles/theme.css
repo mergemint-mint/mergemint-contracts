@@ -178,6 +178,30 @@
   border-color: var(--mm-accent);
 }
 
+/* ShareButton.tsx */
+.share-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--mm-fg);
+  background: var(--mm-bg-subtle);
+  border: 1px solid var(--mm-border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.share-button:hover:not(:disabled) {
+  border-color: var(--mm-accent);
+  background: var(--mm-bg);
+}
+.share-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* TxResultBanner.tsx */
 .tx-result-banner {
   background: var(--mm-success-bg);
