@@ -1,3 +1,4 @@
+import { Bounty, BountyPage, BountyStatus, Contributor, LeaderboardPage } from '../types';
 import { Bounty, BountyPage, BountyStatus, Contributor, RewardToken } from '../types';
 
 // All stable endpoints are versioned under /api/v1. The base URL can be
@@ -86,6 +87,8 @@ export const api = {
   getContributor(address: string): Promise<Contributor> {
     return request(`/contributors/${address}`);
   },
+  getLeaderboard(): Promise<LeaderboardPage> {
+    return request('/contributors/leaderboard');
   /**
    * Fetch the reward-token allowlist maintained by the backend.
    * Returns only tokens that the contract will accept as reward tokens.

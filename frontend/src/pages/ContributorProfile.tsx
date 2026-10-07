@@ -4,8 +4,16 @@ import { api } from '../lib/api';
 import { Contributor } from '../types';
 import { mapErrorMessage } from '../utils/format';
 import { useWallet } from '../lib/WalletContext';
+import { ProfileHeader } from '../components/ProfileHeader';
+import { ProfileStats } from '../components/ProfileStats';
+import { ProfileHistory } from '../components/ProfileHistory';
 import { useTranslation } from '../i18n';
 
+/**
+ * Redesigned contributor profile page (#896).
+ * Splits the previous monolithic view into ProfileHeader, ProfileStats
+ * and ProfileHistory sub-components, and surfaces reputation history.
+ */
 export function ContributorProfile() {
   const { address } = useParams<{ address: string }>();
   const { address: walletAddress } = useWallet();
@@ -18,10 +26,30 @@ export function ContributorProfile() {
     api
       .getContributor(address)
       .then(setContributor)
-      .catch((err) => setError(mapErrorMessage(err instanceof Error ? err.message : String(err))));
+      .catch((err) =>
+        setError(mapErrorMessage(err instanceof Error ? err.message : String(err))),
+      );
   }, [address, walletAddress]);
 
   if (!walletAddress) {
+    return (
+      <p className="contributor-profile__empty">
+        Connect your wallet to view contributor profiles.
+      </p>
+    );
+  }
+
+  if (error) return <p role="alert">{error}</p>;
+  if (!contributor) return <p aria-busy="true">Loading…</p>;
+
+  const isOwn = walletAddress === contributor.address;
+
+  return (
+    <main className="contributor-profile">
+      <ProfileHeader contributor={contributor} isOwn={isOwn} />
+      <ProfileStats contributor={contributor} />
+      <ProfileHistory history={contributor.reputationHistory} />
+    </main>
     return <p className="contributor-profile__empty">{t('connect_wallet_prompt')}</p>;
   }
 
