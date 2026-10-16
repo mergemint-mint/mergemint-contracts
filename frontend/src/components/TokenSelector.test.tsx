@@ -79,8 +79,10 @@ describe('TokenSelector', () => {
       <TokenSelector value="CABC123" walletAddress="GWALLET" onChange={onChange} />,
     );
 
+    // The loading placeholder is also a (disabled) combobox, so wait for the
+    // real select to be enabled before changing it.
     await waitFor(() => {
-      expect(screen.getByRole('combobox')).toBeTruthy();
+      expect((screen.getByRole('combobox') as HTMLSelectElement).disabled).toBe(false);
     });
 
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'CDEF456' } });
