@@ -126,6 +126,7 @@ snapshots.
 | Topic                                    | Doc                                                                        |
 | ---------------------------------------- | -------------------------------------------------------------------------- |
 | Getting started on testnet               | [docs/getting-started.md](docs/getting-started.md)                         |
+| Stellar CLI troubleshooting              | [docs/troubleshooting.md](docs/troubleshooting.md)                         |
 | Contract architecture and storage layout | [docs/architecture.md](docs/architecture.md)                               |
 | Event schema                             | [docs/event-schema.md](docs/event-schema.md)                               |
 | Horizon / RPC polling in the indexer     | [docs/horizon-polling.md](docs/horizon-polling.md)                         |
