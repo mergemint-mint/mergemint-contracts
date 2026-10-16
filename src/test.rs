@@ -3465,3 +3465,93 @@ fn test_extend_deadline_rejects_nonexistent_bounty() {
     let unallocated_id = fake_bounty_id(&env, 999_999);
     client.extend_deadline(&creator, &unallocated_id, &200);
 }
+
+#[test]
+fn test_reopen_bounty_success() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", Some(100));
+
+    // Advance ledger past deadline so bounty is expired
+    env.ledger().set_sequence_number(101);
+
+    client.reopen_bounty(&creator, &bounty_id, &200);
+    assert_invocation_emits(&env, &contract_id, &["bounty_reopened"]);
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.deadline, Some(200));
+    assert_eq!(bounty.status, Symbol::new(&env, "open"));
+}
+
+#[test]
+#[should_panic(expected = "not bounty creator")]
+fn test_reopen_bounty_rejects_non_creator() {
+    let (env, creator, non_creator, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", Some(100));
+
+    env.ledger().set_sequence_number(101);
+    client.reopen_bounty(&non_creator, &bounty_id, &200);
+}
+
+#[test]
+#[should_panic(expected = "deadline has not passed")]
+fn test_reopen_bounty_before_deadline_panics() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", Some(100));
+
+    // Deadline 100 has not passed yet
+    client.reopen_bounty(&creator, &bounty_id, &200);
+}
+
+#[test]
+#[should_panic(expected = "bounty deadline passed")]
+fn test_reopen_bounty_rejects_past_deadline() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "bug", Some(100));
+
+    env.ledger().set_sequence_number(150);
+    // New deadline 140 is in the past relative to current ledger (150)
+    client.reopen_bounty(&creator, &bounty_id, &140);
+}
+
+#[test]
+#[should_panic(expected = "bounty not open")]
+fn test_reopen_bounty_rejects_refunded_bounty() {
+    let (env, creator, caller, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(50);
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "refund_reopen",
+        1000,
+        Some(100),
+    );
+
+    env.ledger().set_sequence_number(105);
+    // Expire bounty refunds escrow and moves to cancelled
+    client.expire_bounty(&caller, &bounty_id);
+
+    // Reopen must be rejected because funds were already refunded
+    client.reopen_bounty(&creator, &bounty_id, &200);
+}
+
