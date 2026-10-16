@@ -692,3 +692,58 @@ describe("MergeMintSDK constructor typed errors (existing)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// #1111: Error reference documentation drift test
+// ---------------------------------------------------------------------------
+
+describe("#1111 — Error reference documentation drift test", () => {
+  it("docs/errors.md documents every MergeMintErrorCode variant", () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require("fs");
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const path = require("path");
+    const docsPath = path.resolve(__dirname, "../../docs/errors.md");
+    const content = fs.readFileSync(docsPath, "utf-8");
+
+    const errorCodes: import("./types").MergeMintErrorCode[] = [
+      "INVALID_CONFIG",
+      "INVALID_CONTRACT_ID",
+      "INVALID_RPC_URL",
+      "INVALID_ARGUMENT",
+      "SIMULATION_FAILED",
+      "TRANSACTION_FAILED",
+      "UNAUTHORIZED",
+      "NOT_FOUND",
+      "FEE_BUMP_FAILED",
+    ];
+
+    for (const code of errorCodes) {
+      expect(content).toContain(code);
+    }
+  });
+
+  it("docs/errors.md documents every on-chain numeric error code 1 through 7", () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require("fs");
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const path = require("path");
+    const docsPath = path.resolve(__dirname, "../../docs/errors.md");
+    const content = fs.readFileSync(docsPath, "utf-8");
+
+    const contractCodes = [
+      "Code 1: `Unauthorized`",
+      "Code 2: `NotFound`",
+      "Code 3: `InvalidInput`",
+      "Code 4: `AlreadyExists`",
+      "Code 5: `InsufficientBalance`",
+      "Code 6: `InvalidState`",
+      "Code 7: `Overflow`",
+    ];
+
+    for (const code of contractCodes) {
+      expect(content).toContain(code);
+    }
+  });
+});
+

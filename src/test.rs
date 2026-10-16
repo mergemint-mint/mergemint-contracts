@@ -3465,3 +3465,22 @@ fn test_extend_deadline_rejects_nonexistent_bounty() {
     let unallocated_id = fake_bounty_id(&env, 999_999);
     client.extend_deadline(&creator, &unallocated_id, &200);
 }
+
+// ===========================================================================
+// Issue 1111 — Error reference documentation drift test
+// ===========================================================================
+
+#[test]
+fn test_contract_error_variants_match_documented_reference() {
+    use crate::errors::ContractError;
+
+    // Verify all 7 numeric contract error codes match documented values exactly
+    assert_eq!(ContractError::Unauthorized as u32, 1);
+    assert_eq!(ContractError::NotFound as u32, 2);
+    assert_eq!(ContractError::InvalidInput as u32, 3);
+    assert_eq!(ContractError::AlreadyExists as u32, 4);
+    assert_eq!(ContractError::InsufficientBalance as u32, 5);
+    assert_eq!(ContractError::InvalidState as u32, 6);
+    assert_eq!(ContractError::Overflow as u32, 7);
+}
+

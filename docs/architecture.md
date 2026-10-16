@@ -210,7 +210,7 @@ the contract accepts. Solid arrows are the **valid** transitions, labelled with
 the entry point that performs them. The note beside each state lists every
 **invalid** transition attempted from that state and the `ContractError` it
 fails with. The panic message for each error is in
-[Guard Failure Messages](#guard-failure-messages) below.
+[Guard Failure Messages](#guard-failure-messages) below. For a complete cross-layer reference covering contract codes, backend `AppError`, and SDK exceptions, see [errors.md](errors.md).
 
 It is derived from the guards in `src/contract/mutations.rs`, and the error
 names match `src/errors.rs`.

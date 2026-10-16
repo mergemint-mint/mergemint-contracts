@@ -500,6 +500,8 @@ consumes these events.
 
 ## Error index
 
+> For a complete cross-layer reference mapping contract numeric error codes to backend `AppError` payloads and TypeScript SDK error classes, see [errors.md](errors.md).
+
 Every `ContractError` variant and the entry points that can return it.
 
 | Variant | Message | Returned by |

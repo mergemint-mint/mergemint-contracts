@@ -62,7 +62,7 @@ export ADDR=GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA   # 56-char
   `415`.
 - Handler errors use the `AppError` shape `{"code": <u16>, "message": "<string>"}`.
   The one exception is `GET /bounties/assignee/:address`, which returns
-  `{"error": "<string>"}` for a bad address.
+  `{"error": "<string>"}` for a bad address. For a complete cross-layer reference mapping HTTP status codes to on-chain contract errors and SDK exceptions, see [`docs/errors.md`](../../docs/errors.md).
 - Extractor errors (a malformed query string, missing JSON fields, a wrong
   content type) come from Axum. They return a **`text/plain`** body, not JSON.
 - 5xx responses always carry `"message": "internal server error"`. Details are
