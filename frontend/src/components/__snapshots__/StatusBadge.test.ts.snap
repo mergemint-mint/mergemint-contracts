@@ -1,0 +1,41 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`StatusBadge > renders the label and modifier class for status 'cancelled' 1`] = `
+{
+  "className": "status-badge status-badge--cancelled",
+  "label": "cancelled",
+  "status": "cancelled",
+}
+`;
+
+exports[`StatusBadge > renders the label and modifier class for status 'claimed' 1`] = `
+{
+  "className": "status-badge status-badge--claimed",
+  "label": "claimed",
+  "status": "claimed",
+}
+`;
+
+exports[`StatusBadge > renders the label and modifier class for status 'completed' 1`] = `
+{
+  "className": "status-badge status-badge--completed",
+  "label": "completed",
+  "status": "completed",
+}
+`;
+
+exports[`StatusBadge > renders the label and modifier class for status 'disputed' 1`] = `
+{
+  "className": "status-badge status-badge--disputed",
+  "label": "disputed",
+  "status": "disputed",
+}
+`;
+
+exports[`StatusBadge > renders the label and modifier class for status 'open' 1`] = `
+{
+  "className": "status-badge status-badge--open",
+  "label": "open",
+  "status": "open",
+}
+`;
