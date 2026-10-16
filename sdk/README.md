@@ -8,6 +8,10 @@ Typed TypeScript wrapper for the MergeMint Soroban contract. Abstracts raw XDR e
 npm install @mergemint/sdk @stellar/stellar-sdk
 ```
 
+## Cookbook & Examples
+
+Looking for copy-pasteable recipe scripts? See the comprehensive [SDK Cookbook](../docs/sdk-cookbook.md) and runnable examples in [`sdk/examples/`](./examples).
+
 ## Setup
 
 ```ts
