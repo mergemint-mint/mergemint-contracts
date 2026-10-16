@@ -927,5 +927,61 @@ impl MergeMintContract {
 
         events::emit_deadline_extended(&env, &bounty_id, &creator, new_deadline);
     }
+
+    /// Reopen an expired bounty with a new deadline.
+    ///
+    /// Moves an expired bounty back to open status with a new future deadline,
+    /// provided its escrowed reward has not been refunded.
+    ///
+    /// # Arguments
+    /// * `creator` - The wallet that created the bounty.
+    /// * `bounty_id` - The identifier of the bounty to reopen.
+    /// * `new_deadline` - The new ledger sequence deadline (must be in the future).
+    ///
+    /// # Panics
+    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
+    /// * If `creator` is not the bounty creator (`ContractError::NotBountyCreator`).
+    /// * If the bounty has no deadline (`ContractError::BountyNoDeadline`).
+    /// * If the current deadline has not passed yet (`ContractError::DeadlineNotPassed`).
+    /// * If the bounty is not in `"open"` status (`ContractError::BountyNotOpen`).
+    /// * If `new_deadline` is not strictly in the future (`ContractError::BountyDeadlinePassed`).
+    ///
+    /// # Authorization
+    /// Requires auth from `creator`.
+    pub fn reopen_bounty(env: Env, creator: Address, bounty_id: BountyId, new_deadline: u32) {
+        creator.require_auth();
+
+        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => fail(ContractError::BountyNotFound),
+        };
+
+        if creator != bounty.creator {
+            fail(ContractError::NotBountyCreator);
+        }
+
+        let current_deadline = match bounty.deadline {
+            Some(d) => d,
+            None => fail(ContractError::BountyNoDeadline),
+        };
+
+        if env.ledger().sequence() <= current_deadline {
+            fail(ContractError::DeadlineNotPassed);
+        }
+
+        if bounty.status != Symbol::new(&env, STATUS_OPEN) {
+            fail(ContractError::BountyNotOpen);
+        }
+
+        if new_deadline <= env.ledger().sequence() {
+            fail(ContractError::BountyDeadlinePassed);
+        }
+
+        bounty.deadline = Some(new_deadline);
+        storage::store_bounty(&env, &bounty_id, &bounty);
+
+        events::emit_bounty_reopened(&env, &bounty_id, &creator, new_deadline);
+    }
 }
+
 

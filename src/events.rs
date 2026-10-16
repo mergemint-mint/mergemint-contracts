@@ -112,3 +112,15 @@ pub fn emit_contributor_metadata_updated(env: &Env, contributor: &Address, metad
     env.events()
         .publish((topic, contributor.clone()), metadata.clone());
 }
+
+pub fn emit_bounty_reopened(
+    env: &Env,
+    bounty_id: &BountyId,
+    creator: &Address,
+    new_deadline: u32,
+) {
+    let topic = Symbol::new(env, "bounty_reopened");
+    env.events()
+        .publish((topic, creator.clone()), (bounty_id.clone(), new_deadline));
+}
+

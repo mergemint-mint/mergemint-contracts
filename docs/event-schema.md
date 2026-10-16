@@ -70,6 +70,12 @@ Contract events emitted for indexer integration.
 - **Trigger**: Contributor metadata is updated via `update_contributor_metadata`
 - **Purpose**: Notify indexer of contributor profile changes so cached profiles stay fresh
 
+### bounty_reopened
+- **Topics**: `(Symbol("bounty_reopened"), creator_address)`
+- **Data**: `(bounty_id, new_deadline)`
+- **Trigger**: Bounty creator reopens an expired bounty with a new deadline
+- **Purpose**: Notify indexer of bounty reactivation and updated deadline
+
 ## Queries
 
 ### get_contributor_bounty_history
