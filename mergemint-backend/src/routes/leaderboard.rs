@@ -10,8 +10,8 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 use crate::db::{get_leaderboard as db_get_leaderboard, LeaderboardPage};
 use crate::routes::tx::AppState;
@@ -60,11 +60,14 @@ pub async fn get_leaderboard_route(
     State(state): State<Arc<AppState>>,
     Query(params): Query<LeaderboardParams>,
 ) -> Result<Json<LeaderboardPage>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = params.limit.unwrap_or(20).min(MAX_LIST_LIMIT).max(1);
+    let limit = params.limit.unwrap_or(20).clamp(1, MAX_LIST_LIMIT);
 
     // Attempt to read from cache
     let cached = {
-        let cache_guard = state.leaderboard_cache.read().unwrap_or_else(|e| e.into_inner());
+        let cache_guard = state
+            .leaderboard_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         cache_guard.clone()
     };
 
@@ -84,7 +87,10 @@ pub async fn get_leaderboard_route(
 
     // Store in cache with expiry time
     {
-        let mut cache_guard = state.leaderboard_cache.write().unwrap_or_else(|e| e.into_inner());
+        let mut cache_guard = state
+            .leaderboard_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         *cache_guard = Some(CachedLeaderboard {
             data: LeaderboardPage {
                 entries: page.entries.clone(),
@@ -113,6 +119,7 @@ mod tests {
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
             leaderboard_cache: new_leaderboard_cache(),
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
         })
     }
 
@@ -124,6 +131,7 @@ mod tests {
                 creator: "creator".to_string(),
                 assignee: Some(format!("contributor_{}", i % 5)),
                 created_at: Utc::now(),
+                ..Default::default()
             });
         }
     }
@@ -133,11 +141,8 @@ mod tests {
         let state = test_state();
         seed_bounties(&state, 10);
 
-        let result = get_leaderboard_route(
-            State(state),
-            Query(LeaderboardParams { limit: None }),
-        )
-        .await;
+        let result =
+            get_leaderboard_route(State(state), Query(LeaderboardParams { limit: None })).await;
 
         let Json(page) = result.expect("request must succeed");
         assert!(!page.entries.is_empty());
@@ -155,13 +160,8 @@ mod tests {
         let state = test_state();
         seed_bounties(&state, 20);
 
-        let result = get_leaderboard_route(
-            State(state),
-            Query(LeaderboardParams {
-                limit: Some(5),
-            }),
-        )
-        .await;
+        let result =
+            get_leaderboard_route(State(state), Query(LeaderboardParams { limit: Some(5) })).await;
 
         let Json(page) = result.expect("request must succeed");
         assert_eq!(page.entries.len(), 5);
@@ -250,18 +250,18 @@ mod tests {
         let Json(page2) = result2.expect("second request must succeed");
 
         // New data should be fetched (10 bounties from 2 seeds = more contributors or higher counts)
-        assert!(page2.entries.len() > 0, "fresh data should be fetched after expiry");
+        assert!(
+            !page2.entries.is_empty(),
+            "fresh data should be fetched after expiry"
+        );
     }
 
     #[tokio::test]
     async fn get_leaderboard_returns_empty_page_when_no_bounties() {
         let state = test_state();
 
-        let result = get_leaderboard_route(
-            State(state),
-            Query(LeaderboardParams { limit: None }),
-        )
-        .await;
+        let result =
+            get_leaderboard_route(State(state), Query(LeaderboardParams { limit: None })).await;
 
         let Json(page) = result.expect("request must succeed");
         assert!(page.entries.is_empty());
@@ -283,15 +283,13 @@ mod tests {
                     creator: "creator".to_string(),
                     assignee: Some(format!("contributor_{}", i)),
                     created_at: now,
+                    ..Default::default()
                 });
             }
         }
 
-        let result = get_leaderboard_route(
-            State(state),
-            Query(LeaderboardParams { limit: None }),
-        )
-        .await;
+        let result =
+            get_leaderboard_route(State(state), Query(LeaderboardParams { limit: None })).await;
 
         let Json(page) = result.expect("request must succeed");
         assert_eq!(page.entries.len(), 20, "default limit should be 20");

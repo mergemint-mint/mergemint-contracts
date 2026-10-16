@@ -139,7 +139,7 @@ describe('MilestoneTracker', () => {
     const markup = renderToStaticMarkup(<MilestoneTracker milestones={milestones} />);
 
     // 2 out of 4 = 50%
-    expect(markup).toContain('width: 50%');
+    expect(markup).toContain('width:50%');
     expect(markup).toContain('2 of 4 completed');
   });
 
@@ -149,7 +149,7 @@ describe('MilestoneTracker', () => {
     const markup = renderToStaticMarkup(<MilestoneTracker milestones={milestones} />);
 
     expect(markup).toContain('1 of 1 completed');
-    expect(markup).toContain('width: 100%');
+    expect(markup).toContain('width:100%');
     expect(markup).toContain('milestone-item--completed');
     expect(markup).not.toContain('milestone-item--pending');
   });
@@ -160,7 +160,7 @@ describe('MilestoneTracker', () => {
     const markup = renderToStaticMarkup(<MilestoneTracker milestones={milestones} />);
 
     expect(markup).toContain('0 of 1 completed');
-    expect(markup).toContain('width: 0%');
+    expect(markup).toContain('width:0%');
     expect(markup).toContain('milestone-item--pending');
   });
 });

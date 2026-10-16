@@ -38,6 +38,9 @@ pub struct AppState {
     /// In-memory cache for leaderboard data, with 60-second expiry to avoid
     /// expensive aggregation on every request (see `routes::leaderboard`).
     pub leaderboard_cache: crate::routes::leaderboard::LeaderboardCache,
+    /// Interval between SSE keep-alive comments on `GET /bounties/stream`,
+    /// so idle connections are not dropped by proxies (`SSE_KEEP_ALIVE_SECS`).
+    pub sse_keep_alive_duration: std::time::Duration,
 }
 
 /// Maximum `self_claim` calls allowed per `SELF_CLAIM_RATE_WINDOW_SECS` window,
@@ -197,7 +200,7 @@ fn finalize_idempotency_key(store: &SharedIdempotencyStore, key: String, result:
 /// emitted via `tracing::error!` so it appears in server logs without ever
 /// being sent to the client.  This prevents RPC debug strings, stack traces,
 /// and other internal state from leaking across the API boundary.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AppError {
     pub code: u16,
     pub message: String,
@@ -570,8 +573,8 @@ pub async fn query_audit_logs(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<QueryAuditLogsRequest>,
 ) -> Json<QueryAuditLogsResponse> {
-    let limit = params.limit.unwrap_or(100).min(1000).max(1);
-    
+    let limit = params.limit.unwrap_or(100).clamp(1, 1000);
+
     let logs = crate::db::query_audit_logs(
         &state.db,
         params.actor.as_deref(),
@@ -763,6 +766,7 @@ mod tests {
             rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
             leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
         })
     }
 

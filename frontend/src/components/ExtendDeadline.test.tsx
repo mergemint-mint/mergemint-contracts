@@ -5,8 +5,8 @@ import { ExtendDeadline } from './ExtendDeadline';
 import * as apiModule from '../lib/api';
 import { Bounty } from '../types';
 
-// A bounty whose deadline is 2026-01-01 (Unix: 1735689600).
-const DEADLINE_UNIX = 1735689600; // 2026-01-01T00:00:00Z
+// A bounty whose deadline is 2026-01-01 (Unix: 1767225600).
+const DEADLINE_UNIX = 1767225600; // 2026-01-01T00:00:00Z
 
 const BOUNTY: Bounty = {
   id: 'bounty-1',

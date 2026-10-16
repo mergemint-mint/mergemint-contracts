@@ -1,5 +1,11 @@
-import { Bounty, BountyPage, BountyStatus, Contributor, LeaderboardPage } from '../types';
-import { Bounty, BountyPage, BountyStatus, Contributor, RewardToken } from '../types';
+import {
+  Bounty,
+  BountyPage,
+  BountyStatus,
+  Contributor,
+  LeaderboardPage,
+  RewardToken,
+} from '../types';
 
 // All stable endpoints are versioned under /api/v1. The base URL can be
 // overridden for local development via VITE_API_BASE_URL (e.g. http://localhost:8080/api/v1).
@@ -77,18 +83,12 @@ export const api = {
   claimBounty(id: string): Promise<Bounty> {
     return request(`/bounties/${id}/claim`, { method: 'POST' });
   },
-  topUpBounty(id: string, amount: string): Promise<Bounty> {
-    return request(`/bounties/${id}/topup`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ amount }),
-    });
-  },
   getContributor(address: string): Promise<Contributor> {
     return request(`/contributors/${address}`);
   },
   getLeaderboard(): Promise<LeaderboardPage> {
     return request('/contributors/leaderboard');
+  },
   /**
    * Fetch the reward-token allowlist maintained by the backend.
    * Returns only tokens that the contract will accept as reward tokens.

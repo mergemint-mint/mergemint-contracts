@@ -17,20 +17,22 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::db::{
-    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, BountyPage, Bounty,
+    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, Bounty,
+    BountyPage, BountySortField, SortOrder,
 };
 use crate::routes::tx::AppState;
 
 // ── Query params ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, IntoParams)]
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListParams {
     pub limit: Option<i64>,
     /// Legacy offset-style cursor: a `created_at` timestamp. Kept for backward
@@ -45,26 +47,23 @@ pub struct ListParams {
     pub status: Option<String>,
     /// Optional tag filter. Matched against the bounty's indexed tag column.
     pub tag: Option<String>,
-    /// Optional sort column. Validated against [`VALID_SORT_COLUMNS`]; an
-    /// unrecognised value is rejected with 400 rather than silently ignored.
-    pub sort: Option<String>,
-    /// Optional sort direction. Validated against [`VALID_ORDERS`]; an
-    /// unrecognised value is rejected with 400 rather than silently ignored.
-    pub order: Option<String>,
+    /// Optional sort column (`created`, `reward`, `deadline`). Deserialization
+    /// is restricted to [`BountySortField`], so an unrecognised value is
+    /// rejected with 400 by the query extractor and never reaches the store.
+    pub sort: Option<BountySortField>,
+    /// Optional sort direction (`asc`, `desc`), whitelisted the same way.
+    pub order: Option<SortOrder>,
 }
 
 /// Statuses a bounty may be filtered by. Kept in sync with the values the
 /// store writes; anything outside this set is a client error.
 const VALID_STATUSES: [&str; 4] = ["open", "claimed", "completed", "cancelled"];
 
-/// Columns a listing may be sorted by. This whitelist is the only place a
-/// caller-supplied `sort` value is allowed to influence the query — the value
-/// is never interpolated into SQL directly, so arbitrary input can't reach the
-/// database.
-const VALID_SORT_COLUMNS: [&str; 3] = ["reward", "deadline", "created"];
-
-/// Sort directions a listing may be ordered by.
-const VALID_ORDERS: [&str; 2] = ["asc", "desc"];
+/// Cursors encode a `created_at` position, so they only page correctly when
+/// the listing is ordered newest first (the default `created` + `desc`).
+fn cursor_supported(sort: BountySortField, order: SortOrder) -> bool {
+    sort == BountySortField::Created && order == SortOrder::Desc
+}
 
 /// Maximum page size any listing endpoint here will accept, regardless of
 /// what a caller requests. Mirrors the contract-side cap proposed for
@@ -118,6 +117,16 @@ fn decode_cursor(cursor: &str) -> Option<(DateTime<Utc>, String)> {
 /// the opaque `page_cursor` token introduced in issue #873. When `page_cursor`
 /// is supplied it takes precedence and the response carries a `next_cursor`
 /// for the following page.
+#[utoipa::path(
+    get,
+    path = "/bounties",
+    params(ListParams),
+    responses(
+        (status = 200, description = "Paginated list of bounties", body = BountyPage),
+        (status = 400, description = "Invalid filter, sort or cursor", body = crate::routes::tx::AppError),
+    ),
+    tag = "bounties"
+)]
 pub async fn list_bounties(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
@@ -131,36 +140,6 @@ pub async fn list_bounties(
                         "invalid status '{}'; expected one of: {}",
                         status,
                         VALID_STATUSES.join(", ")
-                    )
-                })),
-            ));
-        }
-    }
-
-    if let Some(sort) = params.sort.as_deref() {
-        if !VALID_SORT_COLUMNS.contains(&sort) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!(
-                        "invalid sort '{}'; expected one of: {}",
-                        sort,
-                        VALID_SORT_COLUMNS.join(", ")
-                    )
-                })),
-            ));
-        }
-    }
-
-    if let Some(order) = params.order.as_deref() {
-        if !VALID_ORDERS.contains(&order) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!(
-                        "invalid order '{}'; expected one of: {}",
-                        order,
-                        VALID_ORDERS.join(", ")
                     )
                 })),
             ));
@@ -183,16 +162,24 @@ pub async fn list_bounties(
     };
 
     // Default to newest first so existing clients keep their current ordering.
-    let sort = params.sort.as_deref().unwrap_or("created");
-    let order = params.order.as_deref().unwrap_or("desc");
+    let sort = params.sort.unwrap_or_default();
+    let order = params.order.unwrap_or_default();
+    if (decoded.is_some() || params.cursor.is_some()) && !cursor_supported(sort, order) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cursor pagination is only supported with the default ordering (sort=created&order=desc)"
+            })),
+        ));
+    }
 
     let limit = params.limit.unwrap_or(20).min(MAX_LIST_LIMIT);
 
     // When an opaque cursor is supplied, page from its `(created_at, id)`
     // position; otherwise fall back to the legacy timestamp cursor.
-    let (cursor_ts, cursor_id) = match decoded {
-        Some((ts, id)) => (Some(ts), Some(id)),
-        None => (params.cursor, None),
+    let cursor_ts = match decoded {
+        Some((ts, _id)) => Some(ts),
+        None => params.cursor,
     };
 
     let mut page = list_bounties_by_creator(
@@ -214,7 +201,6 @@ pub async fn list_bounties(
         }
     }
 
-    let _ = cursor_id;
     Ok(Json(page))
 }
 
@@ -234,8 +220,8 @@ pub async fn list_bounties(
     ),
     responses(
         (status = 200, description = "Paginated list of bounties for the assignee", body = BountyPage),
-        (status = 400, description = "Malformed assignee address", body = crate::error::AppError),
-        (status = 500, description = "Internal server error", body = crate::error::AppError),
+        (status = 400, description = "Malformed assignee address", body = crate::routes::tx::AppError),
+        (status = 500, description = "Internal server error", body = crate::routes::tx::AppError),
     ),
     tag = "bounties"
 )]
@@ -313,10 +299,7 @@ pub async fn bounty_stream(
         })
     });
 
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(state.sse_keep_alive_duration)
-    )
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(state.sse_keep_alive_duration))
 }
 
 /// `POST /bounties/{id}/claim`
@@ -331,7 +314,7 @@ pub async fn bounty_stream(
     ),
     responses(
         (status = 200, description = "Bounty claimed", body = ClaimResponse),
-        (status = 500, description = "Internal server error", body = crate::error::AppError),
+        (status = 500, description = "Internal server error", body = crate::routes::tx::AppError),
     ),
     tag = "bounties"
 )]
@@ -341,10 +324,17 @@ pub async fn claim_bounty(
 ) -> impl IntoResponse {
     let _ = state.bounty_broadcast.send(id.clone());
 
-    Json(serde_json::json!({
-        "id": id,
-        "status": "claimed"
-    }))
+    Json(ClaimResponse {
+        id,
+        status: "claimed".to_string(),
+    })
+}
+
+/// Response body for `POST /bounties/{id}/claim`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ClaimResponse {
+    pub id: String,
+    pub status: String,
 }
 
 /// `GET /bounties/{id}`
@@ -356,8 +346,8 @@ pub async fn claim_bounty(
     ),
     responses(
         (status = 200, description = "Bounty found", body = Bounty),
-        (status = 404, description = "Bounty not found", body = crate::error::AppError),
-        (status = 500, description = "Internal server error", body = crate::error::AppError),
+        (status = 404, description = "Bounty not found", body = crate::routes::tx::AppError),
+        (status = 500, description = "Internal server error", body = crate::routes::tx::AppError),
     ),
     tag = "bounties"
 )]
@@ -387,6 +377,7 @@ mod tests {
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
             leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
         })
     }
 
@@ -402,6 +393,7 @@ mod tests {
                 created_at: Utc::now() + chrono::Duration::seconds(i as i64),
                 reward: i as i128,
                 deadline: None,
+                ..Default::default()
             });
         }
     }
@@ -425,6 +417,7 @@ mod tests {
             created_at,
             reward,
             deadline,
+            ..Default::default()
         });
     }
 
@@ -434,6 +427,7 @@ mod tests {
             cursor: None,
             sort,
             order,
+            ..Default::default()
         }
     }
 
@@ -475,6 +469,7 @@ mod tests {
                 cursor: None,
                 sort: None,
                 order: None,
+                ..Default::default()
             }),
         )
         .await;
@@ -498,6 +493,7 @@ mod tests {
                 cursor: None,
                 sort: None,
                 order: None,
+                ..Default::default()
             }),
         )
         .await
@@ -520,6 +516,7 @@ mod tests {
                 cursor: None,
                 sort: None,
                 order: None,
+                ..Default::default()
             }),
         )
         .await
@@ -549,12 +546,91 @@ mod tests {
                 cursor: None,
                 sort: None,
                 order: None,
+                ..Default::default()
             }),
         )
         .await
         .expect("a within-bounds limit is a valid listing request");
 
         assert_eq!(page.bounties.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn list_bounties_sorts_by_reward_and_deadline() {
+        let state = test_state();
+        let now = Utc::now();
+        seed_bounty(&state, "a", 30, None, now);
+        seed_bounty(&state, "b", 10, Some(now + chrono::Duration::days(2)), now);
+        seed_bounty(&state, "c", 20, Some(now + chrono::Duration::days(1)), now);
+
+        let Json(page) = list_bounties(
+            State(state.clone()),
+            Query(params(Some(BountySortField::Reward), Some(SortOrder::Asc))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids(&page), ["b", "c", "a"]);
+
+        let Json(page) = list_bounties(
+            State(state),
+            Query(params(
+                Some(BountySortField::Deadline),
+                Some(SortOrder::Asc),
+            )),
+        )
+        .await
+        .unwrap();
+        // Bounties without a deadline trail those that have one.
+        assert_eq!(ids(&page), ["c", "b", "a"]);
+    }
+
+    #[tokio::test]
+    async fn list_bounties_rejects_cursor_with_non_default_sort() {
+        let state = test_state();
+        let mut p = params(Some(BountySortField::Reward), None);
+        p.cursor = Some(Utc::now());
+
+        let (status, _) = list_bounties(State(state), Query(p))
+            .await
+            .expect_err("cursor + reward sort must be rejected");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_bounties_filters_by_status_and_tag() {
+        let state = test_state();
+        {
+            let mut guard = acquire_db(&state.db);
+            guard.bounties.push(Bounty {
+                id: "open-rust".to_string(),
+                tags: vec!["rust".to_string()],
+                ..Default::default()
+            });
+            guard.bounties.push(Bounty {
+                id: "done-rust".to_string(),
+                status: "completed".to_string(),
+                tags: vec!["rust".to_string()],
+                ..Default::default()
+            });
+            guard.bounties.push(Bounty {
+                id: "open-docs".to_string(),
+                tags: vec!["docs".to_string()],
+                ..Default::default()
+            });
+        }
+
+        let mut p = params(None, None);
+        p.status = Some("open".to_string());
+        p.tag = Some("rust".to_string());
+        let Json(page) = list_bounties(State(state.clone()), Query(p)).await.unwrap();
+        assert_eq!(ids(&page), ["open-rust"]);
+
+        let mut p = params(None, None);
+        p.status = Some("bogus".to_string());
+        let (status, _) = list_bounties(State(state), Query(p))
+            .await
+            .expect_err("unknown status must be rejected");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

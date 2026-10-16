@@ -1,45 +1,30 @@
-import React from 'react';
-import styles from './BountyCardSkeleton.module.css';
+import { useTranslation } from '../i18n';
 
 export interface BountyCardSkeletonProps {
+  /** Number of placeholder cards to render (default 1). */
   count?: number;
+  /** Extra class name applied to each placeholder card. */
   className?: string;
 }
 
 /**
- * Skeleton loader matching bounty card dimensions.
- * Respects user's reduced motion preferences.
+ * Placeholder matching the BountyCard layout, shown while bounty data is
+ * still loading. Line styles (and the reduced-motion fallback) live in
+ * `styles/theme.css` under `.bounty-card__skeleton-line`.
  */
-const Skeleton: React.FC<{ className?: string }> = ({ className }) => (
-  <div className={`${styles.skeleton} ${className || ''}`} aria-hidden="true" />
-);
-
-export const BountyCardSkeleton: React.FC<BountyCardSkeletonProps> = ({ count = 1, className }) => {
+export function BountyCardSkeleton({ count = 1, className }: BountyCardSkeletonProps) {
+  const { t } = useTranslation();
+  const cardClass = `bounty-card bounty-card--loading${className ? ` ${className}` : ''}`;
   return (
     <>
-      {Array.from({ length: count }).map((_, i) => (
-        <div key={i} className={`${styles.card} ${className || ''}`}>
-          <div className={styles.header}>
-            <Skeleton className={styles.titleSkeleton} />
-            <Skeleton className={styles.statusSkeleton} />
-          </div>
-
-          <div className={styles.content}>
-            <Skeleton className={styles.descriptionSkeleton} />
-            <Skeleton className={styles.descriptionSkeleton} />
-          </div>
-
-          <div className={styles.footer}>
-            <div className={styles.leftFooter}>
-              <Skeleton className={styles.avatarSkeleton} />
-              <Skeleton className={styles.nameSkeleton} />
-            </div>
-            <Skeleton className={styles.amountSkeleton} />
-          </div>
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i} className={cardClass} aria-busy="true" aria-label={t('loading_bounty')}>
+          <span className="bounty-card__id bounty-card__skeleton-line" />
+          <span className="bounty-card__creator bounty-card__skeleton-line" />
+          <span className="bounty-card__reward bounty-card__skeleton-line" />
+          <span className="bounty-card__status bounty-card__skeleton-line" />
         </div>
       ))}
     </>
   );
-};
-
-export default BountyCardSkeleton;
+}

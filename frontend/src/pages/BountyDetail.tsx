@@ -7,7 +7,12 @@ import { StatusBadge } from '../components/StatusBadge';
 import { BountyDetailSkeleton } from '../components/BountyDetailSkeleton';
 import { BountyErrorBoundary } from '../components/BountyErrorBoundary';
 import { TopUpModal } from '../components/TopUpModal';
+import { ExtendDeadline } from '../components/ExtendDeadline';
+import { CancelBountyDialog } from '../components/CancelBountyDialog';
+import { MilestoneTracker } from '../components/MilestoneTracker';
 import { useWallet } from '../lib/WalletContext';
+import { CONFIGURED_NETWORK } from '../lib/network';
+import { useTranslation } from '../i18n';
 
 /**
  * Inner component rendering the bounty details, claim action, and creator top-up controls.
@@ -17,11 +22,11 @@ import { useWallet } from '../lib/WalletContext';
 function BountyDetailInner() {
   const { id } = useParams<{ id: string }>();
   const { address } = useWallet();
+  const { t } = useTranslation();
   const [bounty, setBounty] = useState<Bounty | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [claiming, setClaiming] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [showTopUp, setShowTopUp] = useState(false);
 
   // Modal/dialog visibility flags.
   const [showTopUp, setShowTopUp] = useState(false);
@@ -57,12 +62,19 @@ function BountyDetailInner() {
 
   const handleTopUp = useCallback(
     async (amount: string) => {
-      if (!id) return;
-      const updated = await api.topUpBounty(id, amount);
-      setBounty(updated);
+      if (!id || !bounty) return;
+      await api.topUpBounty(id, amount, bounty.rewardToken ?? '');
+      fetchBounty();
     },
-    [id]
+    [id, bounty] // eslint-disable-line react-hooks/exhaustive-deps
   );
+
+  const handleCancel = useCallback(async () => {
+    if (!id) return;
+    await api.cancelBounty(id);
+    setShowCancel(false);
+    fetchBounty();
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading && !bounty) return <BountyDetailSkeleton />;
   if (error && !bounty) return <p role="alert">{error}</p>;
@@ -72,8 +84,6 @@ function BountyDetailInner() {
     address && bounty.creator && address.toLowerCase() === bounty.creator.toLowerCase()
   );
 
-  const isCreator =
-    walletAddress !== null && walletAddress.toLowerCase() === bounty.creator.toLowerCase();
   const isOpen = bounty.status === 'open';
 
   return (
@@ -89,17 +99,29 @@ function BountyDetailInner() {
       </div>
       {error && <p role="alert">{error}</p>}
       <MilestoneTracker milestones={bounty.milestones} totalReward={bounty.reward} />
-      <button onClick={handleClaim} disabled={claiming || bounty.status !== 'open'}>
+      <button onClick={handleClaim} disabled={claiming || !isOpen}>
         {claiming ? t('claiming') : t('claim_bounty')}
       </button>
-      {isCreator && bounty.status === 'open' && (
-        <button
-          type="button"
-          onClick={() => setShowTopUp(true)}
-          className="topup-open-button"
-        >
-          Top Up Bounty
-        </button>
+      {isCreator && isOpen && (
+        <>
+          <button
+            type="button"
+            onClick={() => setShowTopUp(true)}
+            className="topup-open-button"
+          >
+            Top Up Bounty
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowCancel(true)}
+            className="cancel-open-button"
+          >
+            Cancel Bounty
+          </button>
+        </>
+      )}
+      {isCreator && bounty.deadline != null && (
+        <ExtendDeadline bounty={bounty} network={CONFIGURED_NETWORK} onSuccess={fetchBounty} />
       )}
       <TopUpModal
         isOpen={showTopUp}
@@ -109,6 +131,14 @@ function BountyDetailInner() {
         rewardToken="XLM"
         isCreator={isCreator}
         onTopUp={handleTopUp}
+      />
+      <CancelBountyDialog
+        isOpen={showCancel}
+        onClose={() => setShowCancel(false)}
+        bounty={bounty}
+        refundAmount={bounty.reward}
+        rewardToken="XLM"
+        onConfirm={handleCancel}
       />
     </div>
   );

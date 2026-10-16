@@ -29,10 +29,11 @@ export function toRawTokenAmount(value: string): string {
 
 /**
  * Shortens a wallet/contract address for display, e.g. "GABC…4567".
- * Addresses shorter than lead + trail are returned unchanged.
+ * Addresses that would not get shorter (length <= lead + trail + 1 for the
+ * ellipsis) are returned unchanged.
  */
 export function shortenAddress(address: string, lead = 4, trail = 4): string {
-  if (address.length <= lead + trail) return address;
+  if (address.length <= lead + trail + 1) return address;
   return `${address.slice(0, lead)}…${address.slice(-trail)}`;
 }
 

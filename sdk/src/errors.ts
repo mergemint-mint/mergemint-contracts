@@ -124,6 +124,16 @@ export class InvalidRpcUrlError extends ContractError {
 export function parseSimulationError(raw: string): ContractError {
   const lower = raw.toLowerCase();
 
+  // A transaction-level failure wins over the operation result it carries
+  // (e.g. "tx_failed: op_bad_auth" is a failed transaction, not just an auth error).
+  if (
+    lower.includes("transaction failed") ||
+    lower.includes("tx_failed") ||
+    lower.includes("op_no_account")
+  ) {
+    return new TransactionFailedError(raw);
+  }
+
   if (
     lower.includes("unauthorized") ||
     lower.includes("not authorized") ||
@@ -144,15 +154,6 @@ export function parseSimulationError(raw: string): ContractError {
 
   if (lower.includes("invalid argument") || lower.includes("invalid param")) {
     return new InvalidArgumentError(raw);
-  }
-
-  if (
-    lower.includes("transaction failed") ||
-    lower.includes("tx_failed") ||
-    lower.includes("op_bad_auth") ||
-    lower.includes("op_no_account")
-  ) {
-    return new TransactionFailedError(raw);
   }
 
   // Fallthrough: preserve raw message inside a generic simulation error.

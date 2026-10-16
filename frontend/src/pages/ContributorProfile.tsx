@@ -32,15 +32,11 @@ export function ContributorProfile() {
   }, [address, walletAddress]);
 
   if (!walletAddress) {
-    return (
-      <p className="contributor-profile__empty">
-        Connect your wallet to view contributor profiles.
-      </p>
-    );
+    return <p className="contributor-profile__empty">{t('connect_wallet_prompt')}</p>;
   }
 
   if (error) return <p role="alert">{error}</p>;
-  if (!contributor) return <p aria-busy="true">Loading…</p>;
+  if (!contributor) return <p aria-busy="true">{t('loading')}</p>;
 
   const isOwn = walletAddress === contributor.address;
 
@@ -50,17 +46,5 @@ export function ContributorProfile() {
       <ProfileStats contributor={contributor} />
       <ProfileHistory history={contributor.reputationHistory} />
     </main>
-    return <p className="contributor-profile__empty">{t('connect_wallet_prompt')}</p>;
-  }
-
-  if (error) return <p role="alert">{error}</p>;
-  if (!contributor) return <p>{t('loading')}</p>;
-
-  return (
-    <div>
-      <h1>{contributor.address}</h1>
-      <p>{t('reputation')}: {contributor.reputation}</p>
-      <p>{t('completed_bounties')}: {contributor.completedBounties}</p>
-    </div>
   );
 }

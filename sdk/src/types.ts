@@ -100,6 +100,32 @@ export interface ExtendDeadlineParams {
  * Options controlling the fee-bump retry strategy used when submitting
  * transactions under network congestion.
  */
+/** Options accepted by every write (transaction-building) method. */
+export interface MutationOptions {
+  /**
+   * When `true`, simulate the call and return its {@link SimulateResult}
+   * (fees and footprint) instead of the assembled transaction XDR.
+   */
+  simulate?: boolean;
+}
+
+/** Cost estimate returned by a write method called with `{ simulate: true }`. */
+export interface SimulateResult {
+  /** Minimum resource fee, in stroops, reported by the RPC simulation. */
+  resourceFee: bigint;
+  /** Ledger keys (base64 XDR) the transaction reads and writes. */
+  footprint: {
+    readOnly: string[];
+    readWrite: string[];
+  };
+  /** Resource usage the transaction would be charged for. */
+  resources: {
+    instructions: number;
+    readBytes: number;
+    writeBytes: number;
+  };
+}
+
 export interface FeeBumpRetryOptions {
   /**
    * Maximum number of submission attempts (including the first). Must be >= 1.
