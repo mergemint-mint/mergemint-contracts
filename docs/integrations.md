@@ -318,3 +318,10 @@ Deliveries follow an exponential backoff retry strategy:
   - Maximum attempts: 3
 - **Permanent Failures (Not Retried)**: HTTP 4xx client errors (excluding 429) indicate an invalid endpoint or client rejection; delivery aborts immediately without consuming retry quotas.
 
+---
+
+### Webhook Reference & Payload Examples
+
+For complete event payload schemas (`bounty.created`, `bounty.claimed`, `bounty.completed`, `reward.paid`, `bounty.expired`, `bounty.disputed`) and copy-paste ready verification examples in Node.js and Python, see the dedicated [Webhook Payload and Signature Reference](webhooks.md).
+
+
