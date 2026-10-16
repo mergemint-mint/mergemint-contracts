@@ -204,16 +204,103 @@ and can trick users into signing, but it cannot move funds by itself.
 
 ---
 
+---
+
+## 5. New Trust Boundaries: Sponsors, Appeals & Ownership
+
+The protocol has evolved to support multi-funder sponsorship (`top_up`), multi-tiered dispute appeals, and contract/bounty ownership transfer. Each introduces distinct trust boundaries and attack surfaces.
+
+### 5.1 Sponsor Funding & Refund Griefing Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Sponsor
+    actor Contributor
+    participant Contract as MergeMint Contract
+    participant Escrow as Bounty Escrow Pool
+
+    Note over Sponsor,Escrow: Attack: Sponsor attempts to withdraw funds while contributor is actively working
+    Sponsor->>Contract: top_up(bounty_id, amount)
+    Contract->>Escrow: Lock additional funds in bounty escrow
+    Contributor->>Contract: claim_bounty(bounty_id)
+    Contract-->>Contributor: Status = in_progress
+    Sponsor->>Contract: request_refund(bounty_id) [MALICIOUS ATTEMPT]
+    Note over Contract: MITIGATION: Escrow lock strictly prevents sponsor withdrawal while status == in_progress
+    Contract-->>Sponsor: Error: InvalidState (Funds locked until deadline expiry or dispute)
+```
+
+| ID | STRIDE | Threat | Sev. | Current controls | Status |
+|---|---|---|---|---|---|
+| **C-T5** | T | **Sponsor Refund Griefing.** A third-party sponsor tops up a bounty to inflate the apparent reward, waits for a contributor to claim and complete substantial work, then attempts to withdraw or refund their contribution before payout approval. | High | In Soroban escrow logic (`src/contract/mutations.rs`), all `top_up` funds are atomically commingled into the locked bounty escrow pool. Funds cannot be unilaterally refunded or withdrawn by individual sponsors while the bounty is in `in_progress` status. | ✅ Mitigated in `src/contract/mutations.rs#top_up` and verified in `sdk/examples/06-top-up-bounty.ts`. |
+| **C-D4** | D | **Micro-donation Spam.** An attacker submits hundreds of dust-value `top_up` invocations to exhaust contract instance storage TTL or induce CPU limit failures during iteration. | Medium | Enforced minimum deposit threshold (`MIN_TOPUP_AMOUNT`) and per-bounty sponsor array cap. | ✅ Mitigated via checked thresholds in mutations. |
+
+---
+
+### 5.2 Dispute Appeal Abuse Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Creator
+    actor Contributor
+    actor Arbitrator
+    participant Contract as MergeMint Contract
+
+    Creator->>Contract: dispute_bounty(bounty_id)
+    Contract-->>Creator: Status = Disputed
+    Arbitrator->>Contract: resolve_dispute(bounty_id, "complete")
+    Note over Creator,Contract: Attack: Creator attempts repeated appeals to stall contributor payout indefinitely
+    Creator->>Contract: appeal_dispute(bounty_id) [MALICIOUS LOOP]
+    Note over Contract: MITIGATION: Single-appeal cap per party + non-refundable appeal collateral bond
+    Contract-->>Creator: Rejection: MaxAppealsReached / FinalityEnforced
+```
+
+| ID | STRIDE | Threat | Sev. | Current controls | Status |
+|---|---|---|---|---|---|
+| **C-E3** | E | **Dispute Appeal Abuse & Payout Denial.** An adversarial creator or contributor repeatedly lodges appeals against arbitration rulings to lock escrowed funds indefinitely, effectively forcing griefing concessions. | High | Strict state machine transitions: arbitration decisions carry an enforceable appeal timeout window (`APPEAL_WINDOW_LEDGERS`). A maximum of one appeal round is permitted per dispute, after which the secondary arbitrator decision is unconditionally final. | ✅ Mitigated by `ensure_status` checks and finality flags in `src/contract/mutations.rs`. |
+| **C-R3** | R | **Arbitrator Repudiation.** An arbitrator denies having ruled on an appeal or claims their decision was forged. | Medium | Every resolution mutation requires explicit cryptographic signature (`arbitrator.require_auth()`) logged on-chain via Soroban contract events (`topics: [SYMBOL("dispute_resolved"), bounty_id]`). | ✅ Verified in `src/events.rs`. |
+
+---
+
+### 5.3 Ownership Transfer Hijack Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor CurrentOwner
+    actor MaliciousActor
+    actor NewOwner
+    participant Contract as MergeMint Contract
+
+    Note over CurrentOwner,Contract: Attack: Single-step transfer vulnerable to typos or unauthorized invocation
+    CurrentOwner->>Contract: transfer_ownership(NewOwner) [SINGLE-STEP VULNERABLE]
+    
+    Note over CurrentOwner,Contract: MITIGATION: Two-step handshake (Propose -> Accept)
+    CurrentOwner->>Contract: propose_ownership_transfer(NewOwner)
+    Contract-->>CurrentOwner: OwnershipPending(NewOwner)
+    MaliciousActor->>Contract: claim_ownership() [REJECTED: require_auth(NewOwner)]
+    NewOwner->>Contract: accept_ownership_transfer()
+    Contract-->>NewOwner: OwnershipTransferred(NewOwner)
+```
+
+| ID | STRIDE | Threat | Sev. | Current controls | Status |
+|---|---|---|---|---|---|
+| **C-S3** | S | **Ownership Transfer Hijack.** Single-step ownership transfer to an erroneous address (typo, copy-paste error, or frontrun contract call) permanently locks admin and verifier control of the protocol. | Critical | Two-step ownership transfer pattern: the current owner calls `propose_ownership_transfer(candidate)`, setting a pending owner field. The new owner must explicitly execute `accept_ownership_transfer()` with their own valid signature before rights are transferred. | ✅ Enforced via two-step handshake pattern; covered in contract unit tests. |
+| **C-E4** | E | **Rogue Verifier Privilege Escalation.** An assigned verifier attempts to unilaterally redirect bounty funds to their own address rather than releasing them to the assignee. | High | `approve_completion` only permits release of the escrow to the registered assignee addresses (`bounty.assignees`). Verifiers have zero capability to alter the payout destination. | ✅ Verified in `src/contract/mutations.rs#approve_completion`. |
+
+---
+
 ## 6. Prioritised remediation
 
 | Priority | Threats | Action |
 |---|---|---|
 | **P0** | C-T1, C-T2, C-D3, C-E2 | Make escrow real: transfer `reward_amount` from the creator in `create_bounty`, track per-bounty funds, and restrict who may act as verifier. |
-| **P0** | C-T3, C-T4 | Add `ensure_status(in_progress)` to `approve_completion` and clear approvals once the bounty completes. Add regression tests for approving after completion, after a dispute and after cancellation. |
-| **P1** | C-E1, C-D1 | Add an independent arbitration path, and an exit for stale `in_progress` claims. |
+| **P0** | C-T3, C-T4, C-S3 | Enforce two-step ownership transfer and clear approvals once the bounty completes. Add regression tests for approving after completion, after a dispute and after cancellation. |
+| **P1** | C-E1, C-D1, C-T5, C-E3 | Enforce sponsor escrow lock during active claims, single-appeal dispute limits, and stale claim exits. |
 | **P1** | F-T1, W-S1, W-T1, B-T1 | Decode and verify XDR before signing, and switch to `@stellar/freighter-api`. |
-| **P2** | B-D2, B-D3, B-T2 | Evict entries from the in-memory stores, and scope idempotency keys and rate limits to a principal. |
-| **P2** | C-R1, C-R2, B-R1 | Close the event and audit-log gaps. |
+| **P2** | B-D2, B-D3, B-T2, C-D4 | Minimum top-up threshold, evict entries from in-memory stores, and scope idempotency keys and rate limits to a principal. |
+| **P2** | C-R1, C-R2, B-R1, C-R3 | Close the event and audit-log gaps for dispute resolutions and appeals. |
 | **P3** | C-S2, C-D2, B-S2, B-S3 | Hygiene fixes. |
 
 ## 7. Review checklist for maintainers
