@@ -3,14 +3,29 @@ import { ReputationPoint } from '../types';
 
 interface ProfileHistoryProps {
   history: ReputationPoint[];
+  /** Cursor for the next page of history, or null/undefined when the list is exhausted. */
+  nextCursor?: string | null;
+  /** Whether a next page is currently being fetched. */
+  isLoadingMore?: boolean;
+  /** Called with the current cursor to fetch the next page. */
+  onLoadMore?: (cursor: string) => void;
 }
 
 /**
  * Renders the contributor's reputation history as a table.
  * When there are no entries, a friendly empty state is shown.
  * Part of the redesigned contributor profile (#896).
+ *
+ * History is paginated newest-first by the contract; the parent passes the
+ * cursor for the next page and this component renders a load-more control
+ * plus an end-of-list state once no further pages remain (#1073).
  */
-export function ProfileHistory({ history }: ProfileHistoryProps) {
+export function ProfileHistory({
+  history,
+  nextCursor,
+  isLoadingMore = false,
+  onLoadMore,
+}: ProfileHistoryProps) {
   if (history.length === 0) {
     return (
       <section className="profile-history" aria-label="Reputation history">
@@ -22,6 +37,9 @@ export function ProfileHistory({ history }: ProfileHistoryProps) {
 
   // Display newest entries first.
   const sorted = [...history].reverse();
+
+  const hasMore = Boolean(nextCursor);
+  const canLoadMore = hasMore && typeof onLoadMore === 'function';
 
   return (
     <section className="profile-history" aria-label="Reputation history">
@@ -47,6 +65,24 @@ export function ProfileHistory({ history }: ProfileHistoryProps) {
           ))}
         </tbody>
       </table>
+
+      <div className="profile-history__footer">
+        {canLoadMore ? (
+          <button
+            type="button"
+            className="profile-history__load-more"
+            onClick={() => onLoadMore!(nextCursor as string)}
+            disabled={isLoadingMore}
+            aria-busy={isLoadingMore}
+          >
+            {isLoadingMore ? 'Loading…' : 'Load more'}
+          </button>
+        ) : (
+          <p className="profile-history__end" role="status">
+            End of history
+          </p>
+        )}
+      </div>
     </section>
   );
 }

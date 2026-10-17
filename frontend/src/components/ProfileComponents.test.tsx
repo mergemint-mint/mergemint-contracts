@@ -118,4 +118,41 @@ describe('ProfileHistory', () => {
     );
     expect(markup).toContain('<table');
   });
+
+  it('renders a load-more button when a next cursor is available', () => {
+    const markup = renderToStaticMarkup(
+      <ProfileHistory
+        history={CONTRIBUTOR.reputationHistory}
+        nextCursor="cursor-page-2"
+        onLoadMore={() => {}}
+      />,
+    );
+    expect(markup).toContain('Load more');
+  });
+
+  it('does not render a load-more button when there is no next cursor', () => {
+    const markup = renderToStaticMarkup(
+      <ProfileHistory history={CONTRIBUTOR.reputationHistory} />,
+    );
+    expect(markup).not.toContain('Load more');
+  });
+
+  it('shows an end-of-list state when all pages are loaded', () => {
+    const markup = renderToStaticMarkup(
+      <ProfileHistory history={CONTRIBUTOR.reputationHistory} />,
+    );
+    expect(markup).toContain('End of history');
+  });
+
+  it('shows a loading label while the next page is being fetched', () => {
+    const markup = renderToStaticMarkup(
+      <ProfileHistory
+        history={CONTRIBUTOR.reputationHistory}
+        nextCursor="cursor-page-2"
+        onLoadMore={() => {}}
+        isLoadingMore={true}
+      />,
+    );
+    expect(markup).toContain('Loading');
+  });
 });

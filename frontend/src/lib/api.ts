@@ -33,6 +33,32 @@ export type ListBountiesParams = {
   limit?: number;
 };
 
+// Platform-wide stats returned by GET /api/v1/stats. (#1072)
+export type TokenTotal = {
+  tokenAddress: string;
+  symbol: string;
+  total: string;
+};
+
+export type RecentPayout = {
+  id: string;
+  bountyId: string;
+  title: string;
+  recipient: string;
+  amount: string;
+  tokenSymbol: string;
+  paidAt: string;
+};
+
+export type PlatformStats = {
+  totalBounties: number;
+  openBounties: number;
+  completedBounties: number;
+  totalContributors: number;
+  totalsByToken: TokenTotal[];
+  recentPayouts: RecentPayout[];
+};
+
 function toQuery(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -90,6 +116,12 @@ export const api = {
     return request('/contributors/leaderboard');
   },
   /**
+   * Fetch platform-wide activity stats for the public /stats page. (#1072)
+   */
+  getStats(): Promise<PlatformStats> {
+    return request('/stats');
+  },
+  /**
    * Fetch the reward-token allowlist maintained by the backend.
    * Returns only tokens that the contract will accept as reward tokens.
    */
@@ -139,4 +171,3 @@ export const api = {
     });
   },
 };
-
