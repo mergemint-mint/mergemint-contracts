@@ -1,5 +1,6 @@
 import { shortenAddress } from "../utils/format";
 import { CopyButton } from "./CopyButton";
+import { useTranslation } from "../i18n";
 
 interface WalletConnectButtonProps {
   address: string | null;
@@ -7,10 +8,12 @@ interface WalletConnectButtonProps {
 }
 
 export function WalletConnectButton({ address, onConnect }: WalletConnectButtonProps) {
+  const { t } = useTranslation();
+
   if (!address) {
     return (
       <button className="wallet-connect" onClick={onConnect}>
-        Connect wallet
+        {t("connect_wallet")}
       </button>
     );
   }

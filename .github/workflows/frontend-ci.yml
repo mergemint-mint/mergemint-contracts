@@ -68,7 +68,7 @@ jobs:
         run: npm install --ignore-scripts
 
       - name: Run ESLint
-        run: npx eslint src --ext .ts,.tsx
+        run: npx eslint src
         continue-on-error: true
 
   test:
@@ -97,6 +97,9 @@ jobs:
 
       - name: Run unit tests
         run: npx vitest run
+
+      - name: Check i18n key completeness
+        run: npx vitest run src/i18n/i18n-completeness.test.ts
 
   build:
     name: Build

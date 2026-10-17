@@ -1,4 +1,4 @@
-import React, { Suspense, useEffect, lazy } from 'react';
+import React, { useEffect } from 'react';
 import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router-dom';
 import { WalletProvider, useWallet } from './lib/WalletContext';
 import { WalletConnectButton } from './components/WalletConnectButton';
@@ -24,10 +24,10 @@ function Nav() {
 
   return (
     <nav>
-      <Link to="/">Bounties</Link>
-      <Link to="/create">Create Bounty</Link>
-      <Link to="/leaderboard">Leaderboard</Link>
-      <Link to="/create" role="button">Create Bounty</Link>
+      <Link to="/">{t('nav_bounties')}</Link>
+      <Link to="/create">{t('nav_create_bounty')}</Link>
+      <Link to="/leaderboard">{t('nav_leaderboard')}</Link>
+      <Link to="/create" role="button">{t('nav_create_bounty')}</Link>
       <WalletConnectButton address={address} onConnect={connect} />
     </nav>
   );

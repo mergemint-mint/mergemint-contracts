@@ -2,6 +2,7 @@ const en = {
   // Nav
   nav_bounties: 'Bounties',
   nav_create_bounty: 'Create Bounty',
+  nav_leaderboard: 'Leaderboard',
 
   // BountyList
   filter_all: 'All',
@@ -28,6 +29,7 @@ const en = {
   create_bounty: 'Create Bounty',
 
   // ContributorProfile
+  connect_wallet: 'Connect wallet',
   connect_wallet_prompt: 'Connect your wallet to view contributor profiles.',
   reputation: 'Reputation',
   completed_bounties: 'Completed bounties',

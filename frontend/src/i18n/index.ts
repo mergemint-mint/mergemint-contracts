@@ -1,4 +1,5 @@
 import en, { TranslationKey } from './en';
+import es from './es';
 
 type Translations = typeof en;
 
@@ -25,5 +26,5 @@ export function setLocale(next: Translations): void {
   locale = next;
 }
 
-export { en };
+export { en, es };
 export type { TranslationKey };
