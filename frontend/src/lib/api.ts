@@ -33,6 +33,28 @@ export type ListBountiesParams = {
   limit?: number;
 };
 
+// A single indexed bounty event used to build the activity timeline. (#1060)
+export type BountyEventType =
+  | 'created'
+  | 'claimed'
+  | 'submitted'
+  | 'disputed'
+  | 'payout'
+  | 'cancelled'
+  | 'deadline_extended';
+
+export type BountyEvent = {
+  id: string;
+  bountyId: string;
+  type: BountyEventType;
+  actor?: string;
+  amount?: string;
+  /** Unix timestamp in seconds. */
+  timestamp: number;
+  /** On-chain transaction hash, used to link to the block explorer. */
+  txHash?: string;
+};
+
 function toQuery(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -64,6 +86,25 @@ export const api = {
       try {
         const data = JSON.parse(e.data) as { bountyId: string };
         onUpdate(data.bountyId);
+      } catch {
+        // malformed event — ignore
+      }
+    });
+    return es;
+  },
+  // Fetch the indexed event history for a bounty, ordered chronologically. (#1060)
+  getBountyEvents(id: string): Promise<BountyEvent[]> {
+    return request(`/bounties/${id}/events`);
+  },
+  // Subscribe to live bounty events via SSE so the timeline can append new
+  // entries as claims, submissions, disputes and payouts are indexed. (#1060)
+  // Usage: const es = api.streamBountyEvents(id, onEvent);  // es.close() to unsubscribe
+  streamBountyEvents(bountyId: string, onEvent: (event: BountyEvent) => void): EventSource {
+    const es = new EventSource(`${API_BASE}/bounties/${bountyId}/events/stream`);
+    es.addEventListener('bounty_event', (e) => {
+      try {
+        const data = JSON.parse(e.data) as BountyEvent;
+        onEvent(data);
       } catch {
         // malformed event — ignore
       }
@@ -139,4 +180,3 @@ export const api = {
     });
   },
 };
-

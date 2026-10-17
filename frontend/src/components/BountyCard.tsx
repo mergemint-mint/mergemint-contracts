@@ -4,6 +4,7 @@ import { useTranslation } from "../i18n";
 import { formatRelative, isDeadlineUrgent, shortenAddress } from "../utils/format";
 import { CopyButton } from "./CopyButton";
 import { BountyCardSkeleton } from "./BountyCardSkeleton";
+import { ReputationBadge } from "./ReputationBadge";
 
 interface BountyCardProps {
   bounty?: Bounty | ApiBounty;
@@ -27,6 +28,8 @@ export function BountyCard({ bounty, loading, highlighted }: BountyCardProps) {
   const relativeDeadline = formatRelative(deadline);
   const exactDeadline = deadline != null ? new Date(deadline * 1000).toLocaleString() : null;
 
+  const creatorReputation = "creatorReputation" in bounty ? bounty.creatorReputation : undefined;
+
   return (
     <div className={className}>
       <span className="bounty-card__id" title={bounty.id}>
@@ -36,6 +39,9 @@ export function BountyCard({ bounty, loading, highlighted }: BountyCardProps) {
       <span className="bounty-card__creator" title={bounty.creator}>
         {shortenAddress(bounty.creator)}
         <CopyButton value={bounty.creator} />
+        {typeof creatorReputation === "number" && (
+          <ReputationBadge score={creatorReputation} className="bounty-card__reputation" />
+        )}
       </span>
       <span className="bounty-card__reward">
         {'rewardAmount' in bounty
