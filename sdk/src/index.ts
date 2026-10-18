@@ -305,7 +305,7 @@ export class MergeMintSDK {
    * RPC transport fails on every attempt allowed by the configured retry policy.
    */
   async getBountyMeta(bountyId: string): Promise<BountyMeta | null> {
-    const result = await this.simulateReadCall("get_bounty_meta", [
+    const result = await this.simulateRead("get_bounty_meta", [
       hexToBytesN(bountyId),
     ]);
     if (!result) return null;
@@ -321,6 +321,24 @@ export class MergeMintSDK {
    * is unreachable, the simulation errors, or the address has no record.
    * @throws {@link MergeMintSdkError} if `address` is not a valid Stellar address,
    * or if the RPC transport fails on every attempt allowed by the configured retry
+   * policy.
+   */
+  async getContributor(address: string): Promise<Contributor | null> {
+    const result = await this.simulateRead("get_contributor", [addressToScVal(address)]);
+    if (!result) return null;
+    return parseContributor(scValToNative(result));
+  }
+
+  /**
+   * Reads a page of bounty ids created by `creator`, in creation order.
+   *
+   * @param creator - Stellar account address (`G...`) or contract address (`C...`).
+   * @param offset - Zero-based offset of the first id to return (default: 0).
+   * @param limit - Maximum ids to return, in `[1, 50]` (default: 50).
+   * @returns Bounty ids as hex-encoded strings; an empty array when the contract
+   * account is unreachable, the simulation errors, or the creator has none.
+   * @throws {@link MergeMintSdkError} if `offset` or `limit` is out of range, or
+   * if the RPC transport fails on every attempt allowed by the configured retry
    * policy.
    */
   async getBountiesByCreator(
@@ -340,13 +358,16 @@ export class MergeMintSDK {
         "INVALID_ARGUMENT"
       );
     }
+    // The contract takes `cursor: Option<u32>` (an offset; a plain u32 encodes
+    // `Some`) and returns `(Vec<BountyId>, Option<u32>)`.
     const result = await this.simulateRead("get_bounties_by_creator", [
       addressToScVal(creator),
       u32ToScVal(offset),
       u32ToScVal(limit),
     ]);
-    if (!result) return null;
-    return parseContributor(scValToNative(result));
+    if (!result) return [];
+    const [ids] = scValToNative(result) as [Buffer[], number | undefined];
+    return ids.map((b) => Buffer.from(b).toString("hex"));
   }
 
   /**
@@ -365,7 +386,7 @@ export class MergeMintSDK {
     offset = 0,
     limit = 50,
   ): Promise<string[]> {
-    const result = await this.simulateReadCall(
+    const result = await this.simulateRead(
       "get_contributor_bounty_history",
       [addressToScVal(address), u32ToScVal(offset), u32ToScVal(limit)],
     );
@@ -383,7 +404,7 @@ export class MergeMintSDK {
    * allowed by the configured retry policy.
    */
   async getBountyCount(): Promise<bigint> {
-    const result = await this.simulateReadCall("get_bounty_count", []);
+    const result = await this.simulateRead("get_bounty_count", []);
     if (!result) return 0n;
     return BigInt(scValToNative(result) as string | number | bigint);
   }
@@ -397,7 +418,7 @@ export class MergeMintSDK {
    * allowed by the configured retry policy.
    */
   async getOpenBounties(): Promise<string[]> {
-    const result = await this.simulateReadCall("get_open_bounties", []);
+    const result = await this.simulateRead("get_open_bounties", []);
     if (!result) return [];
     const ids = scValToNative(result) as Buffer[];
     return ids.map((b) => Buffer.from(b).toString("hex"));
@@ -761,14 +782,19 @@ export class MergeMintSDK {
 
   // === Internal helpers
 
-  private async simulateRead(method: string, args: xdr.ScVal[]): Promise<unknown> {
-    const operation = this.contract.call(method, ...args);
-    const account = await this.rpc.getAccount(this.contractId);
+  private async simulateRead(method: string, args: xdr.ScVal[]): Promise<xdr.ScVal | null> {
+    // An unreachable contract account is reported as "no result" (null)
+    // rather than an error, once the retry policy is exhausted.
+    const account = await this.withRetry(() =>
+      this.rpc.getAccount(this.contractId)
+    ).catch(() => null);
+    if (!account) return null;
+
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase: this.networkPassphrase,
     })
-      .addOperation(operation)
+      .addOperation(this.contract.call(method, ...args))
       .setTimeout(30)
       .build();
 
@@ -780,6 +806,17 @@ export class MergeMintSDK {
     return result?.retval ?? null;
   }
 
+  private async buildTransaction(
+    method: string,
+    args: xdr.ScVal[],
+    sourceAccount: string
+  ): Promise<string>;
+  private async buildTransaction(
+    method: string,
+    args: xdr.ScVal[],
+    sourceAccount: string,
+    options?: MutationOptions
+  ): Promise<string | SimulateResult>;
   private async buildTransaction(
     method: string,
     args: xdr.ScVal[],
@@ -805,17 +842,18 @@ export class MergeMintSDK {
     const simResponse = sim as SorobanRpc.Api.SimulateTransactionSuccessResponse;
 
     if (options?.simulate) {
-      const resourceFee = BigInt(simResponse.resultMetaXdr ?
-        SorobanRpc.parseRawSimulation(simResponse).result?.v3?.resourceFee ?? 0 : 0);
-      const footprint = simResponse.resultMetaXdr ?
-        (SorobanRpc.parseRawSimulation(simResponse).result?.v3?.ext?.sorobanResources?.footprint ?? {}) : {};
-
+      const resources = simResponse.transactionData.build().resources();
+      const footprint = resources.footprint();
       return {
-        resourceFee,
+        resourceFee: BigInt(simResponse.minResourceFee),
         footprint: {
-          cpu: footprint.readOnly?.length ? BigInt(footprint.readOnly.length) : 0n,
-          mem: footprint.readWrite?.length ? BigInt(footprint.readWrite.length) : 0n,
-          ops: footprint,
+          readOnly: footprint.readOnly().map((k) => k.toXDR("base64")),
+          readWrite: footprint.readWrite().map((k) => k.toXDR("base64")),
+        },
+        resources: {
+          instructions: resources.instructions(),
+          readBytes: resources.readBytes(),
+          writeBytes: resources.writeBytes(),
         },
       };
     }

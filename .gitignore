@@ -31,9 +31,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Test snapshots (Jest / Vitest) — auto-generated, should not be committed
-*.snap
-**/__snapshots__/
+# Test snapshots (Jest / Vitest) are committed: `toMatchSnapshot()` fails in
+# CI when the stored snapshot is missing, so they must live in the repo.
 
 # Vitest cache and temp files
 .vitest-cache/

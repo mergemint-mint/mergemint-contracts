@@ -74,10 +74,11 @@ use std::time::Duration;
 
 use axum::{
     extract::State,
-    http::{header::CONTENT_TYPE, HeaderValue, Method, StatusCode},
-    response::IntoResponse,
+    http::{header::CONTENT_TYPE, HeaderName, HeaderValue, Method, StatusCode},
+    middleware,
+    response::{Html, IntoResponse},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -86,10 +87,8 @@ use tower_http::{
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
-use tracing::Level;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 mod db;
 mod metrics;
@@ -97,11 +96,15 @@ mod rate_limit;
 mod routes;
 mod webhooks;
 
-use db::{new_shared_db, new_shared_idempotency_store, ping, SharedDb};
-use metrics::{metrics_handler, record_request};
-use routes::bounties::{get_bounty_route, bounty_stream, claim_bounty, list_bounties, list_bounties_by_assignee};
+use db::{new_shared_db, new_shared_idempotency_store};
+use metrics::{metrics_router, track_metrics, Metrics};
+use routes::bounties::{
+    bounty_stream, claim_bounty, get_bounty_route, list_bounties, list_bounties_by_assignee,
+};
 use routes::leaderboard::get_leaderboard_route;
-use routes::tx::{new_shared_rate_limiter, resolve_dispute, self_claim, AppState};
+use routes::tx::{
+    new_shared_rate_limiter, query_audit_logs, resolve_dispute, self_claim, AppState,
+};
 use webhooks::{
     create_subscription_route, delete_subscription_route, get_subscription_route,
     list_subscriptions_route, start_webhook_dispatcher, RetryConfig,
@@ -132,6 +135,36 @@ const ALLOWLISTED_REWARD_TOKENS_ENV: &str = "ALLOWLISTED_REWARD_TOKENS";
 /// cross-origin requests, e.g.
 /// "https://app.mergemint.xyz,https://staging.mergemint.xyz".
 const CORS_ALLOWED_ORIGINS_ENV: &str = "CORS_ALLOWED_ORIGINS";
+
+/// Env var selecting the log output format; `json` enables structured logs.
+const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
+
+/// OpenAPI description of the bounty read API (#865), served at
+/// `/api-docs/openapi.json` and rendered by the Swagger UI page (#866).
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "MergeMint backend API"),
+    paths(
+        routes::bounties::list_bounties,
+        routes::bounties::list_bounties_by_assignee,
+        routes::bounties::get_bounty_route,
+        routes::bounties::claim_bounty,
+        routes::bounties::bounty_stream,
+    ),
+    components(schemas(
+        db::Bounty,
+        db::BountyPage,
+        db::BountySortField,
+        db::SortOrder,
+        routes::bounties::ClaimResponse,
+        routes::tx::AppError,
+    )),
+    tags((name = "bounties", description = "Bounty listing and live updates"))
+)]
+struct ApiDoc;
+
+/// Swagger UI version loaded from the CDN by `swagger_ui`.
+const SWAGGER_UI_VERSION: &str = "5.17.14";
 
 /// SSE keep-alive interval (seconds) to prevent idle connections from being
 /// closed by proxies and load balancers. Defaults to 15 seconds.
@@ -189,6 +222,7 @@ async fn main() {
         rate_limiter: new_shared_rate_limiter(),
         bounty_broadcast,
         leaderboard_cache: routes::leaderboard::new_leaderboard_cache(),
+        sse_keep_alive_duration,
     });
 
     let webhook_client = reqwest::Client::builder()
@@ -198,8 +232,12 @@ async fn main() {
     let _webhook_dispatcher =
         start_webhook_dispatcher(state.clone(), webhook_client, RetryConfig::default());
 
+    let metrics = Arc::new(Metrics::new());
+
     let app = Router::new()
         .route("/health", get(health))
+        .route("/api-docs/openapi.json", get(openapi_json))
+        .route("/swagger-ui", get(swagger_ui))
         .route("/ready", get(ready))
         .route("/tx/resolve-dispute", post(resolve_dispute))
         .route("/tx/self-claim", post(self_claim))
@@ -223,17 +261,18 @@ async fn main() {
             get(get_subscription_route).delete(delete_subscription_route),
         )
         .with_state(state)
+        .merge(metrics_router(metrics.clone()))
         // ── Prometheus metrics middleware (#867) ───────────────────────────
         //
         // Records a per-route request counter and latency histogram, labelled
         // by the matched route and response status.
-        .layer(middleware::from_fn(record_request))
+        .layer(middleware::from_fn_with_state(metrics, track_metrics))
         // ── Request correlation IDs (#486) ─────────────────────────────────
-        .layer(PropagateRequestIdLayer::new(
-            HeaderValue::from_static(REQUEST_ID_HEADER),
-        ))
+        .layer(PropagateRequestIdLayer::new(HeaderName::from_static(
+            REQUEST_ID_HEADER,
+        )))
         .layer(SetRequestIdLayer::new(
-            HeaderValue::from_static(REQUEST_ID_HEADER),
+            HeaderName::from_static(REQUEST_ID_HEADER),
             MakeRequestUuid,
         ))
         // ── Tracing ────────────────────────────────────────────────────────
@@ -287,6 +326,31 @@ fn read_sse_keep_alive_duration() -> Duration {
     }
 }
 
+/// `GET /api-docs/openapi.json` — the generated OpenAPI document.
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
+/// `GET /swagger-ui` — interactive API docs rendering `/api-docs/openapi.json`.
+async fn swagger_ui() -> Html<String> {
+    Html(format!(
+        r##"<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MergeMint API</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@{v}/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@{v}/swagger-ui-bundle.js"></script>
+  <script>SwaggerUIBundle({{ url: "/api-docs/openapi.json", dom_id: "#swagger-ui" }});</script>
+</body>
+</html>"##,
+        v = SWAGGER_UI_VERSION
+    ))
+}
+
 /// Liveness probe used by container healthchecks.
 ///
 /// Keeps checks lightweight and cheap; does not touch the database (#870).
@@ -305,17 +369,6 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
     }
 }
-
-/// Issue `GET /health` against `addr` and succeed only on an HTTP 200.
-///
-/// Deliberately dependency-free (plain `std` TCP) so it works inside the
-/// distroless runtime image without pulling an HTTP client into the binary.
-fn healthcheck(addr: &str) -> std::io::Result<()> {
-    let timeout = Some(Duration::from_secs(3));
-    let mut stream = TcpStream::connect(addr)?;
-    stream.set_read_timeout(timeout)?;
-    stream.set_write_timeout(timeout)?;
-    stream.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
 
 /// Build the CORS layer from `CORS_ALLOWED_ORIGINS`.
 fn cors_layer() -> CorsLayer {
@@ -392,11 +445,18 @@ fn healthcheck(addr: &str) -> std::io::Result<()> {
     if response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200") {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("unexpected health response: {}", response.lines().next().unwrap_or("")),
-        ))
+        Err(std::io::Error::other(format!(
+            "unexpected health response: {}",
+            response.lines().next().unwrap_or("")
+        )))
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
 
     #[tokio::test]
     async fn ready_returns_200_when_db_is_healthy() {
@@ -408,6 +468,8 @@ fn healthcheck(addr: &str) -> std::io::Result<()> {
             idempotency,
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast,
+            leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
         });
 
         let app = axum::Router::new()
@@ -443,6 +505,8 @@ fn healthcheck(addr: &str) -> std::io::Result<()> {
             idempotency,
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast,
+            leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
         });
 
         let app = axum::Router::new()
@@ -467,6 +531,21 @@ fn healthcheck(addr: &str) -> std::io::Result<()> {
             .await
             .unwrap();
         assert_eq!(&body[..], b"database unavailable");
+    }
+
+    #[tokio::test]
+    async fn openapi_document_lists_bounty_routes() {
+        let Json(doc) = openapi_json().await;
+        for path in [
+            "/bounties",
+            "/bounties/{id}",
+            "/bounties/assignee/{address}",
+        ] {
+            assert!(doc.paths.paths.contains_key(path), "missing {path}");
+        }
+        let schemas = doc.components.expect("components").schemas;
+        assert!(schemas.contains_key("Bounty"));
+        assert!(schemas.contains_key("AppError"));
     }
 
     #[tokio::test]

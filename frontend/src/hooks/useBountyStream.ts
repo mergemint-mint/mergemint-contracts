@@ -211,6 +211,10 @@ export function useBountyStream(
         eventSourceRef.current = null;
       }
 
+      // Environments without EventSource (older browsers, jsdom) simply get
+      // no live updates; the list still works via regular fetching.
+      if (!eventSourceFactory && typeof EventSource === 'undefined') return;
+
       const es = eventSourceFactory ? eventSourceFactory(url) : new EventSource(url);
       eventSourceRef.current = es;
 

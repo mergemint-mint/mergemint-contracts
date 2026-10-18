@@ -3,12 +3,22 @@ import { useSearchParams } from 'react-router-dom';
 import { api, BountySortField, ListBountiesParams, SortOrder } from '../lib/api';
 import { Bounty, BountyStatus } from '../types';
 import { BountyCard } from '../components/BountyCard';
-import { BountyCardSkeleton } from '../components/BountyCardSkeleton';
+import { BountyFilters } from '../components/BountyFilters';
 import { useWallet } from '../lib/WalletContext';
 import { mapErrorMessage } from '../utils/format';
 import { useBountyStream } from '../hooks/useBountyStream';
+import { useTranslation } from '../i18n';
 
 type OwnershipFilter = 'all' | 'created' | 'assigned';
+
+const STATUSES: readonly BountyStatus[] = ['open', 'claimed', 'disputed', 'completed', 'cancelled'];
+const SORT_FIELDS: readonly BountySortField[] = ['created', 'reward', 'deadline'];
+const SORT_ORDERS: readonly SortOrder[] = ['asc', 'desc'];
+
+/** Return `value` if it is one of `allowed`, otherwise `fallback`. */
+function pick<T extends string>(value: string | null, allowed: readonly T[], fallback: T): T {
+  return value !== null && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
+}
 
 /**
  * Page component displaying filtered bounty cards with pagination, status filters,
@@ -19,7 +29,12 @@ type OwnershipFilter = 'all' | 'created' | 'assigned';
 export function BountyList() {
   const { address } = useWallet();
   const { t } = useTranslation();
-  const [status, setStatus] = useState<BountyStatus | 'all'>('all');
+  // Filter and sort state lives in the URL so it survives reloads and can be shared.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const status = pick<BountyStatus | 'all'>(searchParams.get('status'), STATUSES, 'all');
+  const tag = searchParams.get('tag') ?? '';
+  const sort = pick(searchParams.get('sort'), SORT_FIELDS, 'created');
+  const order = pick(searchParams.get('order'), SORT_ORDERS, 'desc');
   const [ownership, setOwnership] = useState<OwnershipFilter>('all');
   const [bounties, setBounties] = useState<Bounty[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);

@@ -134,3 +134,10 @@ Every host port and credential can be overridden through environment variables o
 If you change `BACKEND_PORT` or `FRONTEND_PORT`, update `VITE_API_BASE_URL` or `CORS_ALLOWED_ORIGINS` to match.
 
 A `Makefile` is also provided with convenience targets — run `make help` (or just `make`) to see available commands.
+
+---
+
+## Troubleshooting
+
+If you encounter issues with account funding, network passphrases, contract TTL expiry, or parameter syntax, see the [Stellar CLI Troubleshooting Guide](troubleshooting.md).
+

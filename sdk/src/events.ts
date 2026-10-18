@@ -345,11 +345,12 @@ export function onEvent<T = AnyContractEventData>(
       for (const rawEvent of response.events) {
         if (rawEvent.type !== "contract") continue;
 
-        const topics = rawEvent.topic as string[] | undefined;
+        // The RPC client returns decoded ScVals; the decoders take base64 XDR.
+        const topics = rawEvent.topic?.map((t) => t.toXDR("base64"));
         const type = decodeEventType(topics);
         if (type !== eventType) continue;
 
-        const data = decodeEventData(type, rawEvent.value as string | undefined) as unknown as T;
+        const data = decodeEventData(type, rawEvent.value?.toXDR("base64")) as unknown as T;
         const topic = decodeSecondTopic(topics);
 
         const event: ContractEvent<T> = {

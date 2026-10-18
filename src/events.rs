@@ -45,6 +45,17 @@ pub fn emit_bounty_expired(env: &Env, bounty_id: &BountyId, creator: &Address) {
         .publish((topic, creator.clone()), bounty_id.clone());
 }
 
+pub fn emit_deadline_extended(
+    env: &Env,
+    bounty_id: &BountyId,
+    creator: &Address,
+    new_deadline: u32,
+) {
+    let topic = Symbol::new(env, "deadline_extended");
+    env.events()
+        .publish((topic, creator.clone()), (bounty_id.clone(), new_deadline));
+}
+
 pub fn emit_bounty_topped_up(
     env: &Env,
     bounty_id: &BountyId,

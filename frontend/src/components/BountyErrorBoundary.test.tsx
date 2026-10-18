@@ -55,15 +55,17 @@ describe('BountyErrorBoundary', () => {
     // Fallback is visible.
     expect(screen.getByRole('alert')).toBeTruthy();
 
-    // Click Retry — the boundary resets.
-    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
-
-    // Re-render with a non-throwing child to confirm children are shown again.
+    // The underlying problem is fixed (child no longer throws), but the
+    // boundary keeps showing the fallback until the user retries.
     rerender(
       <BountyErrorBoundary>
         <Bomb shouldThrow={false} />
       </BountyErrorBoundary>
     );
+    expect(screen.getByRole('alert')).toBeTruthy();
+
+    // Click Retry — the boundary resets and renders its children again.
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
 
     expect(screen.getByText('Loaded')).toBeTruthy();
   });

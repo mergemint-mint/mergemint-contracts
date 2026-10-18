@@ -54,6 +54,73 @@ pub struct DbStore {
     pub bounties: Vec<Bounty>,
     /// Audit log entries tracking administrative actions like resolve_dispute.
     pub audit_logs: Vec<AuditLog>,
+    /// Registered webhook subscriptions (see `webhooks.rs`).
+    pub webhook_subscriptions: Vec<WebhookSubscription>,
+    /// Set by `close_db` to simulate a lost connection pool; `ping_db` (and
+    /// therefore `/ready`) reports the store as unavailable while it is set.
+    pub is_closed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Webhook subscriptions
+// ---------------------------------------------------------------------------
+
+/// A registered webhook endpoint that receives signed bounty event payloads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebhookSubscription {
+    pub id: String,
+    pub url: String,
+    /// HMAC-SHA256 signing secret. Never returned to API clients.
+    #[serde(skip_serializing, default)]
+    pub secret: String,
+    /// Event names this subscription receives; `"*"` or an empty list means all.
+    pub event_types: Vec<String>,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Register a new, active webhook subscription and return it.
+pub fn add_webhook_subscription(
+    db: &SharedDb,
+    id: String,
+    url: String,
+    secret: String,
+    event_types: Vec<String>,
+) -> WebhookSubscription {
+    let subscription = WebhookSubscription {
+        id,
+        url,
+        secret,
+        event_types,
+        active: true,
+        created_at: Utc::now(),
+    };
+    acquire_db(db)
+        .webhook_subscriptions
+        .push(subscription.clone());
+    subscription
+}
+
+/// Return every registered webhook subscription, oldest first.
+pub fn list_webhook_subscriptions(db: &SharedDb) -> Vec<WebhookSubscription> {
+    read_db(db).webhook_subscriptions.clone()
+}
+
+/// Look up a webhook subscription by id.
+pub fn get_webhook_subscription(db: &SharedDb, id: &str) -> Option<WebhookSubscription> {
+    read_db(db)
+        .webhook_subscriptions
+        .iter()
+        .find(|s| s.id == id)
+        .cloned()
+}
+
+/// Remove a webhook subscription by id. Returns `true` if one was removed.
+pub fn delete_webhook_subscription(db: &SharedDb, id: &str) -> bool {
+    let mut guard = acquire_db(db);
+    let before = guard.webhook_subscriptions.len();
+    guard.webhook_subscriptions.retain(|s| s.id != id);
+    guard.webhook_subscriptions.len() != before
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +160,7 @@ impl AuditLog {
 /// `list_bounties_by_assignee`). Distinct from `routes::tx::Bounty`, which
 /// models only the fields needed to build payout XDR for the dispute /
 /// self-claim flows.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Bounty {
     pub id: String,
     pub creator: String,
@@ -104,13 +171,38 @@ pub struct Bounty {
     /// Optional expiry, mirrored from the contract's `Bounty::deadline`. `None`
     /// means the bounty never expires.
     pub deadline: Option<DateTime<Utc>>,
+    /// Lifecycle status (`open`, `claimed`, `completed`, `cancelled`).
+    #[serde(default = "default_bounty_status")]
+    pub status: String,
+    /// Tags attached to the bounty, used by the `tag` listing filter.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+fn default_bounty_status() -> String {
+    "open".to_string()
+}
+
+impl Default for Bounty {
+    fn default() -> Self {
+        Bounty {
+            id: String::new(),
+            creator: String::new(),
+            assignee: None,
+            created_at: DateTime::<Utc>::default(),
+            reward: 0,
+            deadline: None,
+            status: default_bounty_status(),
+            tags: Vec::new(),
+        }
+    }
 }
 
 /// Columns a bounty listing may be sorted by. Deserialization is restricted to
 /// this whitelist (`#[serde(rename_all = "lowercase")]`), so an unknown
 /// `sort=` value is rejected by the query extractor and can never reach the
 /// query layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BountySortField {
     #[default]
@@ -121,7 +213,7 @@ pub enum BountySortField {
 
 /// Direction applied to the selected [`BountySortField`]. Whitelisted the same
 /// way, so only `asc` / `desc` are ever accepted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
     Asc,
@@ -130,24 +222,28 @@ pub enum SortOrder {
 }
 
 /// One page of a cursor-paginated bounty listing.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BountyPage {
     pub bounties: Vec<Bounty>,
     pub next_cursor: Option<String>,
 }
 
-/// List bounties created by `creator`, ordered by `sort` / `order` (newest
+/// List bounties created by `creator`, optionally filtered by `status` and
+/// `tag`, ordered by `sort` / `order` (newest
 /// first by default), paginated by `cursor`. An empty `creator` matches every
 /// bounty — used by the unfiltered `GET /bounties` listing.
 ///
 /// `limit` is trusted to already be clamped by the caller (see the
 /// max-limit clamp in `routes::bounties::list_bounties`); this function
 /// does not re-validate it.
+#[allow(clippy::too_many_arguments)]
 pub fn list_bounties_by_creator(
     db: &SharedDb,
     creator: &str,
     limit: i64,
     cursor: Option<DateTime<Utc>>,
+    status: Option<&str>,
+    tag: Option<&str>,
     sort: BountySortField,
     order: SortOrder,
 ) -> BountyPage {
@@ -156,6 +252,8 @@ pub fn list_bounties_by_creator(
         .bounties
         .iter()
         .filter(|b| creator.is_empty() || b.creator == creator)
+        .filter(|b| status.is_none_or(|s| b.status == s))
+        .filter(|b| tag.is_none_or(|t| b.tags.iter().any(|bt| bt == t)))
         .filter(|b| cursor.is_none_or(|c| b.created_at < c))
         .cloned()
         .collect();
@@ -256,10 +354,10 @@ pub fn query_audit_logs(
         .filter(|log| target.is_none_or(|t| log.target == t))
         .cloned()
         .collect();
-    
+
     // Sort by timestamp descending (newest first)
     logs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    
+
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
     logs.truncate(limit);
     logs
@@ -300,6 +398,11 @@ pub fn read_db(db: &SharedDb) -> std::sync::RwLockReadGuard<'_, DbStore> {
 
 /// Ping the database connection (#870).
 ///
+/// Backs the `/ready` readiness probe: orchestrators call it before routing
+/// traffic to an instance, so a broken connection surfaces here rather than
+/// as a 500 on the first real request. Lock poison is recovered by `read_db`,
+/// so a poisoned lock still counts as reachable.
+///
 /// Returns `Ok(())` if the database is open and reachable, or `Err("database connection is closed")`
 /// if the database has been closed or disconnected.
 pub fn ping_db(db: &SharedDb) -> Result<(), &'static str> {
@@ -316,29 +419,6 @@ pub fn ping_db(db: &SharedDb) -> Result<(), &'static str> {
 pub fn close_db(db: &SharedDb) {
     let mut guard = acquire_db(db);
     guard.is_closed = true;
-}
-
-// ---------------------------------------------------------------------------
-// Readiness probe (#870)
-// ---------------------------------------------------------------------------
-
-/// Ping the database to verify it is reachable.
-///
-/// Backs the `/ready` readiness probe: orchestrators (Kubernetes, Docker
-/// Compose) call it before routing traffic to an instance, so a broken
-/// database connection must surface as a failure here rather than as a
-/// 500 on the first real request. `/health` stays a cheap liveness check
-/// and does not call this.
-///
-/// The current store is the in-memory `DbStore`; a successful read-lock
-/// acquisition is the reachability check. When the real Postgres pool
-/// lands this becomes a `SELECT 1` against it, keeping the same signature
-/// and error contract.
-pub fn ping(db: &SharedDb) -> Result<(), String> {
-    // `read_db` recovers from lock poison, so a poisoned lock still counts
-    // as reachable. A closed/failed pool would surface here as an error.
-    let _guard = read_db(db);
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -392,11 +472,6 @@ pub fn read_idempotency(
 ) -> std::sync::RwLockReadGuard<'_, IdempotencyStore> {
     store.read().unwrap_or_else(|e| e.into_inner())
 }
-/// Get a single bounty by id
-pub fn get_bounty(db: &SharedDb, id: &str) -> Option<Bounty> {
-    let guard = read_db(db);
-    guard.bounties.iter().find(|b| b.id == id).cloned()
-}
 
 /// Get a single bounty by id
 pub fn get_bounty(db: &SharedDb, id: &str) -> Option<Bounty> {
@@ -409,9 +484,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bounties_migration_indexes_assignee_and_status() {
+        assert!(BOUNTIES_INDEX_MIGRATION.contains("ON bounties (assignee)"));
+        assert!(BOUNTIES_INDEX_MIGRATION.contains("ON bounties (status)"));
+    }
+
+    #[test]
+    fn audit_logs_migration_indexes_filter_columns() {
+        for column in ["timestamp DESC", "actor", "action"] {
+            assert!(
+                AUDIT_LOGS_MIGRATION.contains(&format!("ON audit_logs ({column})")),
+                "audit_logs migration must index {column}"
+            );
+        }
+    }
+
+    #[test]
+    fn webhook_subscription_crud_round_trip() {
+        let db = new_shared_db();
+        let sub = add_webhook_subscription(
+            &db,
+            "sub-1".to_string(),
+            "https://example.com/hook".to_string(),
+            "secret".to_string(),
+            vec!["*".to_string()],
+        );
+        assert!(sub.active);
+        assert_eq!(list_webhook_subscriptions(&db).len(), 1);
+        assert_eq!(get_webhook_subscription(&db, "sub-1"), Some(sub));
+        assert!(delete_webhook_subscription(&db, "sub-1"));
+        assert!(!delete_webhook_subscription(&db, "sub-1"));
+        assert!(get_webhook_subscription(&db, "sub-1").is_none());
+    }
+
+    #[test]
     fn ping_succeeds_on_open_pool() {
         let db = new_shared_db();
-        assert!(ping(&db).is_ok());
+        assert!(ping_db(&db).is_ok());
     }
 
     #[test]
@@ -425,7 +534,7 @@ mod tests {
         })
         .join();
         // `read_db` recovers from poison, so the probe still reports ready.
-        assert!(ping(&db).is_ok());
+        assert!(ping_db(&db).is_ok());
     }
 
     #[test]
@@ -454,18 +563,21 @@ mod tests {
                 creator: "alice".to_string(),
                 assignee: Some("bob".to_string()),
                 created_at: time,
+                ..Default::default()
             });
             guard.bounties.push(Bounty {
                 id: "2".to_string(),
                 creator: "alice".to_string(),
                 assignee: Some("bob".to_string()),
                 created_at: time,
+                ..Default::default()
             });
             guard.bounties.push(Bounty {
                 id: "3".to_string(),
                 creator: "alice".to_string(),
                 assignee: Some("carol".to_string()),
                 created_at: time,
+                ..Default::default()
             });
         }
 
@@ -494,18 +606,21 @@ mod tests {
                 creator: "creator".to_string(),
                 assignee: Some("alice".to_string()),
                 created_at: time,
+                ..Default::default()
             });
             guard.bounties.push(Bounty {
                 id: "2".to_string(),
                 creator: "creator".to_string(),
                 assignee: Some("alice".to_string()),
                 created_at: time,
+                ..Default::default()
             });
             guard.bounties.push(Bounty {
                 id: "3".to_string(),
                 creator: "creator".to_string(),
                 assignee: Some("alice".to_string()),
                 created_at: time,
+                ..Default::default()
             });
             // bob has 1 completed bounty
             guard.bounties.push(Bounty {
@@ -513,6 +628,7 @@ mod tests {
                 creator: "creator".to_string(),
                 assignee: Some("bob".to_string()),
                 created_at: time,
+                ..Default::default()
             });
         }
 
@@ -535,6 +651,7 @@ mod tests {
                     creator: "creator".to_string(),
                     assignee: Some(format!("contributor_{}", i)),
                     created_at: time,
+                    ..Default::default()
                 });
             }
         }
@@ -550,7 +667,6 @@ mod tests {
         let page = get_leaderboard(&db, 100);
         assert!(page.entries.is_empty());
     }
-}
 
     #[test]
     fn test_ping_db_healthy_and_closed() {
@@ -588,10 +704,7 @@ pub struct LeaderboardPage {
 ///
 /// `limit` is trusted to already be clamped by the caller; this function does
 /// not re-validate it.
-pub fn get_leaderboard(
-    db: &SharedDb,
-    limit: i64,
-) -> LeaderboardPage {
+pub fn get_leaderboard(db: &SharedDb, limit: i64) -> LeaderboardPage {
     let guard = read_db(db);
 
     // Aggregate completed bounties per assignee
@@ -599,9 +712,7 @@ pub fn get_leaderboard(
 
     for bounty in &guard.bounties {
         if let Some(assignee) = &bounty.assignee {
-            let (count, reputation) = contributor_stats
-                .entry(assignee.clone())
-                .or_insert((0, 0));
+            let (count, reputation) = contributor_stats.entry(assignee.clone()).or_insert((0, 0));
             *count += 1;
             // Simple reputation model: 1 point per completed bounty
             *reputation += 1;
@@ -612,18 +723,18 @@ pub fn get_leaderboard(
     // then by completed bounties (descending)
     let mut entries: Vec<LeaderboardEntry> = contributor_stats
         .into_iter()
-        .map(|(address, (completed_bounties, reputation))| LeaderboardEntry {
-            address,
-            completed_bounties,
-            reputation,
-        })
+        .map(
+            |(address, (completed_bounties, reputation))| LeaderboardEntry {
+                address,
+                completed_bounties,
+                reputation,
+            },
+        )
         .collect();
 
-    entries.sort_by(|a, b| {
-        match b.reputation.cmp(&a.reputation) {
-            std::cmp::Ordering::Equal => b.completed_bounties.cmp(&a.completed_bounties),
-            other => other,
-        }
+    entries.sort_by(|a, b| match b.reputation.cmp(&a.reputation) {
+        std::cmp::Ordering::Equal => b.completed_bounties.cmp(&a.completed_bounties),
+        other => other,
     });
 
     let limit = usize::try_from(limit).unwrap_or(0);

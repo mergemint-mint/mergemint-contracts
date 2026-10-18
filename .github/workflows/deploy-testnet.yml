@@ -5,6 +5,8 @@ name: Deploy to Testnet
 #
 # Setup (Settings → Environments → "testnet"):
 #   Secret   STELLAR_DEPLOYER_SECRET_KEY  S... secret key of a funded testnet account
+#            (until it is set, pushes to main skip the deploy with a warning;
+#            manual runs fail)
 #   Variable STELLAR_CLI_VERSION          optional, overrides the pinned CLI version
 # Protection rules on the environment (required reviewers, allowed branches)
 # gate both the manual and the automatic deploys.
@@ -39,12 +41,36 @@ jobs:
     env:
       STELLAR_CLI_VERSION: ${{ vars.STELLAR_CLI_VERSION || '28.0.0' }}
     steps:
+      # Automatic deploys are skipped (with a warning) until the deployer key is
+      # configured, so a missing secret doesn't turn every merge to main red.
+      # Manual runs (workflow_dispatch) still fail, since a deploy was asked for.
+      - name: Check deployer secret
+        id: secret
+        env:
+          STELLAR_DEPLOYER_SECRET_KEY: ${{ secrets.STELLAR_DEPLOYER_SECRET_KEY }}
+        run: |
+          if [ -n "$STELLAR_DEPLOYER_SECRET_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          msg="STELLAR_DEPLOYER_SECRET_KEY is not set in the 'testnet' environment"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "::error::${msg}."
+            exit 1
+          fi
+          echo "::warning::${msg}; skipping testnet deploy."
+          echo "Testnet deploy skipped: \`STELLAR_DEPLOYER_SECRET_KEY\` is not configured." >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v7.0.1
+        if: steps.secret.outputs.configured == 'true'
 
       - name: Install Rust toolchain from rust-toolchain.toml
+        if: steps.secret.outputs.configured == 'true'
         run: rustup toolchain install
 
       - name: Cache cargo registry and wasm build artifacts
+        if: steps.secret.outputs.configured == 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -55,6 +81,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-wasm-
 
       - name: Install Stellar CLI
+        if: steps.secret.outputs.configured == 'true'
         run: |
           mkdir -p "$HOME/.local/bin"
           curl -fsSL "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
@@ -63,17 +90,13 @@ jobs:
           "$HOME/.local/bin/stellar" --version
 
       - name: Deploy contract
+        if: steps.secret.outputs.configured == 'true'
         id: deploy
         env:
           STELLAR_DEPLOYER_SECRET_KEY: ${{ secrets.STELLAR_DEPLOYER_SECRET_KEY }}
           WASM_TARGET: wasm32v1-none
           CONTRACT_ID_FILE: contract-id.txt
         run: |
-          if [ -z "$STELLAR_DEPLOYER_SECRET_KEY" ]; then
-            echo "::error::STELLAR_DEPLOYER_SECRET_KEY is not set in the 'testnet' environment."
-            exit 1
-          fi
-
           ./scripts/deploy.sh testnet "$STELLAR_DEPLOYER_SECRET_KEY"
 
           CONTRACT_ID=$(tr -d '[:space:]' < "$CONTRACT_ID_FILE")
@@ -84,6 +107,7 @@ jobs:
           echo "contract_id=$CONTRACT_ID" >> "$GITHUB_OUTPUT"
 
       - name: Write deployment metadata
+        if: steps.secret.outputs.configured == 'true'
         env:
           CONTRACT_ID: ${{ steps.deploy.outputs.contract_id }}
         run: |
@@ -112,6 +136,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload contract ID artifact
+        if: steps.secret.outputs.configured == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: testnet-contract-id

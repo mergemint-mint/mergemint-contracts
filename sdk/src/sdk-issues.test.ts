@@ -5,7 +5,15 @@
  *  - #921: onEvent subscription helper
  *  - #922: submitTransaction with fee-bump retry
  */
-import { nativeToScVal, xdr, Networks } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Keypair,
+  nativeToScVal,
+  Networks,
+  Operation,
+  TransactionBuilder,
+  xdr,
+} from "@stellar/stellar-sdk";
 import { MergeMintSDK, symbolToScVal, TESTNET } from "./index";
 import { MergeMintSdkError } from "./types";
 import {
@@ -59,7 +67,8 @@ function makeRpc(options: {
         incrementSequenceNumber: () => undefined,
       };
     }),
-    simulateTransaction: jest.fn(async () => {
+    // Typed loosely so individual tests can mock richer simulation responses.
+    simulateTransaction: jest.fn(async (): Promise<Record<string, unknown>> => {
       calls.simulateTransaction++;
       if (simulationError) {
         return { error: simulationError };
@@ -82,7 +91,7 @@ function makeRpc(options: {
 
 function sdkWithRpc(
   rpc: ReturnType<typeof makeRpc>,
-  extra?: Partial<Parameters<typeof MergeMintSDK>[0]>
+  extra?: Partial<ConstructorParameters<typeof MergeMintSDK>[0]>
 ) {
   const sdk = new MergeMintSDK({ ...TESTNET, contractId: CONTRACT_ID, ...extra });
   (sdk as unknown as { rpc: unknown }).rpc = rpc;
@@ -257,7 +266,9 @@ describe("#920 — topUp", () => {
       )
     ).rejects.toThrow(); // assembleTransaction fails on stub, expected in unit tests
 
-    expect(rpc.calls.simulateTransaction).toBeGreaterThan(0);
+    // `mockResolvedValue` replaces the counting implementation, so assert on
+    // the mock itself.
+    expect(rpc.simulateTransaction).toHaveBeenCalled();
   });
 
   it("rejects when amount is zero", async () => {
@@ -513,21 +524,24 @@ describe("#922 — submitTransaction fee-bump retry logic", () => {
       feeBumpRetry: { maxRetries: 3, feeMultiplier: 2 },
     });
 
-    // submitTransaction needs a signed XDR — pass a minimal stub.
-    // Since we only want to test the retry plumbing we patch sendTransaction
-    // to resolve immediately and getTransaction to return SUCCESS.
-    const hash = await sdk.submitTransaction(
-      // A minimal dummy XDR that won't be decoded (the stub overrides sendTransaction)
-      "dummyXDR",
-      undefined,
-      { maxRetries: 1, feeMultiplier: 2 } // single attempt → no fee bump needed
-    ).catch((err) => {
-      // Expected: TransactionBuilder.fromXDR will fail on dummy XDR.
-      // That's fine — we care that it retries maxRetries times.
-      return Promise.reject(err);
+    // Build and sign a real (minimal) transaction so it parses as XDR; the
+    // stubbed RPC then accepts it and reports SUCCESS on the first poll.
+    const keypair = Keypair.random();
+    const tx = new TransactionBuilder(new Account(keypair.publicKey(), "1"), {
+      fee: "100",
+      networkPassphrase: TESTNET.networkPassphrase,
+    })
+      .addOperation(Operation.bumpSequence({ bumpTo: "2" }))
+      .setTimeout(30)
+      .build();
+    tx.sign(keypair);
+
+    const hash = await sdk.submitTransaction(tx.toXDR(), undefined, {
+      maxRetries: 1,
+      feeMultiplier: 2,
     });
-    // The hash won't resolve because the XDR is invalid, but that's a
-    // lower-level concern. The retry counter is what we verify below.
+    expect(hash).toBe("txhash123");
+    expect(rpc.calls.sendTransaction).toBe(1);
   });
 
   it("retries up to maxRetries times on failure", async () => {

@@ -1,6 +1,7 @@
 import { Bounty } from "../lib/types";
 import { Bounty as ApiBounty } from "../types";
-import { shortenAddress } from "../utils/format";
+import { useTranslation } from "../i18n";
+import { formatRelative, isDeadlineUrgent, shortenAddress } from "../utils/format";
 import { CopyButton } from "./CopyButton";
 import { BountyCardSkeleton } from "./BountyCardSkeleton";
 
@@ -10,26 +11,21 @@ interface BountyCardProps {
   highlighted?: boolean;
 }
 
-// Skeleton placeholder shown in place of a BountyCard while its bounty data
-// is still being fetched (e.g. from BountyList's fetchPage).
-function BountyCardSkeleton() {
-  const { t } = useTranslation();
-  return (
-    <div className="bounty-card bounty-card--loading" aria-busy="true" aria-label={t('loading_bounty')}>
-      <span className="bounty-card__id bounty-card__skeleton-line" />
-      <span className="bounty-card__creator bounty-card__skeleton-line" />
-      <span className="bounty-card__reward bounty-card__skeleton-line" />
-      <span className="bounty-card__status bounty-card__skeleton-line" />
-    </div>
-  );
-}
-
 export function BountyCard({ bounty, loading, highlighted }: BountyCardProps) {
+  const { t } = useTranslation();
+
   if (loading || !bounty) {
     return <BountyCardSkeleton />;
   }
 
   const className = highlighted ? "bounty-card bounty-card--highlighted" : "bounty-card";
+
+  // Both bounty shapes carry the deadline as Unix epoch seconds; `null` /
+  // `undefined` means the bounty never expires.
+  const deadline = bounty.deadline ?? null;
+  const urgent = isDeadlineUrgent(deadline);
+  const relativeDeadline = formatRelative(deadline);
+  const exactDeadline = deadline != null ? new Date(deadline * 1000).toLocaleString() : null;
 
   return (
     <div className={className}>

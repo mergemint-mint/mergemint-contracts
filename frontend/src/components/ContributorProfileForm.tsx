@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from 'react';
 import { CharCounter } from './CharCounter';
 import { SYMBOL_MAX_LENGTH } from '../lib/validation';
+import { API_BASE } from '../lib/api';
 
 // Minimal Bounty type used for the assignee list display
 interface AssigneeBounty {
@@ -43,12 +44,10 @@ export function ContributorProfileForm({
   useEffect(() => {
     if (!address) return;
 
-    const apiBase =
-      (import.meta as Record<string, Record<string, string>>).env?.VITE_API_BASE_URL ?? '/api/v1';
     setBountiesLoading(true);
     setBountiesError(null);
 
-    fetch(`${apiBase}/bounties/assignee/${encodeURIComponent(address)}`)
+    fetch(`${API_BASE}/bounties/assignee/${encodeURIComponent(address)}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Failed to fetch assigned bounties (${res.status})`);
         return res.json() as Promise<{ bounties: AssigneeBounty[] }>;

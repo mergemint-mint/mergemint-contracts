@@ -686,6 +686,8 @@ mod tests {
             idempotency: crate::db::new_shared_idempotency_store(),
             rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
+            leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
         });
 
         let router = Router::new()
@@ -834,6 +836,8 @@ mod tests {
             idempotency: crate::db::new_shared_idempotency_store(),
             rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: bounty_broadcast.clone(),
+            leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
         });
 
         add_webhook_subscription(

@@ -69,6 +69,7 @@ impl Metrics {
     }
 
     /// Update the indexer lag gauge (ledgers behind the chain tip).
+    #[allow(dead_code)] // Set by the indexer, which the binary does not run yet.
     pub fn set_indexer_lag(&self, lag: i64) {
         self.indexer_lag.store(lag, Ordering::Relaxed);
     }
@@ -77,7 +78,9 @@ impl Metrics {
     pub fn render(&self) -> String {
         let mut out = String::new();
 
-        out.push_str("# HELP mergemint_http_requests_total Total HTTP requests by route and status.\n");
+        out.push_str(
+            "# HELP mergemint_http_requests_total Total HTTP requests by route and status.\n",
+        );
         out.push_str("# TYPE mergemint_http_requests_total counter\n");
         out.push_str("# HELP mergemint_http_request_duration_seconds HTTP request latency by route and status.\n");
         out.push_str("# TYPE mergemint_http_request_duration_seconds histogram\n");
@@ -114,7 +117,9 @@ impl Metrics {
         }
         drop(routes);
 
-        out.push_str("# HELP mergemint_indexer_lag_ledgers Ledgers the indexer is behind the chain tip.\n");
+        out.push_str(
+            "# HELP mergemint_indexer_lag_ledgers Ledgers the indexer is behind the chain tip.\n",
+        );
         out.push_str("# TYPE mergemint_indexer_lag_ledgers gauge\n");
         out.push_str(&format!(
             "mergemint_indexer_lag_ledgers {}\n",

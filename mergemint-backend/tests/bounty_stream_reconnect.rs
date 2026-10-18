@@ -83,6 +83,7 @@ async fn reconnect_after_drop_delivers_no_duplicate_events() {
         rate_limiter: mergemint_backend::routes::tx::new_shared_rate_limiter(),
         bounty_broadcast: tokio::sync::broadcast::channel(16).0,
         leaderboard_cache: mergemint_backend::routes::leaderboard::new_leaderboard_cache(),
+        sse_keep_alive_duration: std::time::Duration::from_secs(15),
     });
     let url = spawn_test_server(state.clone()).await;
     let client = reqwest::Client::new();
@@ -141,6 +142,7 @@ async fn keep_alive_heartbeat_arrives_within_interval() {
         rate_limiter: mergemint_backend::routes::tx::new_shared_rate_limiter(),
         bounty_broadcast: tokio::sync::broadcast::channel(16).0,
         sse_keep_alive_duration: keep_alive_duration,
+        leaderboard_cache: mergemint_backend::routes::leaderboard::new_leaderboard_cache(),
     });
     let url = spawn_test_server(state.clone()).await;
     let client = reqwest::Client::new();
@@ -195,8 +197,5 @@ async fn keep_alive_heartbeat_arrives_within_interval() {
         }
     }
 
-    panic!(
-        "no keep-alive heartbeat received within {:?}",
-        timeout
-    );
+    panic!("no keep-alive heartbeat received within {:?}", timeout);
 }
