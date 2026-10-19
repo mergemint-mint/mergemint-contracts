@@ -1,0 +1,73 @@
+{
+  "extends": ["@commitlint/config-conventional"],
+  "rules": {
+    "scope-enum": [
+      2,
+      "always",
+      [
+        "contract",
+        "backend",
+        "sdk",
+        "frontend",
+        "ci",
+        "docs",
+        "deps"
+      ]
+    ],
+    "subject-case": [2, "never", ["start-case", "pascal-case", "upper-case"]],
+    "type-enum": [
+      2,
+      "always",
+      [
+        "feat",
+        "fix",
+        "docs",
+        "style",
+        "refactor",
+        "perf",
+        "test",
+        "chore",
+        "revert"
+      ]
+    ]
+  },
+  "prompt": {
+    "messages": {
+      "skip": ":skip",
+      "commit": ":commit",
+      "confirmCommit": "Commit this message?"
+    },
+    "questions": {
+      "type": {
+        "description": "Select the type of change that you're committing"
+      },
+      "scope": {
+        "description": "What is the scope of this change (optional)? Scopes: contract, backend, sdk, frontend, ci, docs, deps"
+      },
+      "subject": {
+        "description": "Write a short, imperative tense description of the change"
+      },
+      "body": {
+        "description": "Provide a longer description of the changes (optional)"
+      },
+      "isBreaking": {
+        "description": "Are there any breaking changes?"
+      },
+      "breakingBody": {
+        "description": "A BREAKING CHANGE commit requires a body. Please enter a longer description of the commit itself"
+      },
+      "breaking": {
+        "description": "Describe the breaking changes"
+      },
+      "isIssueAffected": {
+        "description": "Does this change affect any open issues?"
+      },
+      "issuesBody": {
+        "description": "If issues are closed, the commit requires a body. Please enter a longer description of the commit itself"
+      },
+      "issues": {
+        "description": "Add issue references (e.g. \"fixes #123\", \"refs #123\")"
+      }
+    }
+  }
+}

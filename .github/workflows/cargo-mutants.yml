@@ -1,0 +1,50 @@
+name: Nightly Mutation Testing
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Run at 2 AM UTC daily
+  workflow_dispatch:
+
+jobs:
+  mutants:
+    name: cargo-mutants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants
+
+      - name: Run mutation testing
+        id: mutants
+        run: |
+          cd contracts
+          cargo mutants \
+            --jobs 4 \
+            --skip-timeout 60 \
+            --test-timeout 60 \
+            --exclude-files='**/tests/**,**/test.rs,**/*_test.rs' \
+            --output mutations.txt || true
+
+      - name: Extract surviving mutants summary
+        if: always()
+        run: |
+          if [ -f contracts/mutations.txt ]; then
+            echo "## Mutation Testing Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Surviving mutants found. Review details in the artifact." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            tail -20 contracts/mutations.txt >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload mutation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutations-report
+          path: contracts/mutations.txt
+          retention-days: 30

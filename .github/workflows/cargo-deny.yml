@@ -1,0 +1,37 @@
+name: cargo-deny
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * *'  # Run at 3 AM UTC daily
+
+jobs:
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        manifest:
+          - contracts/Cargo.toml
+          - backend/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          log-level: warn
+
+      - name: Comment on PR if licenses fail
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '❌ Cargo-deny checks failed. Please review dependencies for license compatibility and duplicate crate versions.\n\nRun locally: `cargo deny check` to see detailed output.'
+            })

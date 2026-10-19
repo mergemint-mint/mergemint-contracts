@@ -1,0 +1,51 @@
+name: Lint PR Title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  lint-pr-title:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5.4.0
+        id: lint_pr_title
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            chore
+            revert
+          scopes: |
+            contract
+            backend
+            sdk
+            frontend
+            ci
+            docs
+            deps
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            Subject must not start with uppercase letter.
+
+      - name: Comment on PR if validation fails
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '❌ PR title does not follow conventional commits format.\n\nExpected format: `type(scope): subject`\n\nValid types: feat, fix, docs, style, refactor, perf, test, chore, revert\n\nValid scopes: contract, backend, sdk, frontend, ci, docs, deps\n\nSee [CONTRIBUTING.md](CONTRIBUTING.md) for details.'
+            })
