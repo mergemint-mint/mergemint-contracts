@@ -18,6 +18,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};

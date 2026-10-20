@@ -965,4 +965,89 @@ mod tests {
             }
         }
 
-        let page
+        let page = get_leaderboard(&db, 5);
+        assert_eq!(page.entries.len(), 5);
+    }
+
+    #[test]
+    fn test_leaderboard_returns_empty_page_when_no_bounties() {
+        let db = new_shared_db();
+
+        let page = get_leaderboard(&db, 100);
+        assert!(page.entries.is_empty());
+    }
+
+    #[test]
+    fn test_ping_db_healthy_and_closed() {
+        let db = new_shared_db();
+        assert!(ping_db(&db).is_ok());
+
+        close_db(&db);
+        assert_eq!(ping_db(&db), Err("database connection is closed"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard
+// ---------------------------------------------------------------------------
+
+/// A contributor entry in the leaderboard, ranked by reputation and completed
+/// bounties. Aggregates stats across the bounties table.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LeaderboardEntry {
+    pub address: String,
+    pub completed_bounties: i64,
+    pub reputation: i64,
+}
+
+/// A page of leaderboard entries, ranked by reputation (descending) and
+/// completed bounties (descending).
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct LeaderboardPage {
+    pub entries: Vec<LeaderboardEntry>,
+}
+
+/// Aggregate contributor statistics from completed bounties and compute a
+/// leaderboard, ranked by reputation (descending), then by completed bounties
+/// (descending).
+///
+/// `limit` is trusted to already be clamped by the caller; this function does
+/// not re-validate it.
+pub fn get_leaderboard(db: &SharedDb, limit: i64) -> LeaderboardPage {
+    let guard = read_db(db);
+
+    // Aggregate completed bounties per assignee
+    let mut contributor_stats: HashMap<String, (i64, i64)> = HashMap::new();
+
+    for bounty in &guard.bounties {
+        if let Some(assignee) = &bounty.assignee {
+            let (count, reputation) = contributor_stats.entry(assignee.clone()).or_insert((0, 0));
+            *count += 1;
+            // Simple reputation model: 1 point per completed bounty
+            *reputation += 1;
+        }
+    }
+
+    // Convert to leaderboard entries and sort by reputation (descending),
+    // then by completed bounties (descending)
+    let mut entries: Vec<LeaderboardEntry> = contributor_stats
+        .into_iter()
+        .map(
+            |(address, (completed_bounties, reputation))| LeaderboardEntry {
+                address,
+                completed_bounties,
+                reputation,
+            },
+        )
+        .collect();
+
+    entries.sort_by(|a, b| match b.reputation.cmp(&a.reputation) {
+        std::cmp::Ordering::Equal => b.completed_bounties.cmp(&a.completed_bounties),
+        other => other,
+    });
+
+    let limit = usize::try_from(limit).unwrap_or(0);
+    entries.truncate(limit);
+
+    LeaderboardPage { entries }
+}
