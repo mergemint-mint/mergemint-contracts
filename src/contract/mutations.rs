@@ -56,6 +56,27 @@ fn require_admin(env: &Env, caller: &Address) {
     }
 }
 
+/// Entrypoints that keep working while the contract is paused: the pause
+/// switch itself and the admin-key bootstrap/rotation path, so a suspected
+/// compromised admin key can still be rotated during an incident (see
+/// `docs/runbook.md`). Every other entrypoint in this file must call
+/// `require_not_paused`; `test::pause_blocks_every_mutation` enforces that.
+pub(crate) const PAUSE_EXEMPT_ENTRYPOINTS: &[&str] = &[
+    "pause",
+    "unpause",
+    "init_admin",
+    "transfer_admin",
+    "accept_admin",
+];
+
+/// Fail with `ContractError::ContractPaused` while the admin has the contract
+/// paused. Called right after `require_auth` in every mutating entrypoint.
+fn require_not_paused(env: &Env) {
+    if storage::is_paused(env) {
+        fail(ContractError::ContractPaused);
+    }
+}
+
 fn generate_bounty_id(env: &Env, count: u64) -> BountyId {
     let mut buf = [0u8; 32];
     let count_bytes = count.to_be_bytes();
@@ -349,6 +370,7 @@ impl MergeMintContract {
         approval_threshold: u32,
         milestones: Vec<Milestone>,
     ) -> BountyId {
+        require_not_paused(&env);
         if reward_amount <= 0 {
             fail(ContractError::RewardMustBePositive);
         }
@@ -475,6 +497,7 @@ impl MergeMintContract {
     /// Requires auth from `contributor`.
     pub fn claim_bounty(env: Env, contributor: Address, bounty_id: BountyId) {
         contributor.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -588,6 +611,7 @@ impl MergeMintContract {
     /// Requires auth from `contributor`.
     pub fn unclaim_bounty(env: Env, contributor: Address, bounty_id: BountyId) {
         contributor.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -654,6 +678,7 @@ impl MergeMintContract {
         milestone_index: u32,
     ) {
         verifier.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -739,6 +764,7 @@ impl MergeMintContract {
     pub fn complete_bounty(env: Env, verifier: Address, bounty_id: BountyId) {
         // AUTH: must be first — no storage reads or side-effects before this line.
         verifier.require_auth();
+        require_not_paused(&env);
 
         let bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -789,6 +815,7 @@ impl MergeMintContract {
     /// No storage reads or business logic execute before authentication is checked.
     pub fn approve_completion(env: Env, verifier: Address, bounty_id: BountyId) {
         verifier.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -889,6 +916,7 @@ impl MergeMintContract {
     /// No storage reads or business logic execute before authentication is checked.
     pub fn raise_dispute(env: Env, caller: Address, bounty_id: BountyId) {
         caller.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -930,6 +958,7 @@ impl MergeMintContract {
     /// No storage reads or business logic execute before authentication is checked.
     pub fn resolve_dispute(env: Env, arbitrator: Address, bounty_id: BountyId, resolution: Symbol) {
         arbitrator.require_auth();
+        require_not_paused(&env);
 
         let bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -990,6 +1019,7 @@ impl MergeMintContract {
     /// Requires auth from `caller` (any authenticated address may finalize).
     pub fn finalize_dispute(env: Env, caller: Address, bounty_id: BountyId) {
         caller.require_auth();
+        require_not_paused(&env);
 
         let bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1034,6 +1064,7 @@ impl MergeMintContract {
     /// Requires auth from `caller`.
     pub fn appeal_dispute(env: Env, caller: Address, bounty_id: BountyId) {
         caller.require_auth();
+        require_not_paused(&env);
 
         let bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1076,6 +1107,7 @@ impl MergeMintContract {
     /// has been established.
     pub fn set_appeal_window(env: Env, caller: Address, ledgers: u32) {
         caller.require_auth();
+        require_not_paused(&env);
 
         match storage::get_admin(&env) {
             Some(admin) => {
@@ -1113,6 +1145,7 @@ impl MergeMintContract {
     /// Requires auth from `caller`.
     pub fn add_dispute_evidence(env: Env, caller: Address, bounty_id: BountyId, hash: BytesN<32>) {
         caller.require_auth();
+        require_not_paused(&env);
 
         let bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1150,6 +1183,7 @@ impl MergeMintContract {
     /// Requires auth from `contributor`. No other address may modify this field.
     pub fn update_contributor_metadata(env: Env, contributor: Address, metadata: Symbol) {
         contributor.require_auth();
+        require_not_paused(&env);
 
         if metadata == Symbol::new(&env, "") {
             fail(ContractError::MetadataEmpty);
@@ -1181,6 +1215,7 @@ impl MergeMintContract {
     /// Requires auth from `caller`. Only the creator may cancel.
     pub fn cancel_bounty(env: Env, caller: Address, bounty_id: BountyId) {
         caller.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1241,6 +1276,7 @@ impl MergeMintContract {
     /// Requires auth from `caller` (any authenticated wallet may trigger expiry).
     pub fn expire_bounty(env: Env, caller: Address, bounty_id: BountyId) {
         caller.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1301,6 +1337,7 @@ impl MergeMintContract {
         submission_hash: BytesN<32>,
     ) {
         assignee.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1350,6 +1387,7 @@ impl MergeMintContract {
     /// Requires auth from `sponsor`.
     pub fn sponsor_bounty(env: Env, sponsor: Address, bounty_id: BountyId, amount: i128) {
         sponsor.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1413,6 +1451,7 @@ impl MergeMintContract {
     /// Requires auth from `creator`.
     pub fn reassign_bounty(env: Env, creator: Address, bounty_id: BountyId, new_assignee: Address) {
         creator.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1493,6 +1532,7 @@ impl MergeMintContract {
     /// Requires auth from `creator`.
     pub fn extend_deadline(env: Env, creator: Address, bounty_id: BountyId, new_deadline: u32) {
         creator.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1550,6 +1590,7 @@ impl MergeMintContract {
     /// Requires auth from `caller` (any authenticated wallet may trigger release).
     pub fn release_stale_claim(env: Env, caller: Address, bounty_id: BountyId) {
         caller.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1613,12 +1654,35 @@ impl MergeMintContract {
         storage::set_admin(&env, &admin);
     }
 
+    /// Pause the contract. While paused every state-mutating entrypoint
+    /// (except those in `PAUSE_EXEMPT_ENTRYPOINTS`) fails with
+    /// `ContractError::ContractPaused`; queries keep working.
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn pause(env: Env, admin: Address) {
+        require_admin(&env, &admin);
+        storage::set_paused(&env, true);
+        events::emit_contract_paused(&env, &admin);
+    }
+
+    /// Lift a pause set by `pause`.
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn unpause(env: Env, admin: Address) {
+        require_admin(&env, &admin);
+        storage::set_paused(&env, false);
+        events::emit_contract_unpaused(&env, &admin);
+    }
+
     /// Configure the claim window (in ledgers) used by `release_stale_claim`.
     ///
     /// # Authorization
     /// Admin-only; requires auth from `admin`.
     pub fn set_claim_window(env: Env, admin: Address, window: u32) {
         require_admin(&env, &admin);
+        require_not_paused(&env);
         let old = storage::get_claim_window(&env);
         storage::set_claim_window(&env, window);
         events::emit_config_changed_u32(&env, "claim_window", old, window);
@@ -1630,6 +1694,7 @@ impl MergeMintContract {
     /// Admin-only; requires auth from `admin`.
     pub fn set_reputation_penalty(env: Env, admin: Address, penalty: u32) {
         require_admin(&env, &admin);
+        require_not_paused(&env);
         let old = storage::get_reputation_penalty(&env);
         storage::set_reputation_penalty(&env, penalty);
         events::emit_config_changed_u32(&env, "reputation_penalty", old, penalty);
@@ -1642,6 +1707,7 @@ impl MergeMintContract {
     /// Admin-only; requires auth from `admin`.
     pub fn add_reward_token(env: Env, admin: Address, token: Address) {
         require_admin(&env, &admin);
+        require_not_paused(&env);
         storage::add_allowed_reward_token(&env, &token);
         events::emit_reward_token_added(&env, &admin, &token);
     }
@@ -1654,6 +1720,7 @@ impl MergeMintContract {
     /// Admin-only; requires auth from `admin`.
     pub fn remove_reward_token(env: Env, admin: Address, token: Address) {
         require_admin(&env, &admin);
+        require_not_paused(&env);
         storage::remove_allowed_reward_token(&env, &token);
         events::emit_reward_token_removed(&env, &admin, &token);
     }
@@ -1669,6 +1736,7 @@ impl MergeMintContract {
     /// has been established.
     pub fn set_creator_open_limit(env: Env, caller: Address, limit: u32) {
         caller.require_auth();
+        require_not_paused(&env);
 
         match storage::get_admin(&env) {
             Some(admin) => {
@@ -1695,6 +1763,7 @@ impl MergeMintContract {
     /// has been established.
     pub fn set_claim_cooldown(env: Env, caller: Address, ledgers: u32) {
         caller.require_auth();
+        require_not_paused(&env);
 
         match storage::get_admin(&env) {
             Some(admin) => {
@@ -1718,6 +1787,7 @@ impl MergeMintContract {
     /// Admin-only; requires auth from `admin`.
     pub fn set_min_reward(env: Env, admin: Address, token: Address, amount: i128) {
         require_admin(&env, &admin);
+        require_not_paused(&env);
         if amount < 0 {
             fail(ContractError::AmountMustBePositive);
         }
@@ -1772,6 +1842,7 @@ impl MergeMintContract {
         new_owner: Address,
     ) {
         creator.require_auth();
+        require_not_paused(&env);
 
         let bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1806,6 +1877,7 @@ impl MergeMintContract {
     /// Requires auth from `new_owner`.
     pub fn accept_bounty_ownership(env: Env, new_owner: Address, bounty_id: BountyId) {
         new_owner.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1868,6 +1940,7 @@ impl MergeMintContract {
     /// Requires auth from `creator`.
     pub fn reopen_bounty(env: Env, creator: Address, bounty_id: BountyId, new_deadline: u32) {
         creator.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1923,6 +1996,7 @@ impl MergeMintContract {
     /// Requires auth from `creator`.
     pub fn update_tags(env: Env, creator: Address, bounty_id: BountyId, tags: Vec<Symbol>) {
         creator.require_auth();
+        require_not_paused(&env);
 
         let mut bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
@@ -1958,6 +2032,7 @@ impl MergeMintContract {
     /// * If the bounty is not completed or cancelled (`ContractError::InvalidStatus`).
     /// * If the grace period has not yet elapsed (`ContractError::DeadlineNotPassed`).
     pub fn archive_bounty(env: Env, bounty_id: BountyId) {
+        require_not_paused(&env);
         let bounty = match storage::get_bounty(&env, &bounty_id) {
             Some(b) => b,
             None => fail(ContractError::BountyNotFound),

@@ -55,7 +55,7 @@ existing data from being read correctly also require a MAJOR bump.
 
 ## Contract Version Query
 
-The contract exposes a cheap `version(env) -> Symbol` query in
+The contract exposes a cheap `version(env) -> String` query in
 `src/contract/queries.rs` that returns the deployed contract version as a semver
 string. The value is sourced from a single constant (`CONTRACT_VERSION`) so the
 contract, the SDK and the docs cannot drift apart.

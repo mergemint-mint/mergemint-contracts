@@ -3,13 +3,15 @@
 **Status:** Proposal — follow-up implementation ticket required before merging any code.
 **Date:** 2026-07-29
 
-**Implementation status (confirmed against current source):** Nothing in this
-document has been implemented yet. There is no `DataKey::Admin`, `DataKey::Paused`,
-`init`/`pause`/`unpause`/`upgrade` function, or `assert_not_paused` guard anywhere
-in `src/`. Every mutating entrypoint in `src/contract/mutations.rs` runs
-unconditionally once `require_auth` passes. This remains a design proposal only —
-none of Phase 1 (Option A) or Phase 2 (Option B) below has landed, and none of the
-three follow-up tickets listed at the bottom of this doc has been opened yet.
+**Implementation status:** Phase 1 (Option A) is implemented. `pause`,
+`unpause` and `is_paused` live in `src/contract/`, the flag is stored under
+`DataKey::Paused`, and every mutating entrypoint calls `require_not_paused`
+right after its auth check (failing with `ContractError::ContractPaused`). The
+admin is bootstrapped with `init_admin` and rotated with
+`transfer_admin`/`accept_admin`; those, plus `pause`/`unpause`, stay callable
+while paused (`PAUSE_EXEMPT_ENTRYPOINTS`). `src/test.rs` has a table-driven
+test (`pause_blocks_every_mutation`) that fails if a new mutation is added
+without a pause case. Phase 2 (Option B, wasm upgrade) has not been started.
 
 ---
 

@@ -794,11 +794,25 @@ pub fn get_pending_admin(env: &Env) -> Option<Address> {
 }
 
 pub fn set_pending_admin(env: &Env, pending: &Address) {
-    env.storage().instance().set(&DataKey::PendingAdmin, pending);
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingAdmin, pending);
 }
 
 pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
+}
+
+/// Whether the admin has paused the contract. Defaults to `false`.
+pub fn is_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&DataKey::Paused, &paused);
 }
 
 pub fn get_pending_owner(env: &Env, bounty_id: &BountyId) -> Option<Address> {

@@ -118,6 +118,9 @@ pub enum DataKey {
     /// Address proposed by `transfer_bounty_ownership` to take over a
     /// bounty, pending `accept_bounty_ownership`.
     PendingOwner(BountyId),
+    /// Emergency circuit breaker set by `pause` / cleared by `unpause`.
+    /// Absent means not paused.
+    Paused,
 }
 
 /// Snapshot of contract-wide admin settings, returned by `get_config`.

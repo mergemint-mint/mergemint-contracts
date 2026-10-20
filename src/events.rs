@@ -292,3 +292,15 @@ pub fn emit_ownership_transferred(
         (bounty_id.clone(), previous_owner.clone()),
     );
 }
+
+/// Emitted when the admin pauses the contract.
+pub fn emit_contract_paused(env: &Env, admin: &Address) {
+    let topic = Symbol::new(env, "contract_paused");
+    env.events().publish((topic,), admin.clone());
+}
+
+/// Emitted when the admin unpauses the contract.
+pub fn emit_contract_unpaused(env: &Env, admin: &Address) {
+    let topic = Symbol::new(env, "contract_unpaused");
+    env.events().publish((topic,), admin.clone());
+}

@@ -71,6 +71,9 @@ pub enum ContractError {
     NotPendingAdmin,
     NotPendingOwner,
     OwnerCannotBeAssignee,
+    /// A state-mutating entrypoint was called while the admin has the
+    /// contract paused.
+    ContractPaused,
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
@@ -148,5 +151,6 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::NotPendingAdmin => "caller is not the pending admin",
         ContractError::NotPendingOwner => "caller is not the pending bounty owner",
         ContractError::OwnerCannotBeAssignee => "new owner cannot be an assignee of the bounty",
+        ContractError::ContractPaused => "contract is paused",
     }
 }

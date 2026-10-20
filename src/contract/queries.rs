@@ -58,8 +58,9 @@ impl MergeMintContract {
     /// Sourced from the single `CONTRACT_VERSION` constant so the value stays
     /// in sync with `docs/versioning.md`. Cheap to call; lets the frontend,
     /// SDK and indexer warn when pointed at an unexpected contract version.
-    pub fn version(env: Env) -> Symbol {
-        Symbol::new(&env, CONTRACT_VERSION)
+    pub fn version(env: Env) -> String {
+        // `String`, not `Symbol`: Soroban symbols reject the `.` in semver.
+        String::from_str(&env, CONTRACT_VERSION)
     }
 
     /// Return a single bounty by its ID, or `None` if it does not exist.
@@ -345,6 +346,11 @@ impl MergeMintContract {
             });
         }
         result
+    }
+
+    /// Whether the admin has paused the contract (see `pause`).
+    pub fn is_paused(env: Env) -> bool {
+        storage::is_paused(&env)
     }
 
     /// Return the address currently configured as contract admin, if any.
