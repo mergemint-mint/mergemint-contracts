@@ -4,6 +4,7 @@ import { api } from '../lib/api';
 import { TxButton } from './TxButton';
 import { TxResultBanner } from './TxResultBanner';
 import { useTxFlow } from '../hooks/useTxFlow';
+import { mapErrorMessage } from '../utils/format';
 import { NetworkName } from '../lib/types';
 
 interface ExtendDeadlineProps {
@@ -107,13 +108,19 @@ export function ExtendDeadline({ bounty, network, onSuccess }: ExtendDeadlinePro
       setValidationError(err);
       return;
     }
-    await run(() => api.extendDeadline(bounty.id, fromDateInputValue(selectedDate)));
+    try {
+      await run(() => api.extendDeadline(bounty.id, fromDateInputValue(selectedDate)));
+    } catch {
+      // useTxFlow already put the failure in `error`, which TxResultBanner shows.
+      return;
+    }
+    setSelectedDate('');
     onSuccess?.();
   }
 
   return (
-    <form className="extend-deadline" onSubmit={handleSubmit}>
-      <h3 className="extend-deadline__title">Extend deadline</h3>
+    <form className="extend-deadline" onSubmit={handleSubmit} aria-labelledby="extend-deadline-title">
+      <h3 id="extend-deadline-title" className="extend-deadline__title">Extend deadline</h3>
 
       {bounty.deadline && (
         <p className="extend-deadline__current">
@@ -139,7 +146,7 @@ export function ExtendDeadline({ bounty, network, onSuccess }: ExtendDeadlinePro
         Extend deadline
       </TxButton>
 
-      <TxResultBanner result={result} error={error} />
+      <TxResultBanner result={result} error={error ? mapErrorMessage(error) : null} />
     </form>
   );
 }

@@ -40,6 +40,7 @@ export function shortenAddress(address: string, lead = 4, trail = 4): string {
 // Known contract/backend error substrings mapped to user-friendly copy.
 // Falls back to the raw message when nothing matches (see issue #57).
 const ERROR_MAP: Array<[RegExp, string]> = [
+  [/user (declined|rejected)|rejected by (the )?(user|wallet)/i, "The request was rejected in your wallet."],
   [/contributor already has an active claim/i, "You already have an active claim on this bounty."],
   [/bounty (is )?not found/i, "This bounty no longer exists."],
   [/bounty (is )?already claimed/i, "This bounty has already been claimed by someone else."],

@@ -139,7 +139,7 @@ function BountyDetailInner() {
       <h1>{bounty.title}</h1>
       <StatusBadge status={bounty.status} />
       <p>{bounty.description}</p>
-      <div className="bounty-reward">
+      <div className="bounty-reward" data-testid="bounty-reward">
         <strong>Reward:</strong> {bounty.reward} XLM
       </div>
       <div className="bounty-creator">
