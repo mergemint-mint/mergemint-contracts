@@ -132,6 +132,8 @@ mod tests {
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
             leaderboard_cache: new_leaderboard_cache(),
             sse_keep_alive_duration: std::time::Duration::from_secs(15),
+            webhook_guard: Default::default(),
+            sse_limiter: Default::default(),
         })
     }
 

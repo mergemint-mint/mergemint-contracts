@@ -44,6 +44,7 @@ const TUPLE_EVENTS: &[&str] = &[
 /// all. `extract_bounty_id_hex` intentionally returns `None` for these; the
 /// caller routes them to reputation/profile handling instead of bounty
 /// handling. See `reputation_changed` in `docs/event-schema.md`.
+#[allow(dead_code)] // Documents the contract; not read by code yet.
 const CONTRIBUTOR_ONLY_EVENTS: &[&str] = &["reputation_changed", "contributor_metadata_updated"];
 
 // ---------------------------------------------------------------------------

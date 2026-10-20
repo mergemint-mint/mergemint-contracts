@@ -15,6 +15,21 @@ documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en
   bounty ID whenever `refresh_bounty` completes in the indexer. Clients receive
   `bounty_updated` events without polling. (#482)
 
+### Security
+- Webhook target URLs that resolve to private, loopback, link-local or cloud
+  metadata addresses are refused at registration (`400`) and again at every
+  delivery, through a DNS resolver that checks each address before
+  connecting. This blocks DNS rebinding. Webhook requests no longer follow
+  redirects or use proxies. `WEBHOOK_ALLOW_PRIVATE_TARGETS=true` allows
+  private targets for local development. (#1116)
+- `GET /bounties/stream` caps concurrent connections per client IP
+  (`SSE_MAX_CONNECTIONS_PER_IP`, default 32) and in total
+  (`SSE_MAX_CONNECTIONS`, default 1024), and returns `429` with `Retry-After`
+  over a cap. `SSE_TRUST_X_FORWARDED_FOR=true` keys the per-IP cap on
+  `X-Forwarded-For` behind a trusted proxy. New metrics:
+  `mergemint_sse_active_connections` (gauge) and
+  `mergemint_sse_rejected_connections_total{reason}` (counter). (#1118)
+
 ### Changed
 - All stable endpoints now live under the `/api/v1/` prefix. Unprefixed
   `/api/*` paths remain as deprecated aliases and will be removed in a future

@@ -2,8 +2,9 @@
 //!
 //! Exposes per-route request counters and latency histograms (labelled by
 //! route and status) plus a gauge tracking how far the indexer lags behind
-//! the latest ledger. Everything is rendered in the Prometheus text
-//! exposition format and served at `/metrics`.
+//! the latest ledger, plus a gauge of open SSE stream connections and a
+//! counter of SSE connections refused over a cap (#1118). Everything is
+//! rendered in the Prometheus text exposition format and served at `/metrics`.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -16,6 +17,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use std::time::Instant;
+
+use crate::sse_limit::{LimitExceeded, SseConnectionLimiter};
 
 /// Latency histogram buckets in seconds.
 const LATENCY_BUCKETS: [f64; 11] = [
@@ -49,11 +52,19 @@ impl RouteMetrics {
 pub struct Metrics {
     routes: std::sync::Mutex<std::collections::HashMap<(String, u16), Arc<RouteMetrics>>>,
     indexer_lag: AtomicI64,
+    /// Source of the SSE connection gauge. `None` reports zero.
+    sse_limiter: Option<SseConnectionLimiter>,
 }
 
 impl Metrics {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Report open and refused SSE connections from `limiter`.
+    pub fn with_sse_limiter(mut self, limiter: SseConnectionLimiter) -> Self {
+        self.sse_limiter = Some(limiter);
+        self
     }
 
     /// Record one request observation for the given route and status.
@@ -126,6 +137,28 @@ impl Metrics {
             self.indexer_lag.load(Ordering::Relaxed)
         ));
 
+        let limiter = self.sse_limiter.as_ref();
+        out.push_str(
+            "# HELP mergemint_sse_active_connections Open GET /bounties/stream connections.\n",
+        );
+        out.push_str("# TYPE mergemint_sse_active_connections gauge\n");
+        out.push_str(&format!(
+            "mergemint_sse_active_connections {}\n",
+            limiter.map_or(0, |l| l.active())
+        ));
+        out.push_str("# HELP mergemint_sse_rejected_connections_total SSE connections refused with 429, by cap.\n");
+        out.push_str("# TYPE mergemint_sse_rejected_connections_total counter\n");
+        for (label, reason) in [
+            ("per_ip", LimitExceeded::PerIp),
+            ("global", LimitExceeded::Global),
+        ] {
+            out.push_str(&format!(
+                "mergemint_sse_rejected_connections_total{{reason=\"{}\"}} {}\n",
+                label,
+                limiter.map_or(0, |l| l.rejected(reason))
+            ));
+        }
+
         out
     }
 }
@@ -167,4 +200,36 @@ pub fn metrics_router(metrics: Arc<Metrics>) -> Router {
     Router::new()
         .route("/metrics", get(metrics_handler))
         .with_state(metrics)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renders_sse_connection_gauge_and_rejections() {
+        let limiter = SseConnectionLimiter::new(1, 10);
+        let metrics = Metrics::new().with_sse_limiter(limiter.clone());
+        let ip = "192.0.2.1".parse().ok();
+
+        let permit = limiter.try_acquire(ip).unwrap();
+        assert!(limiter.try_acquire(ip).is_err());
+        let out = metrics.render();
+        assert!(out.contains("# TYPE mergemint_sse_active_connections gauge"));
+        assert!(out.contains("mergemint_sse_active_connections 1\n"));
+        assert!(out.contains("mergemint_sse_rejected_connections_total{reason=\"per_ip\"} 1\n"));
+        assert!(out.contains("mergemint_sse_rejected_connections_total{reason=\"global\"} 0\n"));
+
+        drop(permit);
+        assert!(metrics
+            .render()
+            .contains("mergemint_sse_active_connections 0\n"));
+    }
+
+    #[test]
+    fn renders_zero_sse_gauge_without_limiter() {
+        assert!(Metrics::new()
+            .render()
+            .contains("mergemint_sse_active_connections 0\n"));
+    }
 }

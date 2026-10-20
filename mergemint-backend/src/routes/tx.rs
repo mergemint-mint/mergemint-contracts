@@ -43,6 +43,11 @@ pub struct AppState {
     /// Interval between SSE keep-alive comments on `GET /bounties/stream`,
     /// so idle connections are not dropped by proxies (`SSE_KEEP_ALIVE_SECS`).
     pub sse_keep_alive_duration: std::time::Duration,
+    /// SSRF guard applied to webhook target URLs at registration (#1116).
+    pub webhook_guard: crate::webhooks::WebhookTargetGuard,
+    /// Per-IP and global caps on concurrent `GET /bounties/stream`
+    /// connections (#1118).
+    pub sse_limiter: crate::sse_limit::SseConnectionLimiter,
 }
 
 /// Maximum `self_claim` calls allowed per `SELF_CLAIM_RATE_WINDOW_SECS` window,
@@ -838,6 +843,8 @@ mod tests {
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
             leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
             sse_keep_alive_duration: std::time::Duration::from_secs(15),
+            webhook_guard: Default::default(),
+            sse_limiter: Default::default(),
         })
     }
 

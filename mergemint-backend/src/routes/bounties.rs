@@ -7,11 +7,11 @@
 /// POST /bounties/{id}/claim          claim a bounty (broadcasts on the stream)
 /// GET  /bounties/stream              SSE stream of bounty state changes (#482)
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{ConnectInfo, Path, Query, State},
+    http::{header::RETRY_AFTER, HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     Json,
 };
@@ -19,6 +19,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};
 use utoipa::{IntoParams, ToSchema};
@@ -264,28 +265,57 @@ fn is_syntactically_valid_address(address: &str) -> bool {
 /// state changes (see `claim_bounty`). Clients subscribe once and receive
 /// incremental push notifications instead of polling. Event name is
 /// `bounty_updated`, payload `{"bountyId":"<id>"}`. Implements issue #482.
+///
+/// Concurrent connections are capped per client IP and globally (#1118, see
+/// `sse_limit`). Over a cap the request gets `429` with `Retry-After`. The
+/// slot is freed when the client disconnects and the stream is dropped.
 #[utoipa::path(
     get,
     path = "/bounties/stream",
     responses(
         (status = 200, description = "SSE stream of bounty state changes"),
+        (status = 429, description = "Too many concurrent stream connections", body = crate::routes::tx::AppError),
     ),
     tag = "bounties"
 )]
 pub async fn bounty_stream(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+) -> Response {
+    let client_ip = state
+        .sse_limiter
+        .client_ip(&headers, connect_info.map(|ConnectInfo(addr)| addr));
+    let permit = match state.sse_limiter.try_acquire(client_ip) {
+        Ok(permit) => permit,
+        Err(limit) => {
+            tracing::warn!(?client_ip, ?limit, "rejecting SSE connection over cap");
+            let (status, body) = crate::routes::tx::AppError::too_many_requests(limit.message());
+            return (status, [(RETRY_AFTER, SSE_RETRY_AFTER_SECS)], body).into_response();
+        }
+    };
+
     let rx = state.bounty_broadcast.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        // The closure owns the permit, so the slot lives exactly as long as
+        // the stream and is freed when the client disconnects.
+        let _permit = &permit;
         result.ok().map(|bounty_id| {
-            Ok(Event::default()
-                .event("bounty_updated")
-                .data(format!(r#"{{"bountyId":"{}"}}"#, bounty_id)))
+            Ok::<_, Infallible>(
+                Event::default()
+                    .event("bounty_updated")
+                    .data(format!(r#"{{"bountyId":"{}"}}"#, bounty_id)),
+            )
         })
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(state.sse_keep_alive_duration))
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(state.sse_keep_alive_duration))
+        .into_response()
 }
+
+/// `Retry-After` value (seconds) sent with a 429 from the stream endpoint.
+const SSE_RETRY_AFTER_SECS: &str = "5";
 
 /// `POST /bounties/{id}/claim`
 ///
@@ -360,6 +390,8 @@ mod tests {
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
             leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
             sse_keep_alive_duration: std::time::Duration::from_secs(15),
+            webhook_guard: Default::default(),
+            sse_limiter: Default::default(),
         })
     }
 
@@ -458,7 +490,7 @@ mod tests {
 
         let (status, Json(body)) = result.expect_err("malformed address must be rejected");
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.get("error").is_some());
+        assert!(!body.message.is_empty());
     }
 
     /// A well-formed address with no matching bounties must return an empty
@@ -635,6 +667,6 @@ mod tests {
 
         let (status, Json(body)) = result.expect_err("must return 404");
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(body.get("error").is_some());
+        assert!(!body.message.is_empty());
     }
 }
