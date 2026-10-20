@@ -14,7 +14,7 @@ function shortenAddress(address: string): string {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
-export default function VerifierPanel({
+export function VerifierPanel({
   bountyId,
   verifiers,
   threshold,
@@ -144,3 +144,5 @@ export default function VerifierPanel({
     </section>
   );
 }
+
+export default VerifierPanel;
