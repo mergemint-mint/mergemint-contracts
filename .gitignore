@@ -19,6 +19,9 @@ Thumbs.db
 ehthumbs.db
 desktop.ini
 
+# k6 binary built by scripts/k6/build-k6-sse.sh
+scripts/k6/bin/
+
 # Misc
 somzilla.md
 

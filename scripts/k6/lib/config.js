@@ -21,7 +21,8 @@ function envList(name, fallback) {
 }
 
 export const BASE_URL = (__ENV.BASE_URL || "http://localhost:8080").replace(/\/$/, "");
-export const API_PREFIX = __ENV.API_PREFIX || "/api/v1";
+// An empty API_PREFIX is allowed: the backend binary mounts the routes at "/".
+export const API_PREFIX = __ENV.API_PREFIX !== undefined ? __ENV.API_PREFIX : "/api/v1";
 
 // Load shape. Rates are requests (iterations) per second at steady state.
 export const DURATION = __ENV.DURATION || "2m";
@@ -35,6 +36,22 @@ export const STREAM_VUS = envInt("STREAM_VUS", 25);
 // healthy connection receives at least one byte.
 export const STREAM_HOLD_SECONDS = envInt("STREAM_HOLD_SECONDS", 20);
 export const PAGE_LIMIT = envInt("PAGE_LIMIT", 20);
+
+// sse.js: long-lived stream subscribers plus a trigger that publishes events.
+export const SSE_CLIENTS = envInt("SSE_CLIENTS", 200);
+// How long each sse.js client keeps one stream open before reconnecting.
+export const SSE_HOLD_SECONDS = envInt("SSE_HOLD_SECONDS", 30);
+// bounty_updated events published per second while all clients are connected.
+export const TRIGGER_RPS = envInt("TRIGGER_RPS", 2);
+// Thresholds for sse.js (ms).
+export const SSE_LATENCY_P95_MS = envInt("SSE_LATENCY_P95_MS", 250);
+export const SSE_LATENCY_P99_MS = envInt("SSE_LATENCY_P99_MS", 500);
+
+// sse-limit.js: streams opened at once, and the per-IP cap the backend is
+// expected to enforce (its SSE_MAX_CONNECTIONS_PER_IP).
+export const SSE_LIMIT_ATTEMPTS = envInt("SSE_LIMIT_ATTEMPTS", 40);
+export const SSE_EXPECTED_CAP = envInt("SSE_EXPECTED_CAP", 32);
+export const SSE_LIMIT_HOLD_SECONDS = envInt("SSE_LIMIT_HOLD_SECONDS", 5);
 
 // Test data. Point these at seeded records to exercise the success paths; the
 // defaults are syntactically valid Stellar addresses with no data behind them.
@@ -69,6 +86,21 @@ export const THRESHOLDS = {
     "http_req_duration{scenario:tx}": ["p(95)<500", "p(99)<1500"],
     "http_req_failed{scenario:tx}": ["rate<0.01"],
     "checks{scenario:tx}": ["rate>0.99"],
+  },
+  // sse.js. Not part of the mixed run; it needs the xk6-sse extension.
+  sse: {
+    sse_event_latency: [`p(95)<${SSE_LATENCY_P95_MS}`, `p(99)<${SSE_LATENCY_P99_MS}`],
+    sse_connect_time: ["p(95)<500"],
+    sse_connection_ok: ["rate>0.99"],
+    sse_events_delivered: ["count>0"],
+    "checks{scenario:sse_trigger}": ["rate>0.99"],
+  },
+  // sse-limit.js: at most the cap is accepted, everything above it gets 429.
+  sseLimit: {
+    sse_limit_accepted: [`count<=${SSE_EXPECTED_CAP}`],
+    sse_limit_rejected: [`count>=${Math.max(0, SSE_LIMIT_ATTEMPTS - SSE_EXPECTED_CAP)}`],
+    sse_limit_unexpected_status: ["count==0"],
+    checks: ["rate==1"],
   },
 };
 
