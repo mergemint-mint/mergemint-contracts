@@ -95,6 +95,7 @@ mod db;
 mod metrics;
 mod rate_limit;
 mod routes;
+mod security_headers;
 #[cfg(test)]
 mod test_helpers;
 mod webhooks;
@@ -297,6 +298,18 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         // ── CORS ───────────────────────────────────────────────────────────
         .layer(cors_layer())
+        // ── Security headers (#1115) ───────────────────────────────────────
+        //
+        // Adds X-Content-Type-Options, X-Frame-Options, Referrer-Policy,
+        // X-XSS-Protection, and Permissions-Policy to every response.
+        // Strict-Transport-Security is only emitted when HSTS_ENABLED=true
+        // (i.e. the service is confirmed to be behind HTTPS).
+        // Placed inside the CORS layer so CORS preflight responses also carry
+        // the headers, but the CORS headers themselves are not overwritten.
+        .layer(middleware::from_fn_with_state(
+            security_headers::hsts_enabled(),
+            security_headers::security_headers_middleware,
+        ))
         // ── Body size limit (#476) ─────────────────────────────────────────
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
 

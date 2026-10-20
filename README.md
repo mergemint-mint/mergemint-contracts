@@ -141,6 +141,7 @@ snapshots.
 | Benchmarks                               | [docs/benchmarks.md](docs/benchmarks.md)                                   |
 | Batch and parallel contributor refresh   | [docs/batch-refresh.md](docs/batch-refresh.md)                             |
 | Backend load testing (k6)                | [scripts/k6/README.md](scripts/k6/README.md)                               |
+| Glossary                                 | [docs/glossary.md](docs/glossary.md)                                       |
 | Contributor FAQ                          | [docs/contributor-faq.md](docs/contributor-faq.md)                         |
 | SDK usage                                | [sdk/README.md](sdk/README.md)                                             |
 | Changelog (contract interface)           | [CHANGELOG.md](CHANGELOG.md)                                               |

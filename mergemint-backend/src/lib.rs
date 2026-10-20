@@ -2,6 +2,7 @@ pub mod db;
 pub mod indexer;
 pub mod rate_limit;
 pub mod routes;
+pub mod security_headers;
 pub mod validation;
 pub mod webhooks;
 
