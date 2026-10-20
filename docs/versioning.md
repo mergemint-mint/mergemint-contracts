@@ -1,7 +1,7 @@
 # Versioning Policy
 
 This project follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
-All notable changes are recorded in [CHANGELOG.md](../CHANGELOG.md).
+All notable changes are recorded in [CHANGELOG.md](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CHANGELOG.md).
 
 ## Version Format
 
@@ -71,7 +71,7 @@ When a release is tagged, update the version in **both** places in the same pull
 request, keeping them identical:
 
 1. `CONTRACT_VERSION` in `src/contract/queries.rs` — the value returned by `version()`.
-2. The `[Unreleased]` section in [CHANGELOG.md](../CHANGELOG.md), renamed to the new
+2. The `[Unreleased]` section in [CHANGELOG.md](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CHANGELOG.md), renamed to the new
    version as described below.
 
 Choose the new value using the bump rules above (MAJOR / MINOR / PATCH). The
@@ -81,7 +81,7 @@ MINOR bump; subsequent changes follow the rules for the change being made.
 ## Changelog Discipline
 
 Every pull request that changes contract behaviour must add an entry under
-`## [Unreleased]` in [CHANGELOG.md](../CHANGELOG.md) before merging. Use one of:
+`## [Unreleased]` in [CHANGELOG.md](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CHANGELOG.md) before merging. Use one of:
 
 - `### Added` — new features
 - `### Changed` — changes to existing behaviour
@@ -95,6 +95,6 @@ and a fresh `[Unreleased]` section is added at the top.
 
 ## Current Version
 
-See [CHANGELOG.md](../CHANGELOG.md) for the current released version and the list
+See [CHANGELOG.md](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CHANGELOG.md) for the current released version and the list
 of unreleased changes on `main`. The value returned by the on-chain `version()`
 query must always match the latest released version documented there.

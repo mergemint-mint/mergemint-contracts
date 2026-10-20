@@ -14,7 +14,7 @@ of each.
 | Target chain | Stellar, via the Soroban VM | EVM-compatible chains |
 | Role | **Primary contract.** Owns bounty creation, claiming, completion, cancellation, and expiry — the full lifecycle documented below. | Standalone batch-refresh utility (`BountyRefresh.sol`) that calls out to an external `IBountyManager` to bulk-update contributor metrics. It does not create, claim, or pay out bounties itself. |
 | Status | **Live / actively developed.** This is the contract MergeMint deploys and the one the rest of this document (data flow, state machine, storage/TTL) describes. | **Not deployed.** No `hardhat.config.*` exists in this repo yet, and `IBountyManager` has no production implementation — only the `MockBountyManager` test double under `test/bounty/mocks/`. Treat it as an EVM-side prototype/utility contract, exercised solely by its own Hardhat test suite (`test/bounty/BountyRefresh.test.js`). |
-| Build/test tooling | `cargo build` / `cargo test` (see [CONTRIBUTING.md](../CONTRIBUTING.md)) | `npx hardhat test` |
+| Build/test tooling | `cargo build` / `cargo test` (see [CONTRIBUTING.md](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CONTRIBUTING.md)) | `npx hardhat test` |
 
 **Why both exist:** MergeMint's production bounty logic lives on Stellar
 via Soroban (`src/contract/`). The Solidity code under `contracts/bounty/`
@@ -302,13 +302,13 @@ the call is accepted, subject to the non-status guards listed under
 
 Notes:
 
-1. `complete_milestone` never changes `status`. It only marks one milestone
+1. `complete_milestone` never changes `status`. It only marks one [milestone](glossary.md#milestone)
    paid. It is listed because it is gated on `in_progress`.
 2. `approve_completion` has **no explicit status guard**. When
    `required_verifiers` is `None` it delegates to the same check as
    `complete_bounty` and fails with `BountyNotInProgress` outside
    `in_progress`. When `required_verifiers` is set, it only checks that there
-   are assignees, that the verifier is on the list (`VerifierNotAuthorized`),
+   are [assignees](glossary.md#assignee), that the [verifier](glossary.md#verifier) is on the list (`VerifierNotAuthorized`),
    and that they have not voted yet (`AlreadyApproved`). It can therefore
    reach the completion branch from `disputed`, `completed`, or a `cancelled`
    bounty that still has assignees. This is tracked as a known gap in

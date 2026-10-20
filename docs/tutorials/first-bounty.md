@@ -156,8 +156,7 @@ stellar contract invoke \
 
 Invoke `create_bounty` on the MergeMint contract.
 
-> [!NOTE]
-> Parameter requirements:
+> **Note:** parameter requirements:
 > - `title`: Short `Symbol` (up to 32 alphanumeric characters).
 > - `reward_amount`: Raw token units, must be $\ge 100$ (`ContractError::RewardBelowMinimum`).
 > - `tags`: Up to 5 tags from the allowlist (`bug`, `docs`, `feature`, `security`, `test`, `refactor`, `design`, `chore`, `perf`, `other`).

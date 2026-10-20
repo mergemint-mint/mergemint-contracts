@@ -9,7 +9,7 @@ This FAQ has two parts:
 
 ## Contributing code to this repo
 
-The full step-by-step path is in [CONTRIBUTING.md → Your First Contribution](../CONTRIBUTING.md#your-first-contribution). These are the questions new contributors ask most often.
+The full step-by-step path is in [CONTRIBUTING.md → Your First Contribution](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CONTRIBUTING.md#your-first-contribution). These are the questions new contributors ask most often.
 
 ---
 
@@ -52,7 +52,7 @@ See [testing.md](testing.md) for the end-to-end shell scripts (`integration_test
 
 **A snapshot test failed after my change. What do I do?**
 
-Files in `test_snapshots/` record ledger state. If you intentionally changed a `#[contracttype]` struct, regenerate them (see [CONTRIBUTING.md → Test Snapshots](../CONTRIBUTING.md#test-snapshots)) and commit the new JSON in the **same** commit as the struct change. If you did not intend to change storage layout, the failing snapshot is telling you that you did; treat it as a bug.
+Files in `test_snapshots/` record ledger state. If you intentionally changed a `#[contracttype]` struct, regenerate them (see [CONTRIBUTING.md → Test Snapshots](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CONTRIBUTING.md#test-snapshots)) and commit the new JSON in the **same** commit as the struct change. If you did not intend to change storage layout, the failing snapshot is telling you that you did; treat it as a bug.
 
 ---
 
@@ -62,7 +62,7 @@ Files in `test_snapshots/` record ledger state. If you intentionally changed a `
 - `Closes #<issue>` in the description.
 - A short "what and why", pasted test output, and screenshots for visual changes.
 - One focused change; small PRs are reviewed faster.
-- All required CI checks green (listed in [CONTRIBUTING.md](../CONTRIBUTING.md#ci--required-status-checks)).
+- All required CI checks green (listed in [CONTRIBUTING.md](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CONTRIBUTING.md#ci--required-status-checks)).
 
 ---
 
@@ -102,7 +102,7 @@ Call `claim_bounty` with your wallet address and the bounty ID. This assigns the
 
 **What happens if I claim a bounty but cannot complete it?**
 
-Currently, nothing automatic happens. The bounty stays assigned to you and no one else can claim it. If you cannot complete the work, communicate with the bounty creator or verifier so they can make arrangements. A future version of the contract will introduce claim expiry to handle abandoned bounties automatically.
+Unclaim it with `unclaim_bounty` so someone else can pick it up. If you don't, the claim becomes a [stale claim](glossary.md#stale-claim) once the [claim window](glossary.md#claim-window) passes (about seven days by default). Anyone can then call `release_stale_claim`: the bounty goes back to `open` and you lose the [reputation penalty](glossary.md#reputation-penalty) (10 points by default). If you need more time, talk to the bounty creator or [verifier](glossary.md#verifier).
 
 ---
 

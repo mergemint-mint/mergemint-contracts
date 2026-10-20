@@ -10,7 +10,9 @@ parameters, auth requirements, errors and events. It was checked against:
 - `src/types.rs`: `Bounty`, `BountyId`, `BountyMeta`, `Contributor`, `Milestone`
 
 For which status transitions each mutation allows, see the
-[lifecycle diagram](architecture.md#lifecycle-diagram-mermaid).
+[lifecycle diagram](architecture.md#lifecycle-diagram-mermaid). Roles and terms
+such as assignee, verifier and arbitrator are defined in the
+[glossary](glossary.md).
 
 > **Keeping this page in sync:** when you add, remove, or change the
 > signature, guards or events of a `pub fn` in `src/contract/`, update this
@@ -42,7 +44,7 @@ contract. Payouts from `complete_bounty`, `complete_milestone` and
 `approve_completion`, and refunds from `cancel_bounty`, `expire_bounty` and
 `resolve_dispute("cancel")`, are paid from the **contract's own balance**. The
 contract therefore has to be funded separately for those calls to succeed.
-`resolve_dispute("complete")` is the exception: the arbitrator's wallet pays.
+`resolve_dispute("complete")` is the exception: the [arbitrator](glossary.md#arbitrator)'s wallet pays.
 
 ### Shared types
 
@@ -147,7 +149,7 @@ validation below, not first. It is the one exception to the rule in
 5. `MaxAssigneesMustBePositive` → `"max_assignees must be at least 1"`
 6. `ApprovalThresholdExceedsVerifiers` → `"approval_threshold cannot exceed the number of required_verifiers"`
 7. `InvalidRewardToken` → `"invalid reward_token address"` when the `balance()` probe fails
-8. `RewardAmountOverflow` → `"reward amount arithmetic overflow"` when summing milestone rewards overflows
+8. `RewardAmountOverflow` → `"reward amount arithmetic overflow"` when summing [milestone](glossary.md#milestone) rewards overflows
 9. `MilestoneRewardsMismatch` → `"milestone rewards do not sum to reward_amount"`
 10. `BountyDeadlinePassed` → `"bounty deadline passed"` when `deadline` is already behind the current ledger
 
@@ -179,7 +181,7 @@ Multi-assignee bounties stay claimable in `in_progress` until
 **Errors (in order):**
 
 1. `BountyNotFound` → `"bounty not found"`
-2. `AlreadyClaimed` → `"bounty already claimed by contributor"` when `contributor` is already an assignee
+2. `AlreadyClaimed` → `"bounty already claimed by contributor"` when `contributor` is already an [assignee](glossary.md#assignee)
 3. `BountyNotOpen` → `"bounty not open"` when the status is not `open` or `in_progress`
 4. `CreatorCannotClaim` → `"creator cannot claim"`
 5. `BountyAlreadyAssigned` → `"bounty already assigned"` when `assignees.len() >= max_assignees`

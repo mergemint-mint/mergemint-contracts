@@ -492,4 +492,4 @@ Soroban persistent storage entries have a TTL. Migrated entries written back dur
 
 - [Architecture overview](architecture.md)
 - [Event schema](event-schema.md)
-- [CHANGELOG](../CHANGELOG.md)
+- [CHANGELOG](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CHANGELOG.md)
