@@ -127,3 +127,65 @@ jobs:
 
       - name: Build
         run: npx vite build
+
+  e2e:
+    name: E2E and accessibility
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      # These specs run against the mocked backend and wallet in e2e/fixtures.
+      # happy-path and dispute-flow need a real backend and aren't run here.
+      - name: Run top-up/extend e2e and axe checks
+        run: npx playwright test e2e/topup-extend.spec.ts e2e/a11y.spec.ts
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-report
+          path: frontend/playwright-report
+          retention-days: 7
+
+  visual:
+    name: Visual regression
+    runs-on: ubuntu-latest
+    # Pinned image so screenshots render the same on every run. Keep the tag in
+    # sync with @playwright/test in package-lock.json (see visual/README.md).
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Storybook
+        run: npm run build-storybook
+
+      - name: Run visual regression tests
+        run: npm run test:visual
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-report
+          path: frontend/playwright-report
+          retention-days: 7
