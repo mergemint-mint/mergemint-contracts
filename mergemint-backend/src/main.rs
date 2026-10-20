@@ -299,10 +299,6 @@ async fn main() {
             .await
             .expect("failed to initialize audit log storage");
     }
-    sqlx::query("UPDATE webhook_deliveries SET status = 'pending', updated_at = NOW() WHERE status = 'delivering'")
-        .execute(&pool)
-        .await
-        .expect("failed to recover interrupted webhook deliveries");
     let subscriptions = sqlx::query(
         "SELECT id, url, secret, event_types, active, created_at FROM webhook_subscriptions WHERE active = TRUE",
     )

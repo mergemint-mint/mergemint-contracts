@@ -350,7 +350,7 @@ async fn process_next_delivery(
     retry_config: &RetryConfig,
 ) -> anyhow::Result<bool> {
     let row = sqlx::query(
-        "WITH next_delivery AS (SELECT id FROM webhook_deliveries WHERE status = 'pending' AND next_attempt_at <= NOW() ORDER BY next_attempt_at, id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE webhook_deliveries AS delivery SET status = 'delivering', updated_at = NOW() FROM next_delivery WHERE delivery.id = next_delivery.id RETURNING delivery.id, delivery.subscription_id, delivery.subscription_url, delivery.subscription_secret, delivery.payload, delivery.attempts",
+        "WITH next_delivery AS (SELECT id FROM webhook_deliveries WHERE (status = 'pending' AND next_attempt_at <= NOW()) OR (status = 'delivering' AND updated_at < NOW() - INTERVAL '1 minute') ORDER BY next_attempt_at, id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE webhook_deliveries AS delivery SET status = 'delivering', updated_at = NOW() FROM next_delivery WHERE delivery.id = next_delivery.id RETURNING delivery.id, delivery.subscription_id, delivery.subscription_url, delivery.subscription_secret, delivery.payload, delivery.attempts",
     )
     .fetch_optional(pool)
     .await?;
