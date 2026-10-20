@@ -1,0 +1,71 @@
+name: Frontend Preview
+
+# Preview deployments, step 1 of 2: build the frontend for a pull request.
+#
+# This workflow runs the PR's code, so it gets no secrets and a read-only
+# token — safe for pull requests from forks. It only uploads the built site as
+# the `frontend-preview` artifact. `frontend-preview-deploy.yml` then picks the
+# artifact up in a trusted context, deploys it to Cloudflare Pages and comments
+# the URL on the PR. `frontend-preview-cleanup.yml` deletes the preview when the
+# PR closes. Setup: see "Frontend preview deployments" in CONTRIBUTING.md.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-preview*.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build for testnet
+        env:
+          VITE_NETWORK: testnet
+          # Repository variable (Settings → Secrets and variables → Actions →
+          # Variables): the testnet backend the preview talks to, e.g.
+          # https://testnet-api.example.org/api/v1. Not a secret.
+          PREVIEW_API_BASE_URL: ${{ vars.PREVIEW_API_BASE_URL }}
+        run: |
+          # Only set the API URL when configured: an empty VITE_API_BASE_URL
+          # would override the app's '/api/v1' default with ''.
+          if [ -n "$PREVIEW_API_BASE_URL" ]; then
+            export VITE_API_BASE_URL="$PREVIEW_API_BASE_URL"
+          else
+            echo "::warning::PREVIEW_API_BASE_URL is not set; the preview will call /api/v1 on the preview host."
+          fi
+          npx vite build
+
+      - name: Upload preview artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-preview
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 7
