@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt deploy bindings load-test clean help
+.PHONY: build test lint fmt deploy bindings load-test docs-check clean help
 
 ## Build the contract for WASM target
 build:
@@ -31,6 +31,11 @@ bindings: build
 load-test:
 	./scripts/k6/run.sh $(or $(SCENARIO),mixed)
 
+## Spell-check and link-check docs (needs `typos` and `lychee` on PATH; ONLINE=1 also checks external URLs)
+docs-check:
+	./scripts/docs-files.sh | xargs typos --config _typos.toml
+	./scripts/docs-files.sh | xargs lychee --config lychee.toml --no-progress $(if $(ONLINE),,--offline)
+
 ## Remove build artifacts and generated bindings
 clean:
 	cargo clean
@@ -45,5 +50,6 @@ help:
 	@echo "  make deploy    - Deploy contract via scripts/deploy.sh"
 	@echo "  make bindings  - Generate TypeScript bindings"
 	@echo "  make load-test - Run k6 load scenarios (SCENARIO=mixed|list|filter|stream|tx)"
+	@echo "  make docs-check - Spell and link check docs (ONLINE=1 for external links)"
 	@echo "  make clean     - Clean build artifacts"
 	@echo "  make help      - Show this help"

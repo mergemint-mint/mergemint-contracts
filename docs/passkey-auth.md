@@ -139,4 +139,4 @@ The Stellar Foundation's [sep-smart-wallet](https://github.com/stellar/sep-smart
 - [Signing Soroban contract invocations](https://developers.stellar.org/docs/build/guides/transactions/signing-soroban-invocations) — auth-entry signing, C-account authorization, fee-payer patterns
 - [Contract authorization fundamentals](https://developers.stellar.org/docs/learn/fundamentals/contract-development/authorization) — how `require_auth` and `__check_auth` interact
 - [Passkey dapp tutorial](https://developers.stellar.org/docs/build/apps/guestbook/overview) — Stellar's official walkthrough for building a passkey-enabled dapp
-- [SEP-45: Stellar Auth for Contract Accounts](https://developers.stellar.org/platforms/anchor-platform/sep-guide/sep45) — authenticated sessions for C-accounts with anchors
+- [SEP-45: Stellar Auth for Contract Accounts](https://developers.stellar.org/docs/platforms/anchor-platform/sep-guide/sep45) — authenticated sessions for C-accounts with anchors

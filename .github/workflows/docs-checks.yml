@@ -1,0 +1,82 @@
+name: Docs Checks
+
+# Spell check (typos) and link check (lychee) for the Markdown under docs/,
+# security/, every README and CONTRIBUTING.md (file list: scripts/docs-files.sh).
+#
+# - Pull requests / pushes that change Markdown: spell check + offline link
+#   check (relative links and #heading fragments only, no network).
+# - Weekly schedule (and manual runs): link check including external URLs, so
+#   rot in third-party links is caught without slowing every PR.
+#
+# Run the same checks locally with `make docs-check`.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.md"
+      - "_typos.toml"
+      - "lychee.toml"
+      - "scripts/docs-files.sh"
+      - ".github/workflows/docs-checks.yml"
+  pull_request:
+    paths:
+      - "**/*.md"
+      - "_typos.toml"
+      - "lychee.toml"
+      - "scripts/docs-files.sh"
+      - ".github/workflows/docs-checks.yml"
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC — external links
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  spellcheck:
+    name: Spell check (typos)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: List docs files
+        id: files
+        run: echo "list=$(scripts/docs-files.sh | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Run typos
+        uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
+        with:
+          config: _typos.toml
+          files: ${{ steps.files.outputs.list }}
+
+  links:
+    name: Link check (lychee)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: List docs files
+        id: files
+        env:
+          # Scheduled and manual runs also hit external URLs; PR/push runs only
+          # resolve relative links and fragments.
+          OFFLINE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'false' || 'true' }}
+        run: |
+          args="--config lychee.toml --no-progress"
+          if [ "$OFFLINE" = "true" ]; then
+            args="$args --offline"
+          fi
+          echo "args=$args $(scripts/docs-files.sh | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Run lychee
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          args: ${{ steps.files.outputs.args }}
+          fail: true
