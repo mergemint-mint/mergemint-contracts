@@ -1,0 +1,36 @@
+# CodeQL configuration for .github/workflows/codeql.yml.
+#
+# Scope: the TypeScript/JavaScript packages. Rust is covered by cargo-audit /
+# cargo-deny, Solidity by Slither.
+name: MergeMint TypeScript CodeQL config
+
+queries:
+  # Default queries plus the extra security checks (no code-quality noise).
+  - uses: security-extended
+
+paths:
+  - frontend
+  - sdk
+  - backend
+  - mergemint-frontend
+
+paths-ignore:
+  # Dependencies and build output
+  - "**/node_modules"
+  - "**/dist"
+  - "**/build"
+  - "**/coverage"
+  - "**/storybook-static"
+  - "**/generated"
+  # Tests, fixtures and stories
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/*.spec.ts"
+  - "**/*.spec.tsx"
+  - "**/*.stories.ts"
+  - "**/*.stories.tsx"
+  - "**/__tests__"
+  - "**/__mocks__"
+  - "**/test-setup.ts"
+  - frontend/e2e
+  - frontend/.storybook

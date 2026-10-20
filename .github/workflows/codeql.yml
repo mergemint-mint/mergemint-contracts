@@ -1,0 +1,61 @@
+name: CodeQL
+
+# Static security analysis (CodeQL) for the TypeScript/JavaScript packages:
+# frontend/, sdk/, backend/ and mergemint-frontend/. Scope and exclusions live
+# in .github/codeql/codeql-config.yml. Findings appear under
+# Security → Code scanning; new alerts on a PR show up as review annotations.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "sdk/**"
+      - "backend/**"
+      - "mergemint-frontend/**"
+      - ".github/codeql/**"
+      - ".github/workflows/codeql.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "sdk/**"
+      - "backend/**"
+      - "mergemint-frontend/**"
+      - ".github/codeql/**"
+      - ".github/workflows/codeql.yml"
+  schedule:
+    - cron: "0 5 * * 1" # Mondays 05:00 UTC — picks up new CodeQL queries against unchanged code
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write # upload SARIF results to code scanning
+      actions: read # required by codeql-action on private repos
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          languages: javascript-typescript
+          # JS/TS is analysed from source; no install or build step needed.
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          category: "/language:javascript-typescript"
