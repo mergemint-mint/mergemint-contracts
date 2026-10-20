@@ -88,18 +88,19 @@ function BountyDetailInner() {
   const handleTopUp = useCallback(
     async (amount: string) => {
       if (!id || !bounty) return;
-      await api.topUpBounty(id, amount, bounty.rewardToken ?? '');
+      if (!address) throw new Error('Connect a wallet to top up this bounty.');
+      await api.topUpBounty(id, amount, address);
       fetchBounty();
     },
-    [id, bounty] // eslint-disable-line react-hooks/exhaustive-deps
+    [id, bounty, address] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const handleCancel = useCallback(async () => {
-    if (!id) return;
-    await api.cancelBounty(id);
+    if (!id || !address) return;
+    await api.cancelBounty(id, address);
     setShowCancel(false);
     fetchBounty();
-  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [id, address]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading && !bounty) return <BountyDetailSkeleton />;
   if (notFound) {

@@ -415,6 +415,7 @@ mod tests {
     fn test_state() -> Arc<AppState> {
         Arc::new(AppState {
             db: new_shared_db(),
+            postgres: None,
             idempotency: new_shared_idempotency_store(),
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,

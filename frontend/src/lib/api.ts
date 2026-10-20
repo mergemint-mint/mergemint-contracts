@@ -6,6 +6,7 @@ import {
   LeaderboardPage,
   RewardToken,
 } from '../types';
+import { signTransaction } from './wallet';
 
 // All stable endpoints are versioned under /api/v1. The base URL can be
 // overridden for local development via VITE_API_BASE_URL (e.g. http://localhost:8080/api/v1).
@@ -19,6 +20,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(body || `Request failed with status ${res.status}`);
   }
   return res.json() as Promise<T>;
+}
+
+async function buildSignAndSubmit(
+  path: string,
+  body: Record<string, string | number>,
+  source: string
+): Promise<{ hash: string }> {
+  const built = await request<{ xdr: string }>(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const xdr = await signTransaction(built.xdr);
+  return request<{ hash: string }>('/tx/submit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source, xdr }),
+  });
 }
 
 export type BountySortField = 'reward' | 'deadline' | 'created';
@@ -206,32 +225,24 @@ export const api = {
    * Submit a top-up for an existing bounty (calls the contract's top_up_bounty).
    * Returns the updated Bounty.
    */
-  topUpBounty(id: string, amount: string, tokenAddress: string): Promise<{ hash: string }> {
-    return request(`/tx/top-up-bounty`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bountyId: id, amount, tokenAddress }),
-    });
+  topUpBounty(id: string, amount: string, funder: string): Promise<{ hash: string }> {
+    return buildSignAndSubmit('/tx/top-up', { bountyId: id, amount, funder }, funder);
   },
   /**
    * Submit a deadline extension (calls the contract's extend_deadline).
    * `newDeadline` is a Unix timestamp (seconds).
    */
-  extendDeadline(id: string, newDeadline: number): Promise<{ hash: string }> {
-    return request(`/tx/extend-deadline`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bountyId: id, newDeadline }),
-    });
+  extendDeadline(id: string, newDeadline: number, creator: string): Promise<{ hash: string }> {
+    return buildSignAndSubmit(
+      '/tx/extend-deadline',
+      { bountyId: id, newDeadline, creator },
+      creator
+    );
   },
   /**
    * Submit a bounty cancellation (calls the contract's cancel_bounty).
    */
-  cancelBounty(id: string): Promise<{ hash: string }> {
-    return request(`/tx/cancel-bounty`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bountyId: id }),
-    });
+  cancelBounty(id: string, creator: string): Promise<{ hash: string }> {
+    return buildSignAndSubmit('/tx/cancel', { bountyId: id, creator }, creator);
   },
 };

@@ -67,10 +67,13 @@
 // instance whose database connection is broken.  `/health` stays cheap and
 // database-independent so it remains a pure liveness check.
 
+use sqlx::postgres::PgPoolOptions;
+use sqlx::Row;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 
 use axum::{
     body::Body,
@@ -106,7 +109,13 @@ mod test_helpers;
 mod webhooks;
 
 use db::{new_shared_db, new_shared_idempotency_store};
+use deadline_reminders::{
+    read_deadline_reminder_interval, read_deadline_reminder_lead_time, start_deadline_reminder_job,
+};
 use metrics::{metrics_router, track_metrics, Metrics};
+use notifications::{
+    create_email_subscription, start_email_notifier, unsubscribe_email, verify_email,
+};
 use routes::bounties::{
     bounty_stream, claim_bounty, get_bounty_route, list_bounties, list_bounties_by_assignee,
 };
@@ -116,14 +125,8 @@ use routes::tx::{
 };
 use webhooks::{
     create_subscription_route, delete_subscription_route, get_subscription_route,
-    list_subscriptions_route, start_webhook_dispatcher, RetryConfig,
-};
-use deadline_reminders::{
-    read_deadline_reminder_interval, read_deadline_reminder_lead_time,
-    start_deadline_reminder_job,
-};
-use notifications::{
-    create_email_subscription, start_email_notifier, unsubscribe_email, verify_email,
+    list_failed_webhooks_route, list_subscriptions_route, replay_webhook_route,
+    start_webhook_dispatcher, RetryConfig,
 };
 
 /// Maximum allowed request body size (1 MiB).
@@ -169,6 +172,12 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
         routes::leaderboard::get_leaderboard_route,
         routes::stats::get_stats_route,
         routes::tx::query_audit_logs,
+        routes::tx::cancel_bounty_transaction,
+        routes::tx::top_up_bounty_transaction,
+        routes::tx::extend_deadline_transaction,
+        routes::tx::submit_signed_transaction,
+        webhooks::list_failed_webhooks_route,
+        webhooks::replay_webhook_route,
         notifications::create_email_subscription,
         notifications::verify_email,
         notifications::unsubscribe_email,
@@ -183,12 +192,20 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
         routes::bounties::ClaimResponse,
         routes::tx::AppError,
         routes::tx::QueryAuditLogsResponse,
+        routes::tx::CancelBountyRequest,
+        routes::tx::TopUpBountyRequest,
+        routes::tx::ExtendDeadlineRequest,
+        routes::tx::UnsignedTransactionResponse,
+        routes::tx::SubmitSignedTransactionRequest,
+        routes::tx::SubmitTransactionResponse,
         db::AuditLog,
         db::LeaderboardEntry,
         db::LeaderboardPage,
         db::StatsResponse,
         db::TokenTotal,
         db::WebhookSubscription,
+        webhooks::FailedWebhookDelivery,
+        webhooks::FailedWebhookPage,
         notifications::CreateEmailSubscriptionRequest,
     )),
     tags(
@@ -249,10 +266,72 @@ async fn main() {
 
     let shared_db = new_shared_db();
     let idempotency = new_shared_idempotency_store();
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .expect("failed to connect to PostgreSQL");
+    for statement in include_str!("../migrations/0005_create_webhook_deliveries.sql")
+        .split(';')
+        .filter(|statement| !statement.trim().is_empty())
+    {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("failed to initialize webhook delivery storage");
+    }
+    for statement in include_str!("../migrations/0002_create_webhook_subscriptions.sql")
+        .split(';')
+        .filter(|statement| !statement.trim().is_empty())
+    {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("failed to initialize webhook subscription storage");
+    }
+    for statement in include_str!("../migrations/0002_create_audit_logs_table.sql")
+        .split(';')
+        .filter(|statement| !statement.trim().is_empty())
+    {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("failed to initialize audit log storage");
+    }
+    sqlx::query("UPDATE webhook_deliveries SET status = 'pending', updated_at = NOW() WHERE status = 'delivering'")
+        .execute(&pool)
+        .await
+        .expect("failed to recover interrupted webhook deliveries");
+    let subscriptions = sqlx::query(
+        "SELECT id, url, secret, event_types, active, created_at FROM webhook_subscriptions WHERE active = TRUE",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("failed to restore webhook subscriptions");
+    {
+        let mut store = db::acquire_db(&shared_db);
+        store.webhook_subscriptions = subscriptions
+            .into_iter()
+            .map(|row| {
+                Ok(db::WebhookSubscription {
+                    id: row.try_get("id")?,
+                    url: row.try_get("url")?,
+                    secret: row.try_get("secret")?,
+                    event_types: row.try_get("event_types")?,
+                    active: row.try_get("active")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .expect("failed to decode webhook subscriptions");
+    }
+    let postgres = Some(pool);
     let (bounty_broadcast, _) = tokio::sync::broadcast::channel(100);
     let sse_keep_alive_duration = read_sse_keep_alive_duration();
     let state = Arc::new(AppState {
         db: shared_db,
+        postgres,
         idempotency,
         rate_limiter: new_shared_rate_limiter(),
         bounty_broadcast,
@@ -265,7 +344,7 @@ async fn main() {
         .build()
         .unwrap_or_default();
     let _webhook_dispatcher =
-        start_webhook_dispatcher(state.clone(), webhook_client, RetryConfig::default());
+        start_webhook_dispatcher(state.clone(), webhook_client, RetryConfig::from_env());
     let _email_notifier = start_email_notifier(state.clone());
     let _deadline_reminder_job = start_deadline_reminder_job(
         state.clone(),
@@ -275,6 +354,12 @@ async fn main() {
 
     let metrics = Arc::new(Metrics::new());
 
+    let admin_routes = Router::new()
+        .route("/audit-logs", get(query_audit_logs))
+        .route("/webhooks/failed", get(list_failed_webhooks_route))
+        .route("/webhooks/:id/replay", post(replay_webhook_route))
+        .route_layer(middleware::from_fn(require_admin));
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/api-docs/openapi.json", get(openapi_json))
@@ -282,7 +367,25 @@ async fn main() {
         .route("/ready", get(ready))
         .route("/tx/resolve-dispute", post(resolve_dispute))
         .route("/tx/self-claim", post(self_claim))
-        .route("/admin/audit-logs", get(query_audit_logs))
+        .route("/tx/cancel", post(routes::tx::cancel_bounty_transaction))
+        .route("/tx/top-up", post(routes::tx::top_up_bounty_transaction))
+        .route(
+            "/tx/extend-deadline",
+            post(routes::tx::extend_deadline_transaction),
+        )
+        .route("/tx/submit", post(routes::tx::submit_signed_transaction))
+        .route(
+            "/tx/cancel-bounty",
+            post(routes::tx::cancel_bounty_transaction),
+        )
+        .route(
+            "/tx/top-up-bounty",
+            post(routes::tx::top_up_bounty_transaction),
+        )
+        .route(
+            "/tx/extend-deadline-bounty",
+            post(routes::tx::extend_deadline_transaction),
+        )
         .route("/bounties", get(list_bounties))
         .route("/bounties/:id", get(get_bounty_route))
         .route(
@@ -302,7 +405,11 @@ async fn main() {
             "/webhooks/subscriptions/:id",
             get(get_subscription_route).delete(delete_subscription_route),
         )
-        .route("/notifications/subscriptions", post(create_email_subscription))
+        .nest("/admin", admin_routes)
+        .route(
+            "/notifications/subscriptions",
+            post(create_email_subscription),
+        )
         .route("/notifications/verify", get(verify_email))
         .route("/notifications/unsubscribe", get(unsubscribe_email))
         .with_state(state)
@@ -418,6 +525,37 @@ async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
+async fn require_admin(request: Request<Body>, next: Next) -> Response {
+    let expected = std::env::var("ADMIN_API_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+    let supplied = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let authorized = expected
+        .as_deref()
+        .zip(supplied)
+        .is_some_and(|(expected, supplied)| {
+            expected.as_bytes().ct_eq(supplied.as_bytes()).unwrap_u8() == 1
+        });
+    if authorized {
+        next.run(request).await
+    } else {
+        let status = if expected.is_some() {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        (
+            status,
+            Json(serde_json::json!({ "error": "admin authorization required" })),
+        )
+            .into_response()
+    }
+}
+
 /// `GET /swagger-ui` — interactive API docs rendering `/api-docs/openapi.json`.
 async fn swagger_ui() -> Html<String> {
     Html(format!(
@@ -451,6 +589,12 @@ async fn health() -> &'static str {
 ///  * `200 ready` if the database is open and reachable
 ///  * `503 database unavailable` if the database is closed or unreachable
 async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Some(pool) = &state.postgres {
+        return match pool.acquire().await {
+            Ok(_) => (StatusCode::OK, "ready"),
+            Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
+        };
+    }
     match db::ping_db(&state.db) {
         Ok(()) => (StatusCode::OK, "ready"),
         Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
@@ -553,6 +697,7 @@ mod tests {
         let (bounty_broadcast, _) = tokio::sync::broadcast::channel(10);
         let state = std::sync::Arc::new(super::AppState {
             db: shared_db,
+            postgres: None,
             idempotency,
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast,
@@ -590,6 +735,7 @@ mod tests {
         let (bounty_broadcast, _) = tokio::sync::broadcast::channel(10);
         let state = std::sync::Arc::new(super::AppState {
             db: shared_db,
+            postgres: None,
             idempotency,
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast,
@@ -708,6 +854,7 @@ mod tests {
         );
         let state = Arc::new(AppState {
             db,
+            postgres: None,
             idempotency: new_shared_idempotency_store(),
             rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,

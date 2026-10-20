@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -8,8 +8,10 @@ use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use sqlx::Row;
 use std::sync::Arc;
 use std::time::Duration;
+use utoipa::IntoParams;
 use uuid::Uuid;
 
 use crate::db::{
@@ -60,12 +62,42 @@ impl Default for RetryConfig {
     }
 }
 
+impl RetryConfig {
+    pub fn from_env() -> Self {
+        let default = Self::default();
+        Self {
+            max_attempts: std::env::var("WEBHOOK_MAX_ATTEMPTS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(default.max_attempts),
+            initial_delay: Duration::from_millis(
+                std::env::var("WEBHOOK_INITIAL_DELAY_MS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(default.initial_delay.as_millis() as u64),
+            ),
+            backoff_factor: std::env::var("WEBHOOK_BACKOFF_FACTOR")
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value >= 1.0)
+                .unwrap_or(default.backoff_factor),
+            max_delay: Duration::from_millis(
+                std::env::var("WEBHOOK_MAX_DELAY_MS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(default.max_delay.as_millis() as u64),
+            ),
+        }
+    }
+}
+
 /// Errors that can occur during webhook delivery and retry attempts.
 #[derive(Debug)]
 pub enum WebhookDeliveryError {
     SerializationError(String),
     ClientError(StatusCode, String),
-    MaxRetriesExceeded(usize, String),
+    MaxRetriesExceeded(usize, String, Option<StatusCode>),
 }
 
 impl std::fmt::Display for WebhookDeliveryError {
@@ -75,7 +107,7 @@ impl std::fmt::Display for WebhookDeliveryError {
             Self::ClientError(status, msg) => {
                 write!(f, "Non-retryable client error {status}: {msg}")
             }
-            Self::MaxRetriesExceeded(attempts, msg) => {
+            Self::MaxRetriesExceeded(attempts, msg, _) => {
                 write!(f, "Delivery failed after {attempts} attempts: {msg}")
             }
         }
@@ -144,6 +176,7 @@ pub async fn deliver_webhook_payload(
     let signature_header = format!("sha256={signature_hex}");
 
     let mut last_error_message = String::new();
+    let mut last_status = None;
 
     for attempt in 1..=retry_config.max_attempts {
         if attempt > 1 {
@@ -163,6 +196,10 @@ pub async fn deliver_webhook_payload(
         match request.send().await {
             Ok(response) => {
                 let status = response.status();
+                last_status = Some(
+                    StatusCode::from_u16(status.as_u16())
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                );
                 if status.is_success() {
                     return Ok(());
                 }
@@ -186,6 +223,7 @@ pub async fn deliver_webhook_payload(
     Err(WebhookDeliveryError::MaxRetriesExceeded(
         retry_config.max_attempts,
         last_error_message,
+        last_status,
     ))
 }
 
@@ -235,6 +273,23 @@ pub fn start_webhook_dispatcher(
     client: reqwest::Client,
     retry_config: RetryConfig,
 ) -> tokio::task::JoinHandle<()> {
+    if let Some(pool) = state.postgres.clone() {
+        let delivery_client = client.clone();
+        let delivery_config = retry_config.clone();
+        tokio::spawn(async move {
+            loop {
+                match process_next_delivery(&pool, &delivery_client, &delivery_config).await {
+                    Ok(true) => {}
+                    Ok(false) => tokio::time::sleep(Duration::from_millis(250)).await,
+                    Err(error) => {
+                        tracing::error!(%error, "webhook delivery queue processing failed");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        });
+    }
+
     tokio::spawn(async move {
         let mut rx = state.bounty_broadcast.subscribe();
 
@@ -244,16 +299,36 @@ pub fn start_webhook_dispatcher(
                     let event = decode_bounty_event(&raw_message);
                     let payload =
                         build_bounty_event_payload(&state.db, &event.name, &event.bounty_id);
-                    for result in
-                        dispatch_event(&state.db, &client, &payload, &retry_config).await
-                    {
-                        if let Err(error) = result {
-                            tracing::error!(
-                                event = %event.name,
-                                bounty_id = %event.bounty_id,
-                                %error,
-                                "webhook delivery failed"
-                            );
+                    if let Some(pool) = &state.postgres {
+                        let subscriptions = list_webhook_subscriptions(&state.db);
+                        for subscription in subscriptions {
+                            if subscription_matches_event(&subscription, &payload.event) {
+                                if let Err(error) = sqlx::query(
+                                    "INSERT INTO webhook_deliveries (subscription_id, subscription_url, subscription_secret, payload) VALUES ($1, $2, $3, $4)",
+                                )
+                                .bind(&subscription.id)
+                                .bind(&subscription.url)
+                                .bind(&subscription.secret)
+                                .bind(serde_json::to_value(&payload).unwrap_or_default())
+                                .execute(pool)
+                                .await
+                                {
+                                    tracing::error!(%error, "failed to enqueue webhook delivery");
+                                }
+                            }
+                        }
+                    } else {
+                        for result in
+                            dispatch_event(&state.db, &client, &payload, &retry_config).await
+                        {
+                            if let Err(error) = result {
+                                tracing::error!(
+                                    event = %event.name,
+                                    bounty_id = %event.bounty_id,
+                                    %error,
+                                    "webhook delivery failed"
+                                );
+                            }
                         }
                     }
                 }
@@ -267,6 +342,294 @@ pub fn start_webhook_dispatcher(
             }
         }
     })
+}
+
+async fn process_next_delivery(
+    pool: &sqlx::PgPool,
+    client: &reqwest::Client,
+    retry_config: &RetryConfig,
+) -> anyhow::Result<bool> {
+    let row = sqlx::query(
+        "WITH next_delivery AS (SELECT id FROM webhook_deliveries WHERE status = 'pending' AND next_attempt_at <= NOW() ORDER BY next_attempt_at, id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE webhook_deliveries AS delivery SET status = 'delivering', updated_at = NOW() FROM next_delivery WHERE delivery.id = next_delivery.id RETURNING delivery.id, delivery.subscription_id, delivery.subscription_url, delivery.subscription_secret, delivery.payload, delivery.attempts",
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+
+    let id: i64 = row.try_get("id")?;
+    let subscription = WebhookSubscription {
+        id: row.try_get("subscription_id")?,
+        url: row.try_get("subscription_url")?,
+        secret: row.try_get("subscription_secret")?,
+        event_types: Vec::new(),
+        active: true,
+        created_at: Utc::now(),
+    };
+    let payload: WebhookPayload = serde_json::from_value(row.try_get("payload")?)?;
+    let attempts: i32 = row.try_get("attempts")?;
+    let mut single_attempt = retry_config.clone();
+    single_attempt.max_attempts = 1;
+
+    let result = deliver_webhook_payload(client, &subscription, &payload, &single_attempt).await;
+    let attempt = attempts.saturating_add(1);
+    let (status_code, error_detail, permanent) = match &result {
+        Ok(()) => (Some(200), None, false),
+        Err(WebhookDeliveryError::ClientError(status, detail)) => {
+            (Some(status.as_u16() as i32), Some(detail.clone()), true)
+        }
+        Err(WebhookDeliveryError::MaxRetriesExceeded(_, detail, status)) => (
+            status.map(|status| status.as_u16() as i32),
+            Some(detail.clone()),
+            false,
+        ),
+        Err(error) => (None, Some(error.to_string()), true),
+    };
+    sqlx::query(
+        "INSERT INTO webhook_delivery_attempts (delivery_id, attempt_number, status_code, error) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(attempt)
+    .bind(status_code)
+    .bind(error_detail.as_deref())
+    .execute(pool)
+    .await?;
+
+    match result {
+        Ok(()) => {
+            sqlx::query(
+                "UPDATE webhook_deliveries SET status = 'delivered', attempts = $2, updated_at = NOW(), delivered_at = NOW(), last_status = 200, last_error = NULL WHERE id = $1",
+            )
+            .bind(id)
+            .bind(attempt)
+            .execute(pool)
+            .await?;
+        }
+        Err(error) => {
+            let exhausted = attempt as usize >= retry_config.max_attempts.max(1);
+            if permanent || exhausted {
+                sqlx::query(
+                    "UPDATE webhook_deliveries SET status = 'dead_letter', attempts = $2, last_status = $3, last_error = $4, updated_at = NOW() WHERE id = $1",
+                )
+                .bind(id)
+                .bind(attempt)
+                .bind(status_code)
+                .bind(error_detail.as_deref())
+                .execute(pool)
+                .await?;
+            } else {
+                let delay = calculate_backoff_delay(attempt as usize + 1, retry_config);
+                sqlx::query(
+                    "UPDATE webhook_deliveries SET status = 'pending', attempts = $2, last_status = $3, last_error = $4, next_attempt_at = NOW() + ($5 * INTERVAL '1 millisecond'), updated_at = NOW() WHERE id = $1",
+                )
+                .bind(id)
+                .bind(attempt)
+                .bind(status_code)
+                .bind(error_detail.as_deref())
+                .bind(delay.as_millis() as i64)
+                .execute(pool)
+                .await?;
+            }
+            tracing::warn!(delivery_id = id, attempt, %error, "webhook delivery attempt failed");
+        }
+    }
+
+    Ok(true)
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct FailedWebhookQuery {
+    pub cursor: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct FailedWebhookDelivery {
+    pub id: i64,
+    pub subscription_id: String,
+    #[schema(value_type = Object)]
+    pub payload: serde_json::Value,
+    pub attempts: i32,
+    pub last_status: Option<i32>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct FailedWebhookPage {
+    pub deliveries: Vec<FailedWebhookDelivery>,
+    pub next_cursor: Option<i64>,
+}
+
+/// List dead-lettered webhook deliveries with cursor pagination.
+#[utoipa::path(
+    get,
+    path = "/admin/webhooks/failed",
+    params(FailedWebhookQuery),
+    responses(
+        (status = 200, description = "Paginated failed webhook deliveries", body = FailedWebhookPage),
+        (status = 503, description = "Persistent delivery storage is unavailable", body = crate::routes::tx::AppError),
+    ),
+    tag = "admin"
+)]
+pub async fn list_failed_webhooks_route(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<FailedWebhookQuery>,
+) -> Result<Json<FailedWebhookPage>, (StatusCode, Json<crate::routes::tx::AppError>)> {
+    let pool = state.postgres.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::routes::tx::AppError {
+                code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                message: "persistent delivery storage is unavailable".to_string(),
+            }),
+        )
+    })?;
+    if params.cursor.is_some_and(|cursor| cursor <= 0) {
+        return Err(crate::routes::tx::AppError::bad_request(
+            "cursor must be a positive delivery id",
+        ));
+    }
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
+    let rows = sqlx::query(
+        "SELECT id, subscription_id, payload, attempts, last_status, last_error, created_at FROM webhook_deliveries WHERE status = 'dead_letter' AND ($1::BIGINT IS NULL OR id < $1) ORDER BY id DESC LIMIT $2",
+    )
+    .bind(params.cursor)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "failed to query dead-lettered webhook deliveries");
+        crate::routes::tx::AppError::internal("failed to query webhook deliveries")
+    })?;
+
+    let mut deliveries = rows
+        .into_iter()
+        .map(|row| {
+            Ok(FailedWebhookDelivery {
+                id: row.try_get("id").map_err(|error| {
+                    tracing::error!(%error, "invalid webhook delivery row");
+                    crate::routes::tx::AppError::internal("failed to read webhook delivery")
+                })?,
+                subscription_id: row.try_get("subscription_id").map_err(|error| {
+                    tracing::error!(%error, "invalid webhook delivery row");
+                    crate::routes::tx::AppError::internal("failed to read webhook delivery")
+                })?,
+                payload: row.try_get("payload").map_err(|error| {
+                    tracing::error!(%error, "invalid webhook delivery row");
+                    crate::routes::tx::AppError::internal("failed to read webhook delivery")
+                })?,
+                attempts: row.try_get("attempts").map_err(|error| {
+                    tracing::error!(%error, "invalid webhook delivery row");
+                    crate::routes::tx::AppError::internal("failed to read webhook delivery")
+                })?,
+                last_status: row.try_get("last_status").map_err(|error| {
+                    tracing::error!(%error, "invalid webhook delivery row");
+                    crate::routes::tx::AppError::internal("failed to read webhook delivery")
+                })?,
+                last_error: row.try_get("last_error").map_err(|error| {
+                    tracing::error!(%error, "invalid webhook delivery row");
+                    crate::routes::tx::AppError::internal("failed to read webhook delivery")
+                })?,
+                created_at: row.try_get("created_at").map_err(|error| {
+                    tracing::error!(%error, "invalid webhook delivery row");
+                    crate::routes::tx::AppError::internal("failed to read webhook delivery")
+                })?,
+            })
+        })
+        .collect::<Result<Vec<_>, (StatusCode, Json<crate::routes::tx::AppError>)>>()?;
+    let has_more = deliveries.len() as i64 > limit;
+    if has_more {
+        deliveries.truncate(limit as usize);
+    }
+    let next_cursor = has_more
+        .then(|| deliveries.last().map(|delivery| delivery.id))
+        .flatten();
+    Ok(Json(FailedWebhookPage {
+        deliveries,
+        next_cursor,
+    }))
+}
+
+/// Requeue a dead-lettered delivery and record the administrative action.
+#[utoipa::path(
+    post,
+    path = "/admin/webhooks/{id}/replay",
+    params(("id" = i64, Path, description = "Dead-letter delivery identifier")),
+    responses(
+        (status = 202, description = "Delivery queued for replay"),
+        (status = 404, description = "Dead-letter delivery not found", body = crate::routes::tx::AppError),
+        (status = 503, description = "Persistent delivery storage is unavailable", body = crate::routes::tx::AppError),
+    ),
+    tag = "admin"
+)]
+pub async fn replay_webhook_route(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, (StatusCode, Json<crate::routes::tx::AppError>)> {
+    let pool = state.postgres.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::routes::tx::AppError {
+                code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                message: "persistent delivery storage is unavailable".to_string(),
+            }),
+        )
+    })?;
+    let mut transaction = pool.begin().await.map_err(|error| {
+        tracing::error!(%error, delivery_id = id, "failed to begin webhook replay transaction");
+        crate::routes::tx::AppError::internal("failed to replay webhook delivery")
+    })?;
+    let replayed = sqlx::query(
+        "UPDATE webhook_deliveries SET status = 'pending', attempts = 0, last_status = NULL, last_error = NULL, next_attempt_at = NOW(), updated_at = NOW(), delivered_at = NULL WHERE id = $1 AND status = 'dead_letter' RETURNING id",
+    )
+    .bind(id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, delivery_id = id, "failed to replay webhook delivery");
+        crate::routes::tx::AppError::internal("failed to replay webhook delivery")
+    })?;
+    if replayed.is_none() {
+        return Err(crate::routes::tx::AppError::not_found(
+            "dead-letter delivery not found",
+        ));
+    }
+
+    let timestamp = Utc::now().timestamp().max(0) as u64;
+    sqlx::query(
+        "INSERT INTO audit_logs (actor, action, target, timestamp) VALUES ($1, $2, $3, $4)",
+    )
+    .bind("admin")
+    .bind("webhook_delivery_replay")
+    .bind(id.to_string())
+    .bind(timestamp as i64)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, delivery_id = id, "failed to record webhook replay audit entry");
+        crate::routes::tx::AppError::internal("failed to record replay audit entry")
+    })?;
+    transaction.commit().await.map_err(|error| {
+        tracing::error!(%error, delivery_id = id, "failed to commit webhook replay transaction");
+        crate::routes::tx::AppError::internal("failed to replay webhook delivery")
+    })?;
+    crate::db::write_audit_log(
+        &state.db,
+        crate::db::AuditLog::new(
+            "admin".to_string(),
+            "webhook_delivery_replay".to_string(),
+            id.to_string(),
+            timestamp,
+        ),
+    );
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "id": id, "queued": true })),
+    ))
 }
 
 /// Create a new webhook subscription.
@@ -302,6 +665,27 @@ pub async fn create_subscription_route(
     } else {
         payload.event_types
     };
+
+    if let Some(pool) = &state.postgres {
+        sqlx::query(
+            "INSERT INTO webhook_subscriptions (id, url, secret, event_types) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&subscription_id)
+        .bind(trimmed_url)
+        .bind(trimmed_secret)
+        .bind(&event_types)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to persist webhook subscription");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "webhook subscription storage unavailable"
+                })),
+            )
+        })?;
+    }
 
     let subscription = add_webhook_subscription(
         &state.db,
@@ -357,6 +741,21 @@ pub async fn delete_subscription_route(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(pool) = &state.postgres {
+        sqlx::query("DELETE FROM webhook_subscriptions WHERE id = $1")
+            .bind(&id)
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, subscription_id = %id, "failed to delete webhook subscription");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "webhook subscription storage unavailable"
+                    })),
+                )
+            })?;
+    }
     if delete_webhook_subscription(&state.db, &id) {
         Ok((
             StatusCode::OK,
@@ -638,7 +1037,7 @@ mod tests {
         let result = deliver_webhook_payload(&client, &subscription, &payload, &config).await;
         assert!(matches!(
             result,
-            Err(WebhookDeliveryError::MaxRetriesExceeded(3, _))
+            Err(WebhookDeliveryError::MaxRetriesExceeded(3, _, _))
         ));
         assert_eq!(attempts_count.load(Ordering::SeqCst), 3);
     }
@@ -705,6 +1104,7 @@ mod tests {
     async fn test_subscription_routes_lifecycle() {
         let state = Arc::new(AppState {
             db: new_shared_db(),
+            postgres: None,
             idempotency: crate::db::new_shared_idempotency_store(),
             rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
@@ -855,6 +1255,7 @@ mod tests {
         let db = new_shared_db();
         let state = Arc::new(AppState {
             db: db.clone(),
+            postgres: None,
             idempotency: crate::db::new_shared_idempotency_store(),
             rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: bounty_broadcast.clone(),

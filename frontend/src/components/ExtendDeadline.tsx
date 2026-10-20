@@ -5,6 +5,7 @@ import { TxButton } from './TxButton';
 import { TxResultBanner } from './TxResultBanner';
 import { useTxFlow } from '../hooks/useTxFlow';
 import { NetworkName } from '../lib/types';
+import { useWallet } from '../lib/WalletContext';
 
 interface ExtendDeadlineProps {
   bounty: Bounty;
@@ -74,6 +75,7 @@ export function DeadlineInput({ id, value, min, disabled, error, onChange }: Dea
  * - Submits through TxButton / useTxFlow.
  */
 export function ExtendDeadline({ bounty, network, onSuccess }: ExtendDeadlineProps) {
+  const { address } = useWallet();
   // Determine the current deadline as a string suitable for <input type="date">.
   // If the bounty has no deadline, treat today as the minimum.
   const currentDeadlineUnix = bounty.deadline ?? Math.floor(Date.now() / 1000);
@@ -107,7 +109,11 @@ export function ExtendDeadline({ bounty, network, onSuccess }: ExtendDeadlinePro
       setValidationError(err);
       return;
     }
-    await run(() => api.extendDeadline(bounty.id, fromDateInputValue(selectedDate)));
+    if (!address) {
+      setValidationError('Connect the creator wallet to extend the deadline.');
+      return;
+    }
+    await run(() => api.extendDeadline(bounty.id, fromDateInputValue(selectedDate), address));
     onSuccess?.();
   }
 
