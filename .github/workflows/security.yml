@@ -13,6 +13,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   security:
     name: cargo-audit
@@ -44,3 +47,66 @@ jobs:
           echo "### Security Audit" >> $GITHUB_STEP_SUMMARY
           echo "**Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Runs weekly via schedule in addition to push/pull_request, so new advisories against unchanged dependencies are still caught." >> $GITHUB_STEP_SUMMARY
+
+  # Secret scanning (#1117). Pull requests scan only the commits they add,
+  # pushes to main scan the pushed range, and the weekly schedule (plus manual
+  # runs) scans the full history of every branch. Rules and allowlists are in
+  # .gitleaks.toml.
+  #
+  # gitleaks/gitleaks-action needs a paid license for organisation repos, so
+  # this job downloads the release binary at a pinned version and checks its
+  # SHA-256 before running it.
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          sudo install "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan for secrets
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request)
+              LOG_OPTS="--no-merges ${PR_BASE_SHA}..${PR_HEAD_SHA}"
+              SCOPE="commits added by this pull request"
+              ;;
+            push)
+              if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                LOG_OPTS="$PUSH_AFTER"
+                SCOPE="full history of $PUSH_AFTER (new branch)"
+              else
+                LOG_OPTS="${PUSH_BEFORE}..${PUSH_AFTER}"
+                SCOPE="pushed commits"
+              fi
+              ;;
+            *)
+              LOG_OPTS="--all"
+              SCOPE="full history, all branches"
+              ;;
+          esac
+          echo "Scanning: $SCOPE ($LOG_OPTS)"
+          {
+            echo "### gitleaks"
+            echo "**Trigger:** \`$EVENT_NAME\`, **scope:** $SCOPE"
+          } >> "$GITHUB_STEP_SUMMARY"
+          gitleaks git --config .gitleaks.toml --redact --no-banner --verbose \
+            --log-opts="$LOG_OPTS" .

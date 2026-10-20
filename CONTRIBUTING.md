@@ -164,6 +164,7 @@ On every `git commit` the hook checks **only the parts of the repo you staged**,
 | `*.rs` / `Cargo.toml` under `mergemint-backend/`   | `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` |
 | `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `*.ts`, `*.tsx` | `eslint --max-warnings=0`, `prettier --check`                                   |
 | `*.json`, `*.css`, `*.md`, `*.yml`, `*.yaml`       | `prettier --check`                                                              |
+| all staged changes                                 | `gitleaks` secret scan, only if [gitleaks](https://github.com/gitleaks/gitleaks#installing) is installed |
 
 ESLint and Prettier are configured at the repo root (`eslint.config.mjs`, `.prettierrc.json`, `.prettierignore`) and run from the root `node_modules`, so run `npm install` first. To fix problems:
 
@@ -172,6 +173,8 @@ cargo fmt                              # Rust formatting (run in mergemint-backe
 npx prettier --write <files>           # JS/TS/JSON/Markdown/YAML formatting
 npx eslint --fix <files>               # auto-fixable lint issues
 ```
+
+The gitleaks scan uses `.gitleaks.toml` and runs the same rules as the `gitleaks` CI job in `security.yml`. That job scans every pull request's commits, and the weekly run scans the full history. Skip the local scan once with `SKIP_GITLEAKS=1 git commit ...`. If it flags a value that really is fake (a test fixture, a public Stellar `G…`/`C…` address), add a narrow allowlist entry to `.gitleaks.toml`. If it flags a real secret, rotate it: removing it from the commit does not remove it from anywhere it was already pushed.
 
 Re-run `./scripts/install-hooks.sh` after pulling changes to the script. In an emergency you can bypass the hook with `git commit --no-verify`; CI will still run the same checks.
 
