@@ -1,0 +1,97 @@
+# .github/workflows/release-please.yml
+#
+# Automated releases (issue #1101).
+#
+# On every push to `main`, release-please reads the conventional commits since
+# the last release of each component and opens (or updates) one release PR per
+# component:
+#
+#   component | path              | tag             | changelog
+#   ----------|-------------------|-----------------|-------------------------------
+#   contract  | . (root crate)    | contract-vX.Y.Z | CHANGELOG.md
+#   backend   | mergemint-backend | backend-vX.Y.Z  | mergemint-backend/CHANGELOG.md
+#   sdk       | sdk               | sdk-vX.Y.Z      | sdk/CHANGELOG.md
+#
+# Merging a release PR tags the commit and creates a GitHub release. When the
+# SDK is released, the `publish-sdk` job calls `sdk-publish.yml` to publish it
+# to npm. (Tags pushed with the default GITHUB_TOKEN do not trigger other
+# workflows, so the publish has to be called from here.)
+#
+# Configuration: release-please-config.json and .release-please-manifest.json.
+#
+# Dry run: start this workflow manually with `dry-run` checked. It prints the
+# release PRs and changelogs that would be opened without writing anything.
+
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Only print the release PRs that would be opened"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release PRs
+    if: github.event_name == 'push' || !inputs.dry-run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      sdk-release-created: ${{ steps.release.outputs['sdk--release_created'] }}
+      sdk-tag: ${{ steps.release.outputs['sdk--tag_name'] }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  dry-run:
+    name: Release PRs (dry run)
+    if: github.event_name == 'workflow_dispatch' && inputs.dry-run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: release-please release-pr --dry-run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx --yes release-please@17 release-pr \
+            --dry-run \
+            --token="$GITHUB_TOKEN" \
+            --repo-url="${{ github.repository }}" \
+            --target-branch="${{ github.ref_name }}" \
+            --config-file=release-please-config.json \
+            --manifest-file=.release-please-manifest.json
+
+  publish-sdk:
+    name: Publish SDK
+    needs: release-please
+    if: needs.release-please.outputs.sdk-release-created == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/sdk-publish.yml
+    with:
+      tag: ${{ needs.release-please.outputs.sdk-tag }}
+    secrets: inherit

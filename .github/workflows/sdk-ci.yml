@@ -82,7 +82,7 @@ jobs:
   #
   # A release is only discoverable if the version bump is documented, so when a
   # PR changes the `version` field of `sdk/package.json` it must also touch
-  # `CHANGELOG.md`. PRs that leave the version alone are unaffected.
+  # `sdk/CHANGELOG.md` (written by release-please) or `CHANGELOG.md`. PRs that leave the version alone are unaffected.
   changelog:
     name: Changelog entry for version bump
     runs-on: ubuntu-latest
@@ -113,12 +113,14 @@ jobs:
             exit 0
           fi
 
-          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -qx 'CHANGELOG.md'; then
-            echo "✓ sdk version bumped to $head_version and CHANGELOG.md was updated"
+          # release-please writes SDK entries to sdk/CHANGELOG.md; hand-made
+          # bumps may still use the root CHANGELOG.md.
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -qxE 'CHANGELOG.md|sdk/CHANGELOG.md'; then
+            echo "✓ sdk version bumped to $head_version and a CHANGELOG was updated"
             exit 0
           fi
 
-          echo "✗ sdk/package.json version changed (${base_version:-<none>} -> $head_version) but CHANGELOG.md was not updated."
+          echo "✗ sdk/package.json version changed (${base_version:-<none>} -> $head_version) but neither sdk/CHANGELOG.md nor CHANGELOG.md was updated."
           echo ""
           echo "Add an entry describing the release under the appropriate heading in CHANGELOG.md."
           exit 1

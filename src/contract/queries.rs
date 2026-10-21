@@ -6,10 +6,10 @@ const MAX_LIMIT: u32 = 50;
 
 /// The deployed contract version, as a semver string.
 ///
-/// This is the single source of truth for the contract version. Bump it here
-/// (and keep `docs/versioning.md` in sync) whenever behavior changes between
-/// releases so clients can detect mismatches via `version()`.
-const CONTRACT_VERSION: &str = "1.0.0";
+/// This is the single source of truth for the contract version. It is bumped
+/// automatically by release-please (see `docs/versioning.md`) so clients can
+/// detect mismatches via `version()`. Keep the marker comment on the same line.
+const CONTRACT_VERSION: &str = "1.0.0"; // x-release-please-version
 
 /// Resolve a `cursor` + `limit` window into a flat slice of IDs.
 ///

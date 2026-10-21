@@ -1,0 +1,83 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "1c464a7a2a4c57fb012e89eaa405b18304b6d93d",
+  "separate-pull-requests": true,
+  "include-component-in-tag": true,
+  "tag-separator": "-",
+  "pull-request-title-pattern": "chore(${component}): release ${version}",
+  "bump-minor-pre-major": true,
+  "changelog-sections": [
+    {
+      "type": "feat",
+      "section": "Added"
+    },
+    {
+      "type": "fix",
+      "section": "Fixed"
+    },
+    {
+      "type": "perf",
+      "section": "Changed"
+    },
+    {
+      "type": "refactor",
+      "section": "Changed"
+    },
+    {
+      "type": "revert",
+      "section": "Reverted"
+    },
+    {
+      "type": "docs",
+      "section": "Documentation",
+      "hidden": true
+    },
+    {
+      "type": "style",
+      "section": "Style",
+      "hidden": true
+    },
+    {
+      "type": "test",
+      "section": "Tests",
+      "hidden": true
+    },
+    {
+      "type": "chore",
+      "section": "Miscellaneous",
+      "hidden": true
+    }
+  ],
+  "packages": {
+    ".": {
+      "release-type": "rust",
+      "component": "contract",
+      "package-name": "mergemint-contracts",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        "src/contract/queries.rs"
+      ],
+      "exclude-paths": [
+        "sdk",
+        "mergemint-backend",
+        "backend",
+        "mergemint-frontend",
+        "frontend",
+        "docs",
+        ".github"
+      ]
+    },
+    "mergemint-backend": {
+      "release-type": "rust",
+      "component": "backend",
+      "package-name": "mergemint-backend",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "sdk": {
+      "release-type": "node",
+      "component": "sdk",
+      "package-name": "@mergemint/sdk",
+      "changelog-path": "CHANGELOG.md"
+    }
+  }
+}

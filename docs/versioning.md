@@ -67,34 +67,107 @@ confusing runtime error later.
 
 ### Bumping the version
 
-When a release is tagged, update the version in **both** places in the same pull
-request, keeping them identical:
+Version bumps are automated by release-please (see [Automated releases](#automated-releases)).
+When a contract release PR is merged, release-please updates **both**:
 
 1. `CONTRACT_VERSION` in `src/contract/queries.rs` — the value returned by `version()`.
-2. The `[Unreleased]` section in [CHANGELOG.md](../CHANGELOG.md), renamed to the new
-   version as described below.
+   The line carries a `// x-release-please-version` marker; do not remove it.
+2. `version` in the root `Cargo.toml` (and `Cargo.lock`).
 
-Choose the new value using the bump rules above (MAJOR / MINOR / PATCH). The
-`version()` query itself is a backwards-compatible addition, so introducing it is a
-MINOR bump; subsequent changes follow the rules for the change being made.
+The bump size comes from the commit types since the last release, following the bump
+rules above. Do not edit these versions by hand.
+
+## Automated releases
+
+Releases are cut by [release-please](https://github.com/googleapis/release-please)
+from [Conventional Commits](https://www.conventionalcommits.org/) on `main`. The
+workflow is [`.github/workflows/release-please.yml`](../.github/workflows/release-please.yml);
+its configuration lives in [`release-please-config.json`](../release-please-config.json)
+and the current versions in [`.release-please-manifest.json`](../.release-please-manifest.json).
+
+### Components
+
+Each component has its own version, changelog, tag and release PR:
+
+| Component  | Path                 | Release type | Tag               | Changelog                                                             |
+| ---------- | -------------------- | ------------ | ----------------- | --------------------------------------------------------------------- |
+| `contract` | `.` (root crate)     | `rust`       | `contract-vX.Y.Z` | [`CHANGELOG.md`](../CHANGELOG.md)                                     |
+| `backend`  | `mergemint-backend/` | `rust`       | `backend-vX.Y.Z`  | [`mergemint-backend/CHANGELOG.md`](../mergemint-backend/CHANGELOG.md) |
+| `sdk`      | `sdk/`               | `node`       | `sdk-vX.Y.Z`      | `sdk/CHANGELOG.md` (created on the first SDK release)                 |
+
+A commit belongs to a component when it touches files under that component's path.
+The `contract` component ignores `sdk/`, `mergemint-backend/`, `backend/`, the
+frontends, `docs/` and `.github/`.
+
+### How a release happens
+
+1. Pull requests land on `main` with conventional commit messages (enforced by the
+   `commitlint` and `Lint PR Title` workflows).
+2. On each push to `main`, release-please opens or updates one release PR per
+   component with changes, titled `chore(<component>): release X.Y.Z`. The PR
+   bumps the version and adds a changelog entry.
+3. A maintainer reviews the PR — the changelog text can be edited in the PR — and
+   merges it.
+4. release-please tags the merge commit (`<component>-vX.Y.Z`) and creates a GitHub
+   release with the same notes.
+5. For an `sdk` release, the workflow then calls
+   [`sdk-publish.yml`](../.github/workflows/sdk-publish.yml), which checks the tag
+   matches `sdk/package.json` and publishes `@mergemint/sdk` to npm. Pushing an
+   `sdk-v*` tag by hand still triggers the same publish.
+
+### Commit types and changelog sections
+
+| Commit type                                        | Changelog section  | Version bump      |
+| -------------------------------------------------- | ------------------ | ----------------- |
+| `feat`                                             | Added              | MINOR             |
+| `fix`                                              | Fixed              | PATCH             |
+| `perf`, `refactor`                                 | Changed            | PATCH             |
+| `revert`                                           | Reverted           | PATCH             |
+| `docs`, `style`, `test`, `chore`                   | hidden             | none on their own |
+| `!` after the type, or a `BREAKING CHANGE:` footer | listed as breaking | MAJOR             |
+
+While a component is below `1.0.0`, breaking changes bump MINOR instead of MAJOR.
+
+Use the `!` marker or a `BREAKING CHANGE:` footer for every change listed under
+[Contract Interface Changes](#contract-interface-changes), for example:
+
+```
+feat(contract)!: rename claim_bounty to claim
+
+BREAKING CHANGE: clients must call `claim` instead of `claim_bounty`.
+```
+
+To force a specific version, add a `Release-As: X.Y.Z` footer to a commit.
+
+### Dry run
+
+Run the **Release Please** workflow manually (Actions → Release Please → Run
+workflow) with `dry-run` checked. It prints the release PRs and changelogs it would
+create without opening PRs or tags. Use this on a fork to check changes to the
+configuration.
+
+### Tokens and secrets
+
+- `GITHUB_TOKEN` is enough to open release PRs and create tags. CI does not run on
+  PRs opened by `GITHUB_TOKEN`; to get CI on release PRs, add a `RELEASE_PLEASE_TOKEN`
+  secret (a fine-grained PAT with contents and pull-request write access) and the
+  workflow will use it instead.
+- `NPM_TOKEN` is required for the SDK publish.
 
 ## Changelog Discipline
 
-Every pull request that changes contract behaviour must add an entry under
-`## [Unreleased]` in [CHANGELOG.md](../CHANGELOG.md) before merging. Use one of:
+Changelog entries are generated from commit messages, so the commit (or squashed
+PR title) is the changelog entry. Write it for the people who read the changelog:
+name the function, endpoint or SDK method that changed.
 
-- `### Added` — new features
-- `### Changed` — changes to existing behaviour
-- `### Deprecated` — soon-to-be-removed features
-- `### Removed` — removed features
-- `### Fixed` — bug fixes
-- `### Security` — security fixes
-
-When a release is tagged, the `[Unreleased]` section is renamed to the new version
-and a fresh `[Unreleased]` section is added at the top.
+Hand-written notes under `## [Unreleased]` are no longer required. release-please
+inserts each new release above the existing `## [Unreleased]` heading; on the first
+automated release of each component, move any notes still listed there into the
+release PR's changelog entry and delete the `[Unreleased]` section.
 
 ## Current Version
 
-See [CHANGELOG.md](../CHANGELOG.md) for the current released version and the list
-of unreleased changes on `main`. The value returned by the on-chain `version()`
-query must always match the latest released version documented there.
+The current version of each component is recorded in
+[`.release-please-manifest.json`](../.release-please-manifest.json). The value returned
+by the on-chain `version()` query must always match the latest `contract` release in
+[CHANGELOG.md](../CHANGELOG.md); release-please keeps the two in step.
