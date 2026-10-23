@@ -1,24 +1,53 @@
 name: SDK Publish
 
+# Publishes `sdk/` to npm.
+#
+# - Called by `release-please.yml` when an SDK release PR is merged and the
+#   `sdk-vX.Y.Z` tag is created (the usual path).
+# - Still runs on a manually pushed `sdk-v*` tag as a fallback.
+
 on:
   push:
     tags:
       - 'sdk-v*'
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag to publish, e.g. sdk-v0.2.0'
+        required: true
+        type: string
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       id-token: write
+    defaults:
+      run:
+        working-directory: sdk
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
       - uses: actions/setup-node@v7
         with:
           node-version: 20
           registry-url: 'https://registry.npmjs.org'
 
-      - run: npm ci
-      - run: npm run build --workspace=sdk
-      - run: npm publish --workspace=sdk --provenance
+      - name: Check tag matches sdk/package.json version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [ "$TAG" != "sdk-v$version" ]; then
+            echo "✗ tag $TAG does not match sdk/package.json version $version"
+            exit 1
+          fi
+
+      - run: npm install
+      - run: npm run build
+      - run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
