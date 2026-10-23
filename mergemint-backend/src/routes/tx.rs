@@ -10,6 +10,15 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
+use soroban_client::{
+    address::{Address, AddressTrait},
+    contract::{ContractBehavior, Contracts},
+    soroban_rpc::{SendTransactionResponse, SendTransactionStatus},
+    transaction::{TransactionBehavior, TransactionBuilder, TransactionBuilderBehavior},
+    xdr::{self, Limits, WriteXdr},
+    Options, Server,
+};
+use sqlx::{Postgres, QueryBuilder, Row};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,6 +36,7 @@ use crate::db::{
 #[derive(Clone)]
 pub struct AppState {
     pub db: SharedDb,
+    pub postgres: Option<sqlx::PgPool>,
     pub idempotency: SharedIdempotencyStore,
     /// In-memory fixed-window rate limiter for expensive, on-chain-submitting
     /// routes such as `self_claim` (issue #670). Keyed by an opaque client
@@ -117,6 +127,11 @@ impl AppState {
                 .saturating_sub(now.saturating_sub(bucket.window_start))
                 .max(1),
         }
+    }
+
+    /// Consume one `self_claim`-window slot for `key`; `false` once exhausted.
+    pub fn allow_self_claim(&self, key: &str) -> bool {
+        self.check_self_claim_rate_limit(key, true).allowed
     }
 }
 
@@ -330,12 +345,6 @@ impl AppError {
     ///
     /// `detail` is **only** logged via `tracing::error!`; it is never
     /// included in the HTTP response body (see [`IntoResponse`] impl below).
-    ///
-    /// No handler in this stub backend currently produces a 500 (both
-    /// `resolve_dispute` and `self_claim` only ever return 400/404), so this
-    /// constructor has no live call site yet — it's exercised by the tests
-    /// below and is here for handlers that build real Horizon/RPC calls.
-    #[allow(dead_code)]
     pub fn internal(detail: impl std::fmt::Display) -> AppError {
         tracing::error!(detail = %detail, "internal server error");
         AppError {
@@ -344,6 +353,15 @@ impl AppError {
             // lives in the log line emitted above.
             message: "internal server error".to_string(),
         }
+    }
+}
+
+/// Lets handlers returning `(StatusCode, Json<AppError>)` use `?` on an
+/// [`AppError`]; the status is taken from its `code`.
+impl From<AppError> for (StatusCode, Json<AppError>) {
+    fn from(err: AppError) -> Self {
+        let status = StatusCode::from_u16(err.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(err))
     }
 }
 
@@ -415,6 +433,408 @@ pub struct ResolveDisputeResponse {
 pub struct SelfClaimRequest {
     pub bounty_id: String,
     pub claimant: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelBountyRequest {
+    pub bounty_id: String,
+    pub creator: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopUpBountyRequest {
+    pub bounty_id: String,
+    pub funder: String,
+    /// Positive amount in the reward token's decimal units.
+    pub amount: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtendDeadlineRequest {
+    pub bounty_id: String,
+    pub creator: String,
+    pub new_deadline: u32,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UnsignedTransactionResponse {
+    pub xdr: String,
+    pub estimated_fee: u32,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitSignedTransactionRequest {
+    pub source: String,
+    pub xdr: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitTransactionResponse {
+    pub hash: String,
+    pub status: String,
+    pub latest_ledger: u32,
+}
+
+fn bounty_id_scval(bounty_id: &str) -> Result<xdr::ScVal, (StatusCode, Json<AppError>)> {
+    let bytes = hex::decode(bounty_id)
+        .map_err(|_| AppError::bad_request("bounty_id must be 64 hexadecimal characters"))?;
+    if bytes.len() != 32 {
+        return Err(AppError::bad_request(
+            "bounty_id must be 64 hexadecimal characters",
+        ));
+    }
+    let bytes =
+        xdr::ScBytes::try_from(bytes).map_err(|_| AppError::bad_request("invalid bounty_id"))?;
+    Ok(xdr::ScVal::Bytes(bytes))
+}
+
+fn address_scval(address: &str) -> Result<xdr::ScVal, (StatusCode, Json<AppError>)> {
+    Address::new(address)
+        .and_then(|parsed| parsed.to_sc_val())
+        .map_err(|_| AppError::bad_request("invalid Stellar address"))
+}
+
+fn ensure_indexed_creator(
+    state: &AppState,
+    bounty_id: &str,
+    creator: &str,
+) -> Result<crate::db::Bounty, (StatusCode, Json<AppError>)> {
+    let bounty = crate::db::get_bounty(&state.db, bounty_id)
+        .ok_or_else(|| AppError::not_found("bounty not found in indexed data"))?;
+    if bounty.creator != creator {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(AppError {
+                code: StatusCode::FORBIDDEN.as_u16(),
+                message: "only the bounty creator may perform this action".to_string(),
+            }),
+        ));
+    }
+    Ok(bounty)
+}
+
+async fn build_unsigned_transaction(
+    source: &str,
+    method: &str,
+    args: Vec<xdr::ScVal>,
+) -> Result<UnsignedTransactionResponse, (StatusCode, Json<AppError>)> {
+    let rpc_url = std::env::var("RPC_URL")
+        .map_err(|_| AppError::internal("RPC_URL is required to simulate contract transactions"))?;
+    let network_passphrase = std::env::var("NETWORK_PASSPHRASE").map_err(|_| {
+        AppError::internal("NETWORK_PASSPHRASE is required to build contract transactions")
+    })?;
+    let contract_id = std::env::var("CONTRACT_ID").map_err(|_| {
+        AppError::internal("CONTRACT_ID is required to build contract transactions")
+    })?;
+
+    let rpc = Server::new(
+        &rpc_url,
+        Options {
+            allow_http: rpc_url.starts_with("http://"),
+            timeout: 30,
+            ..Options::default()
+        },
+    )
+    .map_err(|error| {
+        tracing::error!(%error, "invalid Soroban RPC configuration");
+        AppError::internal("invalid Soroban RPC configuration")
+    })?;
+    let contract = Contracts::new(&contract_id).map_err(|error| {
+        tracing::error!(%error, "invalid MergeMint contract ID");
+        AppError::internal("invalid MergeMint contract ID")
+    })?;
+    let mut account = rpc.get_account(source).await.map_err(|error| {
+        tracing::warn!(%error, "failed to load transaction source account");
+        AppError::bad_request("transaction source account is unavailable")
+    })?;
+    let operation = contract.call(method, Some(args));
+    let mut builder = TransactionBuilder::new(&mut account, &network_passphrase, None);
+    builder.fee(1000u32).add_operation(operation);
+    builder
+        .set_timeout(30)
+        .map_err(|_| AppError::bad_request("unable to set transaction timeout"))?;
+
+    let transaction = builder.build_for_simulation();
+    let prepared = rpc
+        .prepare_transaction(&transaction)
+        .await
+        .map_err(|error| {
+            tracing::warn!(method, %error, "contract transaction simulation failed");
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(AppError {
+                    code: StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+                    message: "contract transaction simulation failed".to_string(),
+                }),
+            )
+        })?;
+    let estimated_fee = prepared.fee;
+    let envelope = prepared.to_envelope().map_err(|error| {
+        tracing::error!(%error, "failed to encode prepared transaction");
+        AppError::internal("failed to encode prepared transaction")
+    })?;
+    let xdr = envelope.to_xdr_base64(Limits::none()).map_err(|error| {
+        tracing::error!(%error, "failed to encode prepared transaction");
+        AppError::internal("failed to encode prepared transaction")
+    })?;
+
+    Ok(UnsignedTransactionResponse { xdr, estimated_fee })
+}
+
+fn parse_token_amount(amount: &str) -> Result<i128, (StatusCode, Json<AppError>)> {
+    let (whole, fraction) = amount.split_once('.').unwrap_or((amount, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 7
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(AppError::bad_request(
+            "amount must be a positive decimal with at most 7 fractional digits",
+        ));
+    }
+    let whole = whole
+        .parse::<i128>()
+        .map_err(|_| AppError::bad_request("amount is too large"))?;
+    let fractional = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<i128>()
+            .map_err(|_| AppError::bad_request("invalid amount"))?
+            * 10_i128.pow((7 - fraction.len()) as u32)
+    };
+    whole
+        .checked_mul(10_000_000)
+        .and_then(|value| value.checked_add(fractional))
+        .filter(|value| *value > 0)
+        .ok_or_else(|| AppError::bad_request("amount must be positive and in range"))
+}
+
+/// Build and simulate a creator-authorized `cancel_bounty` invocation.
+#[utoipa::path(
+    post,
+    path = "/tx/cancel",
+    request_body = CancelBountyRequest,
+    responses(
+        (status = 200, description = "Unsigned simulated transaction", body = UnsignedTransactionResponse),
+        (status = 400, description = "Invalid request", body = AppError),
+        (status = 403, description = "Caller is not the bounty creator", body = AppError),
+        (status = 422, description = "Contract simulation failed", body = AppError),
+    ),
+    tag = "transactions"
+)]
+pub async fn cancel_bounty_transaction(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CancelBountyRequest>,
+) -> Result<Json<UnsignedTransactionResponse>, (StatusCode, Json<AppError>)> {
+    if !state.allow_self_claim(&req.creator) {
+        return Err(AppError::too_many_requests(
+            "transaction rate limit exceeded",
+        ));
+    }
+    ensure_indexed_creator(&state, &req.bounty_id, &req.creator)?;
+    let bounty_id = bounty_id_scval(&req.bounty_id)?;
+    let creator = address_scval(&req.creator)?;
+    build_unsigned_transaction(&req.creator, "cancel_bounty", vec![creator, bounty_id])
+        .await
+        .map(Json)
+}
+
+/// Build and simulate a `sponsor_bounty` invocation for a top-up.
+#[utoipa::path(
+    post,
+    path = "/tx/top-up",
+    request_body = TopUpBountyRequest,
+    responses(
+        (status = 200, description = "Unsigned simulated transaction", body = UnsignedTransactionResponse),
+        (status = 400, description = "Invalid request", body = AppError),
+        (status = 422, description = "Contract simulation failed", body = AppError),
+    ),
+    tag = "transactions"
+)]
+pub async fn top_up_bounty_transaction(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TopUpBountyRequest>,
+) -> Result<Json<UnsignedTransactionResponse>, (StatusCode, Json<AppError>)> {
+    if !state.allow_self_claim(&req.funder) {
+        return Err(AppError::too_many_requests(
+            "transaction rate limit exceeded",
+        ));
+    }
+    let amount = parse_token_amount(&req.amount)?;
+    let bounty_id = bounty_id_scval(&req.bounty_id)?;
+    let funder = address_scval(&req.funder)?;
+    let amount = xdr::ScVal::I128(xdr::Int128Parts {
+        hi: (amount >> 64) as i64,
+        lo: amount as u64,
+    });
+    build_unsigned_transaction(
+        &req.funder,
+        "sponsor_bounty",
+        vec![funder, bounty_id, amount],
+    )
+    .await
+    .map(Json)
+}
+
+/// Build and simulate a creator-authorized `extend_deadline` invocation.
+#[utoipa::path(
+    post,
+    path = "/tx/extend-deadline",
+    request_body = ExtendDeadlineRequest,
+    responses(
+        (status = 200, description = "Unsigned simulated transaction", body = UnsignedTransactionResponse),
+        (status = 400, description = "Invalid request", body = AppError),
+        (status = 403, description = "Caller is not the bounty creator", body = AppError),
+        (status = 422, description = "Contract simulation failed", body = AppError),
+    ),
+    tag = "transactions"
+)]
+pub async fn extend_deadline_transaction(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExtendDeadlineRequest>,
+) -> Result<Json<UnsignedTransactionResponse>, (StatusCode, Json<AppError>)> {
+    if req.new_deadline == 0 {
+        return Err(AppError::bad_request("new_deadline must be positive"));
+    }
+    if !state.allow_self_claim(&req.creator) {
+        return Err(AppError::too_many_requests(
+            "transaction rate limit exceeded",
+        ));
+    }
+    let bounty = ensure_indexed_creator(&state, &req.bounty_id, &req.creator)?;
+    if i64::from(req.new_deadline) <= chrono::Utc::now().timestamp()
+        || bounty
+            .deadline
+            .is_some_and(|deadline| i64::from(req.new_deadline) <= deadline.timestamp())
+    {
+        return Err(AppError::bad_request(
+            "new_deadline must be in the future and later than the current deadline",
+        ));
+    }
+    let bounty_id = bounty_id_scval(&req.bounty_id)?;
+    let creator = address_scval(&req.creator)?;
+    let deadline = xdr::ScVal::U32(req.new_deadline);
+    build_unsigned_transaction(
+        &req.creator,
+        "extend_deadline",
+        vec![creator, bounty_id, deadline],
+    )
+    .await
+    .map(Json)
+}
+
+/// Submit a wallet-signed transaction envelope to Soroban RPC.
+#[utoipa::path(
+    post,
+    path = "/tx/submit",
+    request_body = SubmitSignedTransactionRequest,
+    responses(
+        (status = 200, description = "Transaction accepted by Soroban RPC", body = SubmitTransactionResponse),
+        (status = 400, description = "Invalid transaction envelope", body = AppError),
+        (status = 422, description = "Soroban RPC rejected the transaction", body = AppError),
+    ),
+    tag = "transactions"
+)]
+pub async fn submit_signed_transaction(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SubmitSignedTransactionRequest>,
+) -> Result<Json<SubmitTransactionResponse>, (StatusCode, Json<AppError>)> {
+    let network_passphrase = std::env::var("NETWORK_PASSPHRASE")
+        .map_err(|_| AppError::internal("NETWORK_PASSPHRASE is required to submit transactions"))?;
+    let transaction = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        soroban_client::transaction::Transaction::from_xdr_envelope(&req.xdr, &network_passphrase)
+    }))
+    .map_err(|_| AppError::bad_request("invalid signed transaction envelope"))?;
+    if transaction.signatures.is_empty()
+        || transaction.source.as_deref() != Some(req.source.as_str())
+    {
+        return Err(AppError::bad_request(
+            "signed transaction source does not match the request",
+        ));
+    }
+    if !state.allow_self_claim(&req.source) {
+        return Err(AppError::too_many_requests(
+            "transaction rate limit exceeded",
+        ));
+    }
+
+    let rpc_url = std::env::var("RPC_URL")
+        .map_err(|_| AppError::internal("RPC_URL is required to submit transactions"))?;
+    let request_body = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sendTransaction",
+        "params": { "transaction": req.xdr },
+    }))
+    .map_err(|_| AppError::internal("failed to encode transaction request"))?;
+    let response = reqwest::Client::new()
+        .post(&rpc_url)
+        .header("Content-Type", "application/json")
+        .body(request_body)
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, source = %req.source, "Soroban RPC submission failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(AppError {
+                    code: StatusCode::BAD_GATEWAY.as_u16(),
+                    message: "Soroban RPC submission failed".to_string(),
+                }),
+            )
+        })?;
+    let response_body = response.bytes().await.map_err(|error| {
+        tracing::warn!(%error, source = %req.source, "failed to read Soroban RPC response");
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(AppError {
+                code: StatusCode::BAD_GATEWAY.as_u16(),
+                message: "Soroban RPC submission failed".to_string(),
+            }),
+        )
+    })?;
+    let rpc_response: serde_json::Value =
+        serde_json::from_slice(&response_body).map_err(|error| {
+            tracing::warn!(%error, "invalid Soroban RPC response");
+            AppError::internal("invalid Soroban RPC response")
+        })?;
+    let result = rpc_response.get("result").cloned().ok_or_else(|| {
+        tracing::warn!(response = %rpc_response, "Soroban RPC returned an error");
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(AppError {
+                code: StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+                message: "Soroban RPC rejected the transaction".to_string(),
+            }),
+        )
+    })?;
+    let response: SendTransactionResponse = serde_json::from_value(result).map_err(|error| {
+        tracing::warn!(%error, "invalid sendTransaction response from Soroban RPC");
+        AppError::internal("invalid Soroban RPC response")
+    })?;
+    let status = format!("{:?}", response.status).to_ascii_lowercase();
+    match response.status {
+        SendTransactionStatus::Pending | SendTransactionStatus::Duplicate => {
+            Ok(Json(SubmitTransactionResponse {
+                hash: response.hash,
+                status,
+                latest_ledger: response.latest_ledger,
+            }))
+        }
+        _ => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(AppError {
+                code: StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+                message: "Soroban RPC rejected the transaction".to_string(),
+            }),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +1105,14 @@ pub async fn query_audit_logs(
             "from must be less than or equal to to",
         ));
     }
+    if params
+        .from
+        .into_iter()
+        .chain(params.to)
+        .any(|timestamp| timestamp > i64::MAX as u64)
+    {
+        return Err(AppError::bad_request("timestamp is out of range"));
+    }
 
     let cursor = match params.cursor.as_deref() {
         Some(raw) => Some(
@@ -694,16 +1122,81 @@ pub async fn query_audit_logs(
     };
     let limit = params.limit.unwrap_or(50).clamp(1, MAX_AUDIT_LOG_PAGE_SIZE);
 
-    let mut logs = crate::db::query_audit_logs(
-        &state.db,
-        params.actor.as_deref(),
-        params.action.as_deref(),
-        params.target.as_deref(),
-        params.from,
-        params.to,
-        cursor,
-        limit + 1,
-    );
+    let mut logs = if let Some(pool) = &state.postgres {
+        let mut query = QueryBuilder::<Postgres>::new(
+            "SELECT id::BIGINT AS id, actor, action, target, timestamp FROM audit_logs WHERE TRUE",
+        );
+        if let Some(actor) = params.actor.as_deref() {
+            query.push(" AND actor = ").push_bind(actor.to_string());
+        }
+        if let Some(action) = params.action.as_deref() {
+            query.push(" AND action = ").push_bind(action.to_string());
+        }
+        if let Some(target) = params.target.as_deref() {
+            query.push(" AND target = ").push_bind(target.to_string());
+        }
+        if let Some(from) = params.from {
+            query.push(" AND timestamp >= ").push_bind(from as i64);
+        }
+        if let Some(to) = params.to {
+            query.push(" AND timestamp <= ").push_bind(to as i64);
+        }
+        if let Some((timestamp, id)) = cursor {
+            query
+                .push(" AND (timestamp, id) < (")
+                .push_bind(timestamp as i64)
+                .push(", ")
+                .push_bind(id)
+                .push(")");
+        }
+        let rows = query
+            .push(" ORDER BY timestamp DESC, id DESC LIMIT ")
+            .push_bind(limit + 1)
+            .build()
+            .fetch_all(pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "failed to query persistent audit logs");
+                AppError::internal("failed to query audit logs")
+            })?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(AuditLog {
+                    id: Some(row.try_get("id").map_err(|error| {
+                        tracing::error!(%error, "invalid audit log row");
+                        AppError::internal("failed to read audit log")
+                    })?),
+                    actor: row.try_get("actor").map_err(|error| {
+                        tracing::error!(%error, "invalid audit log row");
+                        AppError::internal("failed to read audit log")
+                    })?,
+                    action: row.try_get("action").map_err(|error| {
+                        tracing::error!(%error, "invalid audit log row");
+                        AppError::internal("failed to read audit log")
+                    })?,
+                    target: row.try_get("target").map_err(|error| {
+                        tracing::error!(%error, "invalid audit log row");
+                        AppError::internal("failed to read audit log")
+                    })?,
+                    timestamp: row.try_get::<i64, _>("timestamp").map_err(|error| {
+                        tracing::error!(%error, "invalid audit log row");
+                        AppError::internal("failed to read audit log")
+                    })? as u64,
+                })
+            })
+            .collect::<Result<Vec<_>, (StatusCode, Json<AppError>)>>()?
+    } else {
+        crate::db::query_audit_logs(
+            &state.db,
+            params.actor.as_deref(),
+            params.action.as_deref(),
+            params.target.as_deref(),
+            params.from,
+            params.to,
+            cursor,
+            limit + 1,
+        )
+    };
     let has_more = logs.len() as i64 > limit;
     if has_more {
         logs.truncate(limit as usize);
@@ -894,6 +1387,7 @@ mod tests {
         }
         Arc::new(AppState {
             db,
+            postgres: None,
             idempotency: crate::db::new_shared_idempotency_store(),
             rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,

@@ -3,6 +3,12 @@
         "/admin/audit-logs": [
             "get"
         ],
+        "/admin/webhooks/failed": [
+            "get"
+        ],
+        "/admin/webhooks/{id}/replay": [
+            "post"
+        ],
         "/bounties": [
             "get"
         ],
@@ -35,6 +41,18 @@
         ],
         "/stats": [
             "get"
+        ],
+        "/tx/cancel": [
+            "post"
+        ],
+        "/tx/extend-deadline": [
+            "post"
+        ],
+        "/tx/submit": [
+            "post"
+        ],
+        "/tx/top-up": [
+            "post"
         ],
         "/webhooks/subscriptions": [
             "get"
@@ -93,6 +111,13 @@
                 "deadline"
             ]
         },
+        "CancelBountyRequest": {
+            "fields": [
+                "bountyId",
+                "creator"
+            ],
+            "enum": null
+        },
         "ClaimResponse": {
             "fields": [
                 "id",
@@ -118,6 +143,33 @@
             "fields": [
                 "contributor_address",
                 "email"
+            ],
+            "enum": null
+        },
+        "ExtendDeadlineRequest": {
+            "fields": [
+                "bountyId",
+                "creator",
+                "newDeadline"
+            ],
+            "enum": null
+        },
+        "FailedWebhookDelivery": {
+            "fields": [
+                "attempts",
+                "created_at",
+                "id",
+                "last_error",
+                "last_status",
+                "payload",
+                "subscription_id"
+            ],
+            "enum": null
+        },
+        "FailedWebhookPage": {
+            "fields": [
+                "deliveries",
+                "next_cursor"
             ],
             "enum": null
         },
@@ -154,6 +206,21 @@
                 "desc"
             ]
         },
+        "SubmitSignedTransactionRequest": {
+            "fields": [
+                "source",
+                "xdr"
+            ],
+            "enum": null
+        },
+        "SubmitTransactionResponse": {
+            "fields": [
+                "hash",
+                "latestLedger",
+                "status"
+            ],
+            "enum": null
+        },
         "StatsResponse": {
             "fields": [
                 "active_contributors",
@@ -166,6 +233,21 @@
             "fields": [
                 "amount",
                 "token_address"
+            ],
+            "enum": null
+        },
+        "TopUpBountyRequest": {
+            "fields": [
+                "amount",
+                "bountyId",
+                "funder"
+            ],
+            "enum": null
+        },
+        "UnsignedTransactionResponse": {
+            "fields": [
+                "estimated_fee",
+                "xdr"
             ],
             "enum": null
         },
