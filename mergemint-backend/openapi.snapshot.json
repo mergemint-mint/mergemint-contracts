@@ -18,6 +18,9 @@
         "/bounties/{id}/claim": [
             "post"
         ],
+        "/contributors/{address}/reputation-history": [
+            "get"
+        ],
         "/leaderboard": [
             "get"
         ],
@@ -121,6 +124,25 @@
             "fields": [
                 "logs",
                 "next_cursor"
+            ],
+            "enum": null
+        },
+        "ReputationHistoryEntry": {
+            "fields": [
+                "contributor_address",
+                "event_id",
+                "ledger",
+                "new_value",
+                "old_value",
+                "reason",
+                "timestamp"
+            ],
+            "enum": null
+        },
+        "ReputationHistoryPage": {
+            "fields": [
+                "entries",
+                "next_offset"
             ],
             "enum": null
         },

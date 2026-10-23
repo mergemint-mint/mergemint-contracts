@@ -25,6 +25,16 @@ const LATENCY_BUCKETS: [f64; 11] = [
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
+static INDEXER_LEDGER_GAPS: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_indexer_ledger_gap() {
+    INDEXER_LEDGER_GAPS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn initialize_indexer_ledger_gaps(total: u64) {
+    INDEXER_LEDGER_GAPS.store(total, Ordering::Relaxed);
+}
+
 /// A single (route, status) observation series.
 #[derive(Default)]
 struct RouteMetrics {
@@ -135,6 +145,15 @@ impl Metrics {
         out.push_str(&format!(
             "mergemint_indexer_lag_ledgers {}\n",
             self.indexer_lag.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP indexer_ledger_gaps_total Number of ledger gaps detected by the indexer.\n",
+        );
+        out.push_str("# TYPE indexer_ledger_gaps_total counter\n");
+        out.push_str(&format!(
+            "indexer_ledger_gaps_total {}\n",
+            INDEXER_LEDGER_GAPS.load(Ordering::Relaxed)
         ));
 
         let (cache_hits, cache_misses) = crate::routes::leaderboard::leaderboard_cache_counts();

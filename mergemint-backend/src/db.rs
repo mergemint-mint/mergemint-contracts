@@ -50,6 +50,7 @@ const AUDIT_LOGS_PAGINATION_MIGRATION: &str =
 /// Production deployments replace this with a real database pool.
 #[derive(Debug, Default)]
 pub struct DbStore {
+    pub postgres: Option<sqlx::PgPool>,
     pub records: HashMap<String, String>,
     /// Bounty listing rows backing `list_bounties_by_creator` /
     /// `list_bounties_by_assignee`. Kept separate from `records` (which
@@ -58,6 +59,7 @@ pub struct DbStore {
     pub bounties: Vec<Bounty>,
     /// Audit log entries tracking administrative actions like resolve_dispute.
     pub audit_logs: Vec<AuditLog>,
+    pub reputation_history: Vec<ReputationHistoryEntry>,
     /// Registered webhook subscriptions (see `webhooks.rs`).
     pub webhook_subscriptions: Vec<WebhookSubscription>,
     stats_cache: Option<StatsCacheEntry>,
@@ -142,13 +144,9 @@ pub fn add_email_subscription(
 /// Verify an email address using its single-use verification token.
 pub fn verify_email_subscription(db: &SharedDb, token: &str) -> bool {
     let mut guard = acquire_db(db);
-    if let Some(subscription) = guard
-        .email_subscriptions
-        .iter_mut()
-        .find(|subscription| {
-            subscription.verification_token.as_deref() == Some(token) && subscription.active
-        })
-    {
+    if let Some(subscription) = guard.email_subscriptions.iter_mut().find(|subscription| {
+        subscription.verification_token.as_deref() == Some(token) && subscription.active
+    }) {
         subscription.verified = true;
         subscription.verification_token = None;
         true
@@ -346,6 +344,85 @@ pub struct Bounty {
     pub reward_token: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ReputationHistoryEntry {
+    pub event_id: String,
+    pub contributor_address: String,
+    pub ledger: u32,
+    pub timestamp: DateTime<Utc>,
+    pub old_value: u32,
+    pub new_value: u32,
+    pub reason: String,
+}
+
+pub fn record_reputation_change(db: &SharedDb, entry: ReputationHistoryEntry) -> bool {
+    let mut guard = acquire_db(db);
+    if guard
+        .reputation_history
+        .iter()
+        .any(|existing| existing.event_id == entry.event_id)
+    {
+        return false;
+    }
+    guard.reputation_history.push(entry);
+    true
+}
+
+pub async fn query_reputation_history(
+    db: &SharedDb,
+    contributor_address: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<ReputationHistoryEntry>, sqlx::Error> {
+    let pool = read_db(db).postgres.clone();
+    if let Some(pool) = pool {
+        let rows = sqlx::query(
+            "SELECT event_id, contributor_address, ledger, timestamp, old_value, new_value, reason \
+             FROM reputation_history WHERE contributor_address = $1 \
+             ORDER BY ledger DESC, event_id DESC OFFSET $2 LIMIT $3",
+        )
+        .bind(contributor_address)
+        .bind(i64::try_from(offset).unwrap_or(i64::MAX))
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&pool)
+        .await?;
+
+        return rows
+            .into_iter()
+            .map(|row| {
+                use sqlx::Row;
+                Ok(ReputationHistoryEntry {
+                    event_id: row.try_get("event_id")?,
+                    contributor_address: row.try_get("contributor_address")?,
+                    ledger: u32::try_from(row.try_get::<i64, _>("ledger")?)
+                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                    timestamp: row.try_get("timestamp")?,
+                    old_value: u32::try_from(row.try_get::<i64, _>("old_value")?)
+                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                    new_value: u32::try_from(row.try_get::<i64, _>("new_value")?)
+                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                    reason: row.try_get("reason")?,
+                })
+            })
+            .collect();
+    }
+
+    let guard = read_db(db);
+    let mut entries: Vec<_> = guard
+        .reputation_history
+        .iter()
+        .filter(|entry| entry.contributor_address == contributor_address)
+        .cloned()
+        .collect();
+    entries
+        .sort_by(|left, right| (right.ledger, &right.event_id).cmp(&(left.ledger, &left.event_id)));
+    Ok(entries.into_iter().skip(offset).take(limit).collect())
+}
+
+pub fn set_postgres_pool(db: &SharedDb, pool: sqlx::PgPool) {
+    acquire_db(db).postgres = Some(pool);
+}
+
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct TokenTotal {
     pub token_address: String,
@@ -357,6 +434,48 @@ pub struct StatsResponse {
     pub open_bounties: u64,
     pub total_paid_out: Vec<TokenTotal>,
     pub active_contributors: u64,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct LeaderboardEntry {
+    pub address: String,
+    pub completed_bounties: u32,
+    pub reputation: u32,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct LeaderboardPage {
+    pub entries: Vec<LeaderboardEntry>,
+}
+
+pub fn get_leaderboard(db: &SharedDb, limit: i64) -> LeaderboardPage {
+    let guard = read_db(db);
+    let mut scores = HashMap::<String, u32>::new();
+    for bounty in &guard.bounties {
+        if let Some(address) = bounty
+            .assignee
+            .as_deref()
+            .filter(|address| !address.is_empty())
+        {
+            *scores.entry(address.to_owned()).or_default() += 1;
+        }
+    }
+    let mut entries: Vec<_> = scores
+        .into_iter()
+        .map(|(address, reputation)| LeaderboardEntry {
+            address,
+            completed_bounties: reputation,
+            reputation,
+        })
+        .collect();
+    entries.sort_by(|left, right| {
+        right
+            .reputation
+            .cmp(&left.reputation)
+            .then_with(|| left.address.cmp(&right.address))
+    });
+    entries.truncate(usize::try_from(limit.max(0)).unwrap_or(usize::MAX));
+    LeaderboardPage { entries }
 }
 
 #[derive(Debug, Clone)]
@@ -966,4 +1085,7 @@ mod tests {
             }
         }
 
-        let page
+        let page = get_leaderboard(&db, 2);
+        assert_eq!(page.entries.len(), 2);
+    }
+}

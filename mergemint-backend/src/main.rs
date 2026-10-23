@@ -112,9 +112,11 @@ use tower_http::{
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use utoipa::OpenApi;
 
+mod contract_version;
 mod db;
 mod deadline_reminders;
 mod events;
+mod indexer_runtime;
 mod metrics;
 mod notifications;
 mod rate_limit;
@@ -125,11 +127,18 @@ mod test_helpers;
 mod webhooks;
 
 use db::{new_shared_db, new_shared_idempotency_store};
+use deadline_reminders::{
+    read_deadline_reminder_interval, read_deadline_reminder_lead_time, start_deadline_reminder_job,
+};
 use metrics::{metrics_router, track_metrics, Metrics};
+use notifications::{
+    create_email_subscription, start_email_notifier, unsubscribe_email, verify_email,
+};
 use routes::bounties::{
     bounty_stream, claim_bounty, get_bounty_route, list_bounties, list_bounties_by_assignee,
 };
 use routes::leaderboard::get_leaderboard_route;
+use routes::reputation::get_reputation_history;
 use routes::tx::{
     new_shared_rate_limiter, query_audit_logs, resolve_dispute, self_claim, AppState,
 };
@@ -137,13 +146,6 @@ use webhooks::{
     create_subscription_route, delete_subscription_route, get_subscription_route,
     list_subscriptions_route, start_webhook_dispatcher, RetryConfig, SsrfPolicy, WebhookClient,
     WebhookTargetGuard,
-};
-use deadline_reminders::{
-    read_deadline_reminder_interval, read_deadline_reminder_lead_time,
-    start_deadline_reminder_job,
-};
-use notifications::{
-    create_email_subscription, start_email_notifier, unsubscribe_email, verify_email,
 };
 
 /// Maximum allowed request body size (1 MiB).
@@ -174,6 +176,8 @@ const CORS_ALLOWED_ORIGINS_ENV: &str = "CORS_ALLOWED_ORIGINS";
 
 /// Env var selecting the log output format; `json` enables structured logs.
 const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
+const CONTRACT_VERSION_WARN_ONLY_ENV: &str = "CONTRACT_VERSION_WARN_ONLY";
+static CONTRACT_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// OpenAPI description of the bounty read API (#865), served at
 /// `/api-docs/openapi.json` and rendered by the Swagger UI page (#866).
@@ -187,6 +191,7 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
         routes::bounties::claim_bounty,
         routes::bounties::bounty_stream,
         routes::leaderboard::get_leaderboard_route,
+        routes::reputation::get_reputation_history,
         routes::stats::get_stats_route,
         routes::tx::query_audit_logs,
         notifications::create_email_subscription,
@@ -203,9 +208,11 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
         routes::bounties::ClaimResponse,
         routes::tx::AppError,
         routes::tx::QueryAuditLogsResponse,
+        routes::reputation::ReputationHistoryPage,
         db::AuditLog,
         db::LeaderboardEntry,
         db::LeaderboardPage,
+        db::ReputationHistoryEntry,
         db::StatsResponse,
         db::TokenTotal,
         db::WebhookSubscription,
@@ -228,7 +235,16 @@ const SSE_KEEP_ALIVE_SECS_DEFAULT: u64 = 15;
 
 #[tokio::main]
 async fn main() {
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+    let _ = dotenvy::dotenv();
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("backfill") {
+        if let Err(error) = run_backfill_command(&args[2..]).await {
+            eprintln!("backfill failed: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("healthcheck") {
         std::process::exit(match healthcheck(HEALTHCHECK_ADDR) {
             Ok(()) => 0,
             Err(err) => {
@@ -267,7 +283,89 @@ async fn main() {
 
     warn_if_reward_token_allowlist_empty();
 
+    let postgres = match connect_postgres().await {
+        Ok(pool) => pool,
+        Err(error) => {
+            tracing::error!(%error, "failed to initialize PostgreSQL");
+            std::process::exit(1);
+        }
+    };
+    if let Some(pool) = postgres.as_ref() {
+        let rpc_url = std::env::var("RPC_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let contract_id = std::env::var("CONTRACT_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        if let (Some(rpc_url), Some(contract_id)) = (rpc_url, contract_id) {
+            let version_result = std::env::var("CONTRACT_VERSION_SOURCE_ACCOUNT")
+                .map_err(anyhow::Error::from)
+                .and_then(|source_account| {
+                    Ok((rpc_url.clone(), contract_id.clone(), source_account))
+                });
+            match version_result {
+                Ok((rpc_url, contract_id, source_account)) => {
+                    match contract_version::check_contract_version(
+                        &rpc_url,
+                        &contract_id,
+                        &source_account,
+                    )
+                    .await
+                    {
+                        Ok(version) if contract_version::is_supported_version(&version) => {
+                            let _ = CONTRACT_VERSION.set(version.clone());
+                            tracing::info!(%version, "contract version validated");
+                        }
+                        Ok(version) => {
+                            if contract_version_warn_only() {
+                                tracing::warn!(%version, "contract version is outside supported range 1.x.y");
+                                let _ = CONTRACT_VERSION.set(version);
+                            } else {
+                                tracing::error!(%version, "contract version is outside supported range 1.x.y");
+                                std::process::exit(1);
+                            }
+                        }
+                        Err(error) => {
+                            if contract_version_warn_only() {
+                                tracing::warn!(%error, "contract version check failed; continuing in warn-only mode");
+                            } else {
+                                tracing::error!(%error, "contract version check failed");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+                Err(error) if contract_version_warn_only() => {
+                    tracing::warn!(%error, "contract version source account is missing");
+                }
+                Err(error) => {
+                    tracing::error!(%error, "contract version source account is missing");
+                    std::process::exit(1);
+                }
+            }
+            let indexer_pool = pool.clone();
+            tokio::spawn(indexer_runtime::run_live(
+                indexer_pool,
+                rpc_url,
+                contract_id,
+            ));
+        } else if contract_version_warn_only() {
+            tracing::warn!("RPC_URL or CONTRACT_ID is missing; contract version check and live indexer are disabled");
+        } else {
+            tracing::error!("RPC_URL and CONTRACT_ID are required for contract version validation");
+            std::process::exit(1);
+        }
+    } else if !contract_version_warn_only() {
+        tracing::error!(
+            "DATABASE_URL is required to run the persistent indexer and enforce contract version"
+        );
+        std::process::exit(1);
+    }
+
     let shared_db = new_shared_db();
+    if let Some(pool) = postgres {
+        db::set_postgres_pool(&shared_db, pool);
+    }
     let idempotency = new_shared_idempotency_store();
     let (bounty_broadcast, _) = tokio::sync::broadcast::channel(100);
     let sse_keep_alive_duration = read_sse_keep_alive_duration();
@@ -324,6 +422,10 @@ async fn main() {
             get(list_bounties_by_assignee),
         )
         .route("/leaderboard", get(get_leaderboard_route))
+        .route(
+            "/contributors/:address/reputation-history",
+            get(get_reputation_history),
+        )
         .route("/stats", get(routes::stats::get_stats_route))
         // ── Bounty push channel (#482) ─────────────────────────────────────
         .route("/bounties/:id/claim", post(claim_bounty))
@@ -336,7 +438,10 @@ async fn main() {
             "/webhooks/subscriptions/:id",
             get(get_subscription_route).delete(delete_subscription_route),
         )
-        .route("/notifications/subscriptions", post(create_email_subscription))
+        .route(
+            "/notifications/subscriptions",
+            post(create_email_subscription),
+        )
         .route("/notifications/verify", get(verify_email))
         .route("/notifications/unsubscribe", get(unsubscribe_email))
         .with_state(state)
@@ -490,10 +595,92 @@ async fn health() -> &'static str {
 ///  * `200 ready` if the database is open and reachable
 ///  * `503 database unavailable` if the database is closed or unreachable
 async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match db::ping_db(&state.db) {
-        Ok(()) => (StatusCode::OK, "ready"),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
+    let mut ready = db::ping_db(&state.db).is_ok();
+    if let Some(pool) = db::read_db(&state.db).postgres.clone() {
+        ready &= sqlx::query("SELECT 1").execute(&pool).await.is_ok();
     }
+    let version = CONTRACT_VERSION
+        .get()
+        .map(String::as_str)
+        .unwrap_or("unknown");
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let text = if ready {
+        "ready"
+    } else {
+        "database unavailable"
+    };
+    (
+        status,
+        Json(json!({ "status": text, "contractVersion": version })),
+    )
+}
+
+async fn connect_postgres() -> anyhow::Result<Option<sqlx::PgPool>> {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return Ok(None),
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&database_url)
+        .await?;
+    for migration in [
+        include_str!("../migrations/0005_create_reputation_history.sql"),
+        include_str!("../migrations/0006_create_indexer_state.sql"),
+    ] {
+        for statement in migration
+            .split(';')
+            .map(str::trim)
+            .filter(|sql| !sql.is_empty())
+        {
+            sqlx::query(statement).execute(&pool).await?;
+        }
+    }
+    let gap_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM indexer_gaps")
+        .fetch_one(&pool)
+        .await?;
+    metrics::initialize_indexer_ledger_gaps(u64::try_from(gap_count).unwrap_or_default());
+    Ok(Some(pool))
+}
+
+async fn run_backfill_command(args: &[String]) -> anyhow::Result<()> {
+    let mut from_ledger = None;
+    let mut to_ledger = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = &args[index];
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| anyhow::anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--from-ledger" => from_ledger = Some(value.parse::<u32>()?),
+            "--to-ledger" => to_ledger = Some(value.parse::<u32>()?),
+            _ => return Err(anyhow::anyhow!("unknown backfill option: {flag}")),
+        }
+        index += 2;
+    }
+    let from_ledger = from_ledger.ok_or_else(|| anyhow::anyhow!("--from-ledger is required"))?;
+    let rpc_url = std::env::var("RPC_URL")?;
+    let contract_id = std::env::var("CONTRACT_ID")?;
+    let pool = connect_postgres()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("DATABASE_URL is required for backfill"))?;
+    indexer_runtime::backfill(&pool, &rpc_url, &contract_id, from_ledger, to_ledger).await
+}
+
+fn contract_version_warn_only() -> bool {
+    std::env::var(CONTRACT_VERSION_WARN_ONLY_ENV)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Build the CORS layer from `CORS_ALLOWED_ORIGINS`.
@@ -619,7 +806,9 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(&body[..], b"ready");
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["status"], "ready");
+        assert!(payload["contractVersion"].is_string());
     }
 
     #[tokio::test]
@@ -661,7 +850,9 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(&body[..], b"database unavailable");
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["status"], "database unavailable");
+        assert!(payload["contractVersion"].is_string());
     }
 
     #[tokio::test]

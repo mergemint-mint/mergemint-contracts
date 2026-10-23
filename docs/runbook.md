@@ -1,5 +1,27 @@
 # Incident Runbook
 
+## Backend indexer operations
+
+Configure `RPC_URL`, `CONTRACT_ID`, `DATABASE_URL`, and a funded or otherwise
+known account in `CONTRACT_VERSION_SOURCE_ACCOUNT` before starting the backend.
+The source account is used only to simulate the read-only contract `version()`
+query. Startup requires contract version `1.x.y` unless
+`CONTRACT_VERSION_WARN_ONLY=true`; `/ready` returns the observed version in
+`contractVersion`.
+
+The live indexer stores its checkpoint separately from manual backfills. To
+replay a bounded range without moving the live checkpoint backwards:
+
+```bash
+cargo run -- backfill --from-ledger 1000 --to-ledger 1200
+```
+
+Re-running the same range is safe: raw events and reputation changes are
+deduplicated by their Soroban paging token. If the RPC node has pruned ledgers,
+the indexer logs the missing range and increments
+`indexer_ledger_gaps_total` once for that persisted range. Contributor history
+is available at `GET /contributors/:address/reputation-history?limit=20&offset=0`.
+
 ## Admin audit-log queries
 
 `GET /admin/audit-logs` returns at most 100 records per page. Use `action`,

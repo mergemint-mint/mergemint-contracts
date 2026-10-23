@@ -19,6 +19,34 @@
 
 use tracing::warn;
 
+pub fn index_reputation_change(
+    db: &crate::db::SharedDb,
+    event_id: String,
+    contributor_address: String,
+    ledger: u32,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    old_value: u32,
+    new_value: u32,
+    reason: String,
+) -> bool {
+    let inserted = crate::db::record_reputation_change(
+        db,
+        crate::db::ReputationHistoryEntry {
+            event_id,
+            contributor_address,
+            ledger,
+            timestamp,
+            old_value,
+            new_value,
+            reason,
+        },
+    );
+    if inserted {
+        crate::routes::leaderboard::invalidate_leaderboard_cache();
+    }
+    inserted
+}
+
 // ---------------------------------------------------------------------------
 // Constants — recognised event name sets
 // ---------------------------------------------------------------------------
@@ -244,7 +272,8 @@ pub fn poll_once_and_publish(
             "work_submitted" => crate::db::mark_bounty_submitted(db, &bounty_id),
             _ => {}
         }
-        if let Err(error) = sender.send(crate::events::encode_bounty_event(event_name, &bounty_id)) {
+        if let Err(error) = sender.send(crate::events::encode_bounty_event(event_name, &bounty_id))
+        {
             warn!(%error, event = %event_name, "failed to publish indexed bounty event");
         }
     }

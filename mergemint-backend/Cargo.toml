@@ -28,6 +28,8 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+stellar-xdr = { version = "28.0.0", features = ["base64"] }
+stellar-strkey = "0.0.16"
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 
 [dev-dependencies]

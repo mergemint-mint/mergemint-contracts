@@ -61,6 +61,9 @@ services:
       ALLOWLISTED_REWARD_TOKENS: ${ALLOWLISTED_REWARD_TOKENS:-}
       DATABASE_URL: postgres://${POSTGRES_USER:-mergemint}:${POSTGRES_PASSWORD:-mergemint}@postgres:5432/${POSTGRES_DB:-mergemint}
       RPC_URL: http://stellar:8000/rpc
+      CONTRACT_ID: ${CONTRACT_ID:-}
+      CONTRACT_VERSION_SOURCE_ACCOUNT: ${CONTRACT_VERSION_SOURCE_ACCOUNT:-}
+      CONTRACT_VERSION_WARN_ONLY: ${CONTRACT_VERSION_WARN_ONLY:-true}
       HORIZON_URL: http://stellar:8000
       NETWORK_PASSPHRASE: Standalone Network ; February 2017
       SOROBAN_NETWORK: local
