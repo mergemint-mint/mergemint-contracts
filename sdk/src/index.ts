@@ -14,6 +14,7 @@ import {
 export * from "./types";
 export * from "./errors";
 export * from "./mock";
+export * from "./wallet-adapter";
 
 import {
   NetworkConfig,
@@ -32,6 +33,8 @@ import {
   RetryOptions,
   MutationOptions,
   SimulateResult,
+  BountyWatchCallback,
+  WatchUnsubscribe,
 } from "./types";
 
 import { parseSimulationError, TransactionFailedError } from "./errors";
@@ -1076,4 +1079,98 @@ export class MergeMintSDK {
 
     return prepared.toXDR();
   }
+}
+
+// === Watch helpers
+
+/**
+ * Watches a single bounty for changes using either SSE (if configured) or polling.
+ * Calls the callback whenever relevant events arrive, with debouncing to prevent
+ * rapid successive calls.
+ *
+ * @param sdk - The SDK instance to use for fetching bounty data.
+ * @param bountyId - The bounty id to watch.
+ * @param callback - Called when the bounty state changes or an error occurs.
+ * @param options - Configuration for polling/SSE (debounceMs, sseUrl, pollIntervalMs).
+ * @returns An unsubscribe function to stop watching.
+ */
+export function watchBounty(
+  sdk: MergeMintSDK,
+  bountyId: string,
+  callback: BountyWatchCallback,
+  options?: {
+    debounceMs?: number;
+    sseUrl?: string;
+    pollIntervalMs?: number;
+  }
+): WatchUnsubscribe {
+  const debounceMs = options?.debounceMs ?? 500;
+  const pollIntervalMs = options?.pollIntervalMs ?? 5000;
+
+  let unsubscribed = false;
+  let debounceTimer: NodeJS.Timeout | null = null;
+  let eventSource: EventSource | null = null;
+  let pollTimer: NodeJS.Timeout | null = null;
+
+  const fetchAndNotify = async () => {
+    if (unsubscribed) return;
+    try {
+      const bounty = await sdk.getBounty(bountyId);
+      callback(bounty, undefined);
+    } catch (error) {
+      callback(null, error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+
+  const debouncedFetch = () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(fetchAndNotify, debounceMs);
+  };
+
+  // Try SSE first if URL is provided
+  if (options?.sseUrl && typeof EventSource !== "undefined") {
+    try {
+      const sseUrl = new URL(options.sseUrl);
+      sseUrl.searchParams.set("bountyId", bountyId);
+      eventSource = new EventSource(sseUrl.toString());
+
+      eventSource.addEventListener("bounty_updated", () => {
+        debouncedFetch();
+      });
+
+      eventSource.addEventListener("error", () => {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        // Fall back to polling on error
+        pollTimer = setInterval(debouncedFetch, pollIntervalMs);
+        debouncedFetch();
+      });
+
+      // Initial fetch
+      debouncedFetch();
+
+      return () => {
+        unsubscribed = true;
+        if (debounceTimer) clearTimeout(debounceTimer);
+        if (eventSource) eventSource.close();
+        if (pollTimer) clearInterval(pollTimer);
+      };
+    } catch {
+      // Fall through to polling
+      eventSource = null;
+    }
+  }
+
+  // Polling fallback
+  pollTimer = setInterval(debouncedFetch, pollIntervalMs);
+  debouncedFetch();
+
+  return () => {
+    unsubscribed = true;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    if (eventSource) eventSource.close();
+    if (pollTimer) clearInterval(pollTimer);
+  };
 }

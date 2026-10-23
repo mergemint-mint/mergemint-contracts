@@ -210,3 +210,9 @@ export class MergeMintSdkError extends Error {
     Object.setPrototypeOf(this, MergeMintSdkError.prototype);
   }
 }
+
+/** Watch callback triggered when bounty state changes. */
+export type BountyWatchCallback = (bounty: Bounty | null, error?: Error) => void;
+
+/** Unsubscribe function returned by watchBounty. */
+export type WatchUnsubscribe = () => void;
