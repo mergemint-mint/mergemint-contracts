@@ -135,8 +135,10 @@ use notifications::{
     create_email_subscription, start_email_notifier, unsubscribe_email, verify_email,
 };
 use routes::bounties::{
-    bounty_stream, claim_bounty, get_bounty_route, list_bounties, list_bounties_by_assignee,
+    bounty_stream, claim_bounty, export_bounties_csv, get_bounty_route, list_bounties,
+    list_bounties_by_assignee,
 };
+use routes::feed::open_bounties_feed;
 use routes::leaderboard::get_leaderboard_route;
 use routes::reputation::get_reputation_history;
 use routes::tx::{
@@ -178,12 +180,16 @@ const CORS_ALLOWED_ORIGINS_ENV: &str = "CORS_ALLOWED_ORIGINS";
 const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
 const CONTRACT_VERSION_WARN_ONLY_ENV: &str = "CONTRACT_VERSION_WARN_ONLY";
 static CONTRACT_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+const OTEL_EXPORTER_OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
 /// OpenAPI description of the bounty read API (#865), served at
 /// `/api-docs/openapi.json` and rendered by the Swagger UI page (#866).
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "MergeMint backend API"),
+    info(
+        title = "MergeMint backend API",
+        description = "Rate-limited responses include X-RateLimit-Limit and X-RateLimit-Remaining; 429 responses include Retry-After in seconds."
+    ),
     paths(
         routes::bounties::list_bounties,
         routes::bounties::list_bounties_by_assignee,
@@ -273,12 +279,38 @@ async fn main() {
             .unwrap()
     });
 
+    let tracer = std::env::var(OTEL_EXPORTER_OTLP_ENDPOINT_ENV)
+        .ok()
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .and_then(|endpoint| {
+            use opentelemetry_otlp::WithExportConfig as _;
+            opentelemetry_otlp::new_pipeline()
+                .tracing()
+                .with_exporter(
+                    opentelemetry_otlp::new_exporter()
+                        .tonic()
+                        .with_endpoint(endpoint),
+                )
+                .install_batch(opentelemetry_sdk::runtime::Tokio)
+                .map_err(|error| {
+                    eprintln!("OpenTelemetry exporter setup failed: {error}");
+                    error
+                })
+                .ok()
+        });
     let registry = tracing_subscriber::registry().with(env_filter);
 
-    if log_format_is_json() {
-        registry.with(fmt::layer().json()).init();
-    } else {
-        registry.with(fmt::layer()).init();
+    match (log_format_is_json(), tracer) {
+        (true, Some(tracer)) => registry
+            .with(fmt::layer().json())
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .init(),
+        (false, Some(tracer)) => registry
+            .with(fmt::layer())
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .init(),
+        (true, None) => registry.with(fmt::layer().json()).init(),
+        (false, None) => registry.with(fmt::layer()).init(),
     }
 
     warn_if_reward_token_allowlist_empty();
@@ -300,9 +332,7 @@ async fn main() {
         if let (Some(rpc_url), Some(contract_id)) = (rpc_url, contract_id) {
             let version_result = std::env::var("CONTRACT_VERSION_SOURCE_ACCOUNT")
                 .map_err(anyhow::Error::from)
-                .and_then(|source_account| {
-                    Ok((rpc_url.clone(), contract_id.clone(), source_account))
-                });
+                .map(|source_account| (rpc_url.clone(), contract_id.clone(), source_account));
             match version_result {
                 Ok((rpc_url, contract_id, source_account)) => {
                     match contract_version::check_contract_version(
@@ -416,6 +446,7 @@ async fn main() {
         .route("/tx/self-claim", post(self_claim))
         .route("/admin/audit-logs", get(query_audit_logs))
         .route("/bounties", get(list_bounties))
+        .route("/bounties/export.csv", get(export_bounties_csv))
         .route("/bounties/:id", get(get_bounty_route))
         .route(
             "/bounties/assignee/:address",
@@ -430,6 +461,7 @@ async fn main() {
         // ── Bounty push channel (#482) ─────────────────────────────────────
         .route("/bounties/:id/claim", post(claim_bounty))
         .route("/bounties/stream", get(bounty_stream))
+        .route("/feed.xml", get(open_bounties_feed))
         .route(
             "/webhooks/subscriptions",
             post(create_subscription_route).get(list_subscriptions_route),
@@ -458,6 +490,21 @@ async fn main() {
         // by the matched route and response status.
         .layer(middleware::from_fn_with_state(metrics, track_metrics))
         // ── Request correlation IDs (#486) ─────────────────────────────────
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+                let request_id = request
+                    .headers()
+                    .get(REQUEST_ID_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("missing");
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    route = %request.uri().path(),
+                    request_id = %request_id,
+                )
+            }),
+        )
         .layer(PropagateRequestIdLayer::new(HeaderName::from_static(
             REQUEST_ID_HEADER,
         )))
@@ -466,7 +513,6 @@ async fn main() {
             MakeRequestUuid,
         ))
         // ── Tracing ────────────────────────────────────────────────────────
-        .layer(TraceLayer::new_for_http())
         // ── CORS ───────────────────────────────────────────────────────────
         .layer(cors_layer())
         // ── Body size limit (#476) ─────────────────────────────────────────
@@ -487,6 +533,7 @@ async fn main() {
     .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("server error");
+    opentelemetry::global::shutdown_tracer_provider();
 }
 
 #[derive(Clone, Copy)]
@@ -596,7 +643,9 @@ async fn health() -> &'static str {
 ///  * `503 database unavailable` if the database is closed or unreachable
 async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut ready = db::ping_db(&state.db).is_ok();
-    if let Some(pool) = db::read_db(&state.db).postgres.clone() {
+    // Bind the pool first so the read guard is dropped before the `.await`.
+    let pool = db::read_db(&state.db).postgres.clone();
+    if let Some(pool) = pool {
         ready &= sqlx::query("SELECT 1").execute(&pool).await.is_ok();
     }
     let version = CONTRACT_VERSION
@@ -615,7 +664,7 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     };
     (
         status,
-        Json(json!({ "status": text, "contractVersion": version })),
+        Json(serde_json::json!({ "status": text, "contractVersion": version })),
     )
 }
 
@@ -696,7 +745,12 @@ fn cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_methods([Method::GET, Method::POST])
         .allow_headers([CONTENT_TYPE, IF_NONE_MATCH])
-        .expose_headers([ETAG])
+        .expose_headers([
+            ETAG,
+            HeaderName::from_static("x-ratelimit-limit"),
+            HeaderName::from_static("x-ratelimit-remaining"),
+            HeaderName::from_static("retry-after"),
+        ])
         .allow_origin(AllowOrigin::list(allowed))
 }
 

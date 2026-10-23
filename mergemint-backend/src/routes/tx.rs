@@ -4,7 +4,7 @@
 
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{header::HeaderName, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -56,6 +56,13 @@ pub const SELF_CLAIM_RATE_LIMIT: u32 = 10;
 /// Sliding-reset window length (seconds) for the `self_claim` rate limiter.
 const SELF_CLAIM_RATE_WINDOW_SECS: u64 = 60;
 
+#[derive(Clone, Copy)]
+struct RateLimitSnapshot {
+    allowed: bool,
+    remaining: u32,
+    retry_after: u64,
+}
+
 #[doc(hidden)]
 pub struct RateBucket {
     count: u32,
@@ -71,14 +78,18 @@ pub fn new_shared_rate_limiter() -> SharedRateLimiter {
 
 impl AppState {
     /// Fixed-window rate limiter for `self_claim`, keyed by `key` (the claimant
-    /// address). Returns `true` if the request is allowed, `false` if the limit
-    /// for the current window is already exhausted.
-    pub fn allow_self_claim(&self, key: &str) -> bool {
+    /// address). The snapshot says whether the request is allowed and carries
+    /// the values for the `X-RateLimit-*` / `Retry-After` headers; `consume`
+    /// is false when only reporting (e.g. an idempotent replay).
+    fn check_self_claim_rate_limit(&self, key: &str, consume: bool) -> RateLimitSnapshot {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let mut buckets = self.rate_limiter.lock().unwrap();
+        let mut buckets = self
+            .rate_limiter
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let bucket = buckets.entry(key.to_string()).or_insert(RateBucket {
             count: 0,
             window_start: now,
@@ -88,11 +99,48 @@ impl AppState {
             bucket.count = 0;
         }
         if bucket.count >= SELF_CLAIM_RATE_LIMIT {
-            return false;
+            return RateLimitSnapshot {
+                allowed: false,
+                remaining: 0,
+                retry_after: SELF_CLAIM_RATE_WINDOW_SECS
+                    .saturating_sub(now.saturating_sub(bucket.window_start))
+                    .max(1),
+            };
         }
-        bucket.count += 1;
-        true
+        if consume {
+            bucket.count += 1;
+        }
+        RateLimitSnapshot {
+            allowed: true,
+            remaining: SELF_CLAIM_RATE_LIMIT - bucket.count,
+            retry_after: SELF_CLAIM_RATE_WINDOW_SECS
+                .saturating_sub(now.saturating_sub(bucket.window_start))
+                .max(1),
+        }
     }
+}
+
+fn add_rate_limit_headers(mut response: Response, snapshot: RateLimitSnapshot) -> Response {
+    let is_rate_limited = response.status() == StatusCode::TOO_MANY_REQUESTS;
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("x-ratelimit-limit"),
+        HeaderValue::from_str(&SELF_CLAIM_RATE_LIMIT.to_string())
+            .expect("configured request limit is a valid header value"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-ratelimit-remaining"),
+        HeaderValue::from_str(&snapshot.remaining.to_string())
+            .expect("remaining request count is a valid header value"),
+    );
+    if is_rate_limited {
+        headers.insert(
+            HeaderName::from_static("retry-after"),
+            HeaderValue::from_str(&snapshot.retry_after.to_string())
+                .expect("retry duration is a valid header value"),
+        );
+    }
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -487,22 +535,25 @@ pub async fn self_claim(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<SelfClaimRequest>,
-) -> Result<Response, (StatusCode, Json<AppError>)> {
+) -> Response {
     let idempotency_key = match check_idempotency_key(&headers, &state.idempotency) {
         IdempotencyCheck::NotRequested => None,
         IdempotencyCheck::Proceed(key) => Some(key),
         IdempotencyCheck::Replay(response) | IdempotencyCheck::Conflict(response) => {
-            return Ok(response)
+            let snapshot = state.check_self_claim_rate_limit(&req.claimant, false);
+            return add_rate_limit_headers(response, snapshot);
         }
     };
 
     // Rate-limit expensive on-chain-submitting routes (#670). Keyed by the
     // claimant so one user cannot hammer `self_claim`; a 429 is returned once
     // the per-window allowance is exhausted.
-    if !state.allow_self_claim(&req.claimant) {
-        return Err(AppError::too_many_requests(
+    let rate_limit = state.check_self_claim_rate_limit(&req.claimant, true);
+    if !rate_limit.allowed {
+        let (status, body) = AppError::too_many_requests(
             "rate limit exceeded for self_claim; retry after the window resets",
-        ));
+        );
+        return add_rate_limit_headers((status, body).into_response(), rate_limit);
     }
 
     let result = self_claim_inner(&state, &req).await;
@@ -515,12 +566,17 @@ pub async fn self_claim(
         finalize_idempotency_key(&state.idempotency, key, cached_body);
     }
 
-    result.map(|resp| Json(resp).into_response())
+    let response = match result {
+        Ok(resp) => Json(resp).into_response(),
+        Err((status, body)) => (status, body).into_response(),
+    };
+    add_rate_limit_headers(response, rate_limit)
 }
 
 /// The actual self-claim business logic, factored out of the handler so the
 /// idempotency wrapper in `self_claim` can call it without duplicating the
 /// staleness check or XDR-building steps.
+#[tracing::instrument(skip(state, req), fields(bounty_id = %req.bounty_id, claimant = %req.claimant))]
 async fn self_claim_inner(
     state: &AppState,
     req: &SelfClaimRequest,
@@ -870,8 +926,7 @@ mod tests {
                 claimant: "claimant-address".to_string(),
             }),
         )
-        .await
-        .expect("self_claim should succeed");
+        .await;
 
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -897,8 +952,7 @@ mod tests {
                 claimant: req.claimant.clone(),
             }),
         )
-        .await
-        .expect("first call should succeed");
+        .await;
         assert_eq!(first.status(), StatusCode::OK);
         let first_body = body_string(first).await;
 
@@ -911,8 +965,7 @@ mod tests {
             idempotency_headers("retry-key-1"),
             Json(req),
         )
-        .await
-        .expect("replayed call must not error even though the bounty is now gone");
+        .await;
         assert_eq!(second.status(), StatusCode::OK);
         let second_body = body_string(second).await;
 
@@ -943,8 +996,7 @@ mod tests {
                 claimant: "claimant-address".to_string(),
             }),
         )
-        .await
-        .expect("an in-flight key must short-circuit with a response, not an error");
+        .await;
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }
@@ -964,9 +1016,12 @@ mod tests {
                 claimant: "claimant-address".to_string(),
             }),
         )
-        .await
-        .expect_err("unknown bounty id must error");
-        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        .await;
+        assert_eq!(
+            err.status(),
+            StatusCode::NOT_FOUND,
+            "unknown bounty id must error"
+        );
 
         assert!(
             !crate::db::read_idempotency(&state.idempotency)

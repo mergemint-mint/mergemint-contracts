@@ -94,9 +94,7 @@ fn validate_mailbox(mailbox: &str) -> anyhow::Result<()> {
             .any(|character| matches!(character, '\r' | '\n' | '<' | '>'))
             && mailbox.matches('@').count() == 1
             && mailbox.split_once('@').is_some_and(|(local, domain)| {
-                !local.is_empty()
-                    && !domain.is_empty()
-                    && !mailbox.chars().any(char::is_whitespace)
+                !local.is_empty() && !domain.is_empty() && !mailbox.chars().any(char::is_whitespace)
             }),
         "invalid email address"
     );
@@ -132,7 +130,9 @@ async fn send_email(to: &str, subject: &str, body: &str) -> anyhow::Result<()> {
         let config = SmtpConfig::from_env()?;
         validate_mailbox(to)?;
         anyhow::ensure!(
-            !subject.chars().any(|character| matches!(character, '\r' | '\n')),
+            !subject
+                .chars()
+                .any(|character| matches!(character, '\r' | '\n')),
             "email subject contains an invalid line break"
         );
 
@@ -163,12 +163,7 @@ async fn smtp_send(
 
     if let (Some(username), Some(password)) = (&config.username, &config.password) {
         let credentials = STANDARD.encode(format!("\0{username}\0{password}"));
-        smtp_command(
-            &mut stream,
-            &format!("AUTH PLAIN {credentials}\r\n"),
-            235,
-        )
-        .await?;
+        smtp_command(&mut stream, &format!("AUTH PLAIN {credentials}\r\n"), 235).await?;
     }
 
     smtp_command(
@@ -270,7 +265,10 @@ pub async fn create_email_subscription(
 
     let base_url = public_base_url().map_err(|error| {
         tracing::error!(%error, "email verification URL is not configured");
-        email_error(StatusCode::SERVICE_UNAVAILABLE, "Email notifications are not configured")
+        email_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Email notifications are not configured",
+        )
     })?;
     if let Err(error) = SmtpConfig::from_env() {
         tracing::error!(%error, "SMTP email delivery is not configured");
@@ -295,8 +293,7 @@ pub async fn create_email_subscription(
         ));
     }
     let verify_url = format!("{base_url}/notifications/verify?token={verification_token}");
-    let unsubscribe_url =
-        format!("{base_url}/notifications/unsubscribe?token={unsubscribe_token}");
+    let unsubscribe_url = format!("{base_url}/notifications/unsubscribe?token={unsubscribe_token}");
     let body = format!(
         "Confirm email notifications for contributor {address} by visiting:\n\n{verify_url}\n\nIf you did not request this, ignore this email. To cancel this pending subscription, visit:\n{unsubscribe_url}"
     );
@@ -350,10 +347,7 @@ pub async fn unsubscribe_email(
     }
 }
 
-fn email_error(
-    status: StatusCode,
-    message: &str,
-) -> (StatusCode, Json<serde_json::Value>) {
+fn email_error(status: StatusCode, message: &str) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(serde_json::json!({"error": message})))
 }
 
@@ -434,7 +428,10 @@ fn email_template(event: &str) -> Option<(&'static str, &'static str)> {
             "Bounty deadline approaching",
             "A claimed bounty is approaching its deadline.",
         )),
-        "reward_paid" => Some(("Bounty payout sent", "A payout was recorded for your bounty.")),
+        "reward_paid" => Some((
+            "Bounty payout sent",
+            "A payout was recorded for your bounty.",
+        )),
         _ => None,
     }
 }

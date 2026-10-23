@@ -168,6 +168,28 @@ impl Metrics {
             "mergemint_leaderboard_cache_total{{result=\"miss\"}} {cache_misses}\n"
         ));
 
+        let limiter = self.sse_limiter.as_ref();
+        out.push_str(
+            "# HELP mergemint_sse_active_connections Open GET /bounties/stream connections.\n",
+        );
+        out.push_str("# TYPE mergemint_sse_active_connections gauge\n");
+        out.push_str(&format!(
+            "mergemint_sse_active_connections {}\n",
+            limiter.map_or(0, |l| l.active())
+        ));
+        out.push_str("# HELP mergemint_sse_rejected_connections_total SSE connections refused with 429, by cap.\n");
+        out.push_str("# TYPE mergemint_sse_rejected_connections_total counter\n");
+        for (label, reason) in [
+            ("per_ip", LimitExceeded::PerIp),
+            ("global", LimitExceeded::Global),
+        ] {
+            out.push_str(&format!(
+                "mergemint_sse_rejected_connections_total{{reason=\"{}\"}} {}\n",
+                label,
+                limiter.map_or(0, |l| l.rejected(reason))
+            ));
+        }
+
         out
     }
 }

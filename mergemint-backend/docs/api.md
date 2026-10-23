@@ -156,7 +156,9 @@ How it works:
   returns before the limiter runs, so it does **not** use up a token.
 - The limiter is kept in process memory. With several replicas, each one
   enforces its own limit, and the counts reset when the process restarts.
-- No `Retry-After` header is sent. Back off until the 60 s window has elapsed.
+- Successful and rejected rate-limited responses include `X-RateLimit-Limit`
+  and `X-RateLimit-Remaining`. A `429` also includes `Retry-After` in seconds.
+  The same headers are exposed to browser clients through CORS.
 
 ```bash
 C=GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
@@ -171,9 +173,23 @@ done; echo
 ```http
 HTTP/1.1 429 Too Many Requests
 content-type: application/json
+X-RateLimit-Limit: 10
+X-RateLimit-Remaining: 0
+Retry-After: 60
 
 {"code":429,"message":"rate limit exceeded for self_claim; retry after the window resets"}
 ```
+
+## Bounty exports and feeds
+
+`GET /bounties/export.csv` accepts the listing filters `status`, `tag`, `sort`,
+`order`, and `limit`. It streams CSV with a maximum of 5,000 rows. The `token`
+column contains the reward-token address; `reward_amount` is formatted using
+the bounty's `reward_decimals` metadata (7 for older rows without that field).
+
+`GET /feed.xml` returns an Atom 1.0 feed of the latest 100 open bounties.
+An optional `tag` query parameter filters the feed. Responses are cacheable for
+60 seconds.
 
 ---
 

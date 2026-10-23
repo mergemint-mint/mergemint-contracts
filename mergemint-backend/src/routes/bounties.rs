@@ -7,8 +7,12 @@
 /// POST /bounties/{id}/claim          claim a bounty (broadcasts on the stream)
 /// GET  /bounties/stream              SSE stream of bounty state changes (#482)
 use axum::{
-    extract::{Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    body::{Body, Bytes},
+    extract::{ConnectInfo, Path, Query, State},
+    http::{
+        header::{self, RETRY_AFTER},
+        HeaderMap, HeaderValue, StatusCode,
+    },
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -17,7 +21,9 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
+use futures_util::stream;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,15 +31,15 @@ use tokio_stream::{wrappers::BroadcastStream, StreamExt as _};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::db::{
-    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, Bounty,
-    BountyPage, BountySortField, SortOrder,
+    list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator,
+    list_bounties_export_page, Bounty, BountyPage, BountySortField, SortOrder,
 };
 use crate::events::decode_bounty_event;
 use crate::routes::tx::AppState;
 
 // ── Query params ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Default, Deserialize, IntoParams)]
+#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListParams {
     pub limit: Option<i64>,
@@ -74,6 +80,8 @@ fn cursor_supported(sort: BountySortField, order: SortOrder) -> bool {
 /// `get_open_bounties_paged` — without a cap, a caller could request an
 /// unbounded page and force an expensive full-table scan/sort.
 const MAX_LIST_LIMIT: i64 = 100;
+const MAX_EXPORT_ROWS: usize = 5_000;
+const EXPORT_PAGE_SIZE: usize = 100;
 
 // ── Cursor encoding (issue #873) ──────────────────────────────────────────────
 
@@ -244,6 +252,143 @@ fn conditional_json_response<T: Serialize>(value: T, headers: &HeaderMap) -> Res
     }
 }
 
+/// `GET /bounties/export.csv` emits filtered bounty rows in bounded chunks.
+pub async fn export_bounties_csv(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListParams>,
+) -> Result<Response, (StatusCode, Json<crate::routes::tx::AppError>)> {
+    if let Some(status) = params.status.as_deref() {
+        if !VALID_STATUSES.contains(&status) {
+            return Err(crate::routes::tx::AppError::bad_request(format!(
+                "invalid status '{}'; expected one of: {}",
+                status,
+                VALID_STATUSES.join(", ")
+            )));
+        }
+    }
+
+    let sort = params.sort.unwrap_or_default();
+    let order = params.order.unwrap_or_default();
+    let decoded = match params.page_cursor.as_deref() {
+        Some(raw) => match decode_cursor(raw) {
+            Some(pair) => Some(pair),
+            None => {
+                return Err(crate::routes::tx::AppError::bad_request(
+                    "invalid page_cursor",
+                ));
+            }
+        },
+        None => None,
+    };
+    if (decoded.is_some() || params.cursor.is_some()) && !cursor_supported(sort, order) {
+        return Err(crate::routes::tx::AppError::bad_request(
+            "cursor pagination is only supported with the default ordering (sort=created&order=desc)",
+        ));
+    }
+    let cursor = decoded.map(|(timestamp, _)| timestamp).or(params.cursor);
+    if params.limit.is_some_and(|limit| limit <= 0) {
+        return Err(crate::routes::tx::AppError::bad_request(
+            "export limit must be a positive integer",
+        ));
+    }
+    let max_rows = params
+        .limit
+        .and_then(|limit| usize::try_from(limit).ok())
+        .unwrap_or(MAX_EXPORT_ROWS)
+        .clamp(1, MAX_EXPORT_ROWS);
+    let rows = stream::unfold(
+        (
+            state.db.clone(),
+            params.status.clone(),
+            params.tag.clone(),
+            cursor,
+            sort,
+            order,
+            0usize,
+        ),
+        move |(db, status, tag, cursor, sort, order, offset)| async move {
+            if offset >= max_rows {
+                return None;
+            }
+
+            let page_size = EXPORT_PAGE_SIZE.min(max_rows - offset);
+            let page = list_bounties_export_page(
+                &db,
+                offset,
+                page_size,
+                cursor,
+                status.as_deref(),
+                tag.as_deref(),
+                sort,
+                order,
+            );
+            if page.is_empty() {
+                return None;
+            }
+
+            let next_offset = offset + page.len();
+            let chunk = page
+                .iter()
+                .map(|bounty| {
+                    format!(
+                        "{},{},{},{},{},{},{}\r\n",
+                        csv_field(&bounty.id),
+                        csv_field(&bounty.creator),
+                        csv_field(bounty.assignee.as_deref().unwrap_or("")),
+                        csv_field(&format_reward(bounty.reward, bounty.reward_decimals)),
+                        csv_field(bounty.reward_token.as_deref().unwrap_or("")),
+                        csv_field(&bounty.status),
+                        csv_field(&bounty.created_at.to_rfc3339()),
+                    )
+                })
+                .collect::<String>();
+
+            Some((
+                Ok::<Bytes, Infallible>(Bytes::from(chunk)),
+                (db, status, tag, cursor, sort, order, next_offset),
+            ))
+        },
+    );
+    let header = stream::once(async {
+        Ok::<Bytes, Infallible>(Bytes::from_static(
+            b"id,creator,assignee,reward_amount,token,status,created_at\r\n",
+        ))
+    });
+    let response_stream = header.chain(rows);
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"bounties.csv\""),
+        )
+        .body(Body::from_stream(response_stream))
+        .expect("static CSV response headers are valid"))
+}
+
+fn csv_field(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn format_reward(reward: i128, decimals: u32) -> String {
+    let precision = decimals.min(18);
+    let scale = 10_u128.pow(precision);
+    let amount = reward.unsigned_abs();
+    let whole = amount / scale;
+    let sign = if reward < 0 { "-" } else { "" };
+    if precision == 0 {
+        return format!("{sign}{whole}");
+    }
+
+    let fraction = format!("{:0width$}", amount % scale, width = precision as usize);
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        format!("{sign}{whole}")
+    } else {
+        format!("{sign}{whole}.{fraction}")
+    }
+}
+
 /// `GET /bounties/assignee/{address}`
 ///
 /// Returns a paginated list of bounties assigned to `address`. A
@@ -340,7 +485,10 @@ pub async fn bounty_stream(
     };
 
     let rx = state.bounty_broadcast.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
+    // The stream owns the permit so the per-IP slot is released only when the
+    // client disconnects and the stream is dropped.
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        let _permit = &permit;
         result.ok().map(|message| {
             let event = decode_bounty_event(&message);
             let sse_event = if event.name == "deadline_approaching" {
@@ -348,9 +496,11 @@ pub async fn bounty_stream(
             } else {
                 "bounty_updated"
             };
-            Ok(Event::default()
-                .event(sse_event)
-                .data(serde_json::json!({"bountyId": event.bounty_id}).to_string()))
+            Ok::<_, Infallible>(
+                Event::default()
+                    .event(sse_event)
+                    .data(serde_json::json!({"bountyId": event.bounty_id}).to_string()),
+            )
         })
     });
 
@@ -581,7 +731,7 @@ mod tests {
         let state = test_state();
         seed_bounties(&state, (MAX_LIST_LIMIT + 10) as usize);
 
-        let Json(page) = list_bounties(
+        let response = list_bounties(
             State(state),
             Query(ListParams {
                 limit: Some(MAX_LIST_LIMIT + 10),
@@ -590,9 +740,11 @@ mod tests {
                 order: None,
                 ..Default::default()
             }),
+            HeaderMap::new(),
         )
         .await
         .expect("an oversized limit is still a valid listing request");
+        let page: BountyPage = response_json(response).await;
 
         assert_eq!(
             page.bounties.len(),
@@ -611,7 +763,7 @@ mod tests {
         let state = test_state();
         seed_bounties(&state, 20);
 
-        let Json(page) = list_bounties(
+        let response = list_bounties(
             State(state),
             Query(ListParams {
                 limit: Some(5),
@@ -620,9 +772,11 @@ mod tests {
                 order: None,
                 ..Default::default()
             }),
+            HeaderMap::new(),
         )
         .await
         .expect("a within-bounds limit is a valid listing request");
+        let page: BountyPage = response_json(response).await;
 
         assert_eq!(page.bounties.len(), 5);
     }

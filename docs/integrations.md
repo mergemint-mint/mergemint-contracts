@@ -1,5 +1,17 @@
 # Integrations
 
+## OpenTelemetry Tracing
+
+The backend exports traces over OTLP gRPC only when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set. Leave it unset to keep tracing export
+disabled. For a collector reachable on the Docker network, configure
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`. HTTP spans include
+the `x-request-id` correlation ID; indexer processing, self-claim database
+work, and webhook delivery are represented by child spans.
+
+The service continues to emit its existing pretty or JSON logs regardless of
+whether OTLP export is enabled.
+
 ## Freighter Deep-Link for `claim_bounty`
 
 ### Overview

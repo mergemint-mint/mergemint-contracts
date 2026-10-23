@@ -44,7 +44,12 @@ fn read_positive_env(name: &str, default: u64, max: u64, description: &str) -> u
         {
             Some(value) => value,
             None => {
-                tracing::warn!(env = name, value, default, "invalid {description}; using default");
+                tracing::warn!(
+                    env = name,
+                    value,
+                    default,
+                    "invalid {description}; using default"
+                );
                 default
             }
         },

@@ -158,6 +158,10 @@ pub fn calculate_backoff_delay(attempt: usize, config: &RetryConfig) -> Duration
 }
 
 /// Deliver a webhook payload to a single subscription with exponential backoff retries.
+#[tracing::instrument(
+    skip(client, subscription, payload, retry_config),
+    fields(subscription_id = %subscription.id, event = %payload.event)
+)]
 pub async fn deliver_webhook_payload(
     client: &WebhookClient,
     subscription: &WebhookSubscription,
@@ -288,8 +292,7 @@ pub fn start_webhook_dispatcher(
                     let event = decode_bounty_event(&raw_message);
                     let payload =
                         build_bounty_event_payload(&state.db, &event.name, &event.bounty_id);
-                    for result in
-                        dispatch_event(&state.db, &client, &payload, &retry_config).await
+                    for result in dispatch_event(&state.db, &client, &payload, &retry_config).await
                     {
                         if let Err(error) = result {
                             tracing::error!(

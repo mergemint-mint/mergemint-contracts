@@ -1,7 +1,7 @@
 pub mod db;
+pub mod deadline_reminders;
 pub mod events;
 pub mod indexer;
-pub mod deadline_reminders;
 pub mod notifications;
 pub mod rate_limit;
 pub mod routes;
