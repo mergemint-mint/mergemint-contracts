@@ -26,11 +26,10 @@ fn validate_tags(env: &Env, tags: &Vec<Symbol>) {
         fail(ContractError::TooManyTags);
     }
 
-    for i in 0..tags.len() {
-        let tag = tags.get(i).unwrap();
+    for (i, tag) in tags.iter().enumerate() {
         symbols::validate_symbol_or_fail(env, SymbolKind::Tag, &tag);
-        for j in (i + 1)..tags.len() {
-            if tags.get(j).unwrap() == tag {
+        for other in tags.iter().skip(i + 1) {
+            if other == tag {
                 fail(ContractError::DuplicateTag);
             }
         }
@@ -116,7 +115,7 @@ fn distribute_payout(
     token: &TokenClient,
     reward_amount: i128,
 ) -> Address {
-    let (primary_assignee, _) = assignees.get(0).unwrap();
+    let (primary_assignee, _) = assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
 
     for (assignee, share_bp) in assignees.iter() {
         let payout = reward_amount * (share_bp as i128) / 10_000_i128;
@@ -215,7 +214,7 @@ fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
         if !bounty.milestones.iter().all(|m| m.completed) {
             fail(ContractError::NotAllMilestonesCompleted);
         }
-        let (primary_assignee, _) = bounty.assignees.get(0).unwrap();
+        let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_COMPLETED);
         storage::store_bounty(&env, &bounty_id, &bounty);
@@ -225,7 +224,7 @@ fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
         return;
     }
 
-    let (primary_assignee, _) = bounty.assignees.get(0).unwrap();
+    let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
     let previous_status = bounty.status.clone();
     bounty.status = Symbol::new(&env, STATUS_COMPLETED);
     storage::store_bounty(&env, &bounty_id, &bounty);
@@ -698,7 +697,11 @@ impl MergeMintContract {
             fail(ContractError::InvalidMilestoneIndex);
         }
 
-        let mut milestone = bounty.milestones.get(idx).unwrap().clone();
+        let mut milestone = bounty
+            .milestones
+            .get(idx)
+            .unwrap_or_else(|| fail(ContractError::InvalidMilestoneIndex))
+            .clone();
         if milestone.completed {
             fail(ContractError::MilestoneAlreadyCompleted);
         }
@@ -729,7 +732,10 @@ impl MergeMintContract {
             milestone_reward,
         );
 
-        let completed_milestone = bounty.milestones.get(idx).unwrap();
+        let completed_milestone = bounty
+            .milestones
+            .get(idx)
+            .unwrap_or_else(|| fail(ContractError::InvalidMilestoneIndex));
         events::emit_milestone_completed(
             &env,
             &bounty_id,
@@ -845,7 +851,10 @@ impl MergeMintContract {
             fail(ContractError::SubmissionRequired);
         }
 
-        let required = bounty.required_verifiers.clone().unwrap();
+        let required = bounty
+            .required_verifiers
+            .clone()
+            .unwrap_or_else(|| fail(ContractError::VerifierNotAuthorized));
         let is_authorized = required.iter().any(|v| v == verifier);
         if !is_authorized {
             fail(ContractError::VerifierNotAuthorized);
@@ -881,7 +890,7 @@ impl MergeMintContract {
                 storage::store_bounty(&env, &bounty_id, &bounty);
                 storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
                 storage::decrement_creator_open_count(&env, &bounty.creator);
-                let (primary_assignee, _) = bounty.assignees.get(0).unwrap();
+                let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
                 events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
                 return;
             }
@@ -896,7 +905,7 @@ impl MergeMintContract {
                 bounty.reward_amount,
             );
 
-            let (primary_assignee, _) = bounty.assignees.get(0).unwrap();
+            let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
             let previous_status = bounty.status.clone();
             bounty.status = Symbol::new(&env, STATUS_COMPLETED);
             storage::store_bounty(&env, &bounty_id, &bounty);
@@ -1411,7 +1420,7 @@ impl MergeMintContract {
         );
 
         let token = TokenClient::new(&env, &bounty.reward_token);
-        token.transfer(&sponsor, &env.current_contract_address(), &amount);
+        token.transfer(&sponsor, env.current_contract_address(), &amount);
 
         storage::add_sponsor_contribution(&env, &bounty_id, &sponsor, amount);
 
@@ -1475,7 +1484,7 @@ impl MergeMintContract {
             fail(ContractError::BountyHasNoAssignee);
         }
 
-        let (old_assignee, share_bp) = bounty.assignees.get(0).unwrap();
+        let (old_assignee, share_bp) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
 
         if new_assignee == old_assignee {
             fail(ContractError::AlreadyClaimed);

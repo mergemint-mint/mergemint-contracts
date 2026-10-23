@@ -243,6 +243,28 @@ The scheduled reminder uses `DEADLINE_REMINDER_INTERVAL_SECS` (default 60) and
 `DEADLINE_REMINDER_LEAD_HOURS` (default 24). A reminder is recorded once per
 bounty, and submitted bounties are excluded.
 
+## Durable delivery and administration
+
+Webhook deliveries are queued in PostgreSQL and retried independently of the
+indexer. Configure `WEBHOOK_MAX_ATTEMPTS`, `WEBHOOK_INITIAL_DELAY_MS`,
+`WEBHOOK_BACKOFF_FACTOR`, and `WEBHOOK_MAX_DELAY_MS` to tune retry behavior.
+Every attempt is retained in `webhook_delivery_attempts`; permanently failed
+deliveries are stored as dead letters in `webhook_deliveries`.
+
+Set a non-empty `ADMIN_API_TOKEN` to enable admin endpoints. Send it as a
+bearer token when listing failed deliveries or replaying one:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+  "https://api.mergemint.io/api/admin/webhooks/failed?limit=50"
+
+curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+  "https://api.mergemint.io/api/admin/webhooks/123/replay"
+```
+
+Replay requests are recorded in the audit log. The token must be configured;
+admin routes fail closed when it is unset.
+
 ---
 
 ## 5. Signature Verification

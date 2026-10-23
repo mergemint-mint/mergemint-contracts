@@ -2,7 +2,7 @@
 
 A curated collection of short, battle-tested recipe scripts for the MergeMint TypeScript SDK (`@mergemint/sdk`).
 
-All recipes are runnable standalone TypeScript scripts located in [`sdk/examples/`](../sdk/examples).
+All recipes are runnable standalone TypeScript scripts located in [`sdk/examples/`](https://github.com/mergemint-mint/mergemint-contracts/tree/main/sdk/examples).
 
 ---
 
@@ -86,13 +86,15 @@ const txXdr = await sdk.completeBounty(contributorAddress, bountyId, contributor
 ```
 
 ### 05. Approve Completion & Escrow Payout
-Verifier or Creator approves submission, unlocking funds:
+[Verifier](glossary.md#verifier) or Creator approves submission, unlocking funds:
 ```typescript
 const txXdr = await sdk.approveCompletion(verifierAddress, bountyId, verifierAddress);
 ```
 
 ### 06. Top-up Existing Bounty
-Increases reward tokens deposited into the escrow balance:
+Adds reward tokens to an existing bounty (a [top-up](glossary.md#top-up)). The
+contract implements this as `sponsor_bounty`; `topUp` builds a `top_up` call.
+
 ```typescript
 const txXdr = await sdk.topUp({
   funder: funderAddress,

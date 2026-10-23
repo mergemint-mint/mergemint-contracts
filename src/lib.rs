@@ -5,7 +5,10 @@
 // instead of panicking opaquely. `cfg_attr` keeps this from firing inside
 // `#[cfg(test)]` modules, where panics/unwraps are the normal assertion
 // idiom.
-#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 
 mod contract;
 mod errors;

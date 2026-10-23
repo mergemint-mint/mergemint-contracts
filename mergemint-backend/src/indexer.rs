@@ -19,6 +19,7 @@
 
 use tracing::warn;
 
+#[allow(clippy::too_many_arguments)]
 pub fn index_reputation_change(
     db: &crate::db::SharedDb,
     event_id: String,
@@ -180,6 +181,7 @@ pub struct IndexerState {
 ///
 /// When the first topic fails to decode, the error is logged via
 /// `tracing::warn!` instead of being swallowed silently.
+#[tracing::instrument(skip(state, events), fields(event_count = events.len(), page_complete))]
 pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: bool) {
     let mut highest_ledger = state.last_ledger;
 
@@ -477,6 +479,7 @@ mod tests {
         "bounty_expired",
         "approval_recorded",
         "dispute_resolved",
+        "work_submitted",
     ];
 
     /// The indexer's own event-name lists must contain exactly the events

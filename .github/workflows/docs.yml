@@ -1,0 +1,74 @@
+name: Docs
+
+# Builds the docs/ folder with mdBook (#1113). Every run fails on broken
+# internal links (mdbook-linkcheck). Pushes to main also deploy the site to
+# GitHub Pages; other branches and PRs only build.
+
+on:
+  push:
+    branches:
+      - main
+      - "docs/**"
+      - "fix/**"
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MDBOOK_VERSION: "0.4.40"
+  MDBOOK_LINKCHECK_VERSION: "0.7.7"
+
+jobs:
+  build:
+    name: Build docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install mdBook and mdbook-linkcheck
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          curl -fsSL -o /tmp/linkcheck.zip "https://github.com/Michael-F-Bryan/mdbook-linkcheck/releases/download/v${MDBOOK_LINKCHECK_VERSION}/mdbook-linkcheck.x86_64-unknown-linux-gnu.zip"
+          unzip -o /tmp/linkcheck.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/mdbook" "$HOME/.local/bin/mdbook-linkcheck"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build (fails on broken links)
+        run: mdbook build
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/book/html
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

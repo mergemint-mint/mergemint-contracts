@@ -79,6 +79,7 @@ async fn collect_events(mut response: reqwest::Response, count: usize) -> Vec<St
 async fn reconnect_after_drop_delivers_no_duplicate_events() {
     let state = Arc::new(AppState {
         db: new_shared_db(),
+        postgres: None,
         idempotency: new_shared_idempotency_store(),
         rate_limiter: mergemint_backend::routes::tx::new_shared_rate_limiter(),
         bounty_broadcast: tokio::sync::broadcast::channel(16).0,
@@ -140,6 +141,7 @@ async fn keep_alive_heartbeat_arrives_within_interval() {
     let keep_alive_duration = Duration::from_millis(200); // Use short duration for testing
     let state = Arc::new(AppState {
         db: new_shared_db(),
+        postgres: None,
         idempotency: new_shared_idempotency_store(),
         rate_limiter: mergemint_backend::routes::tx::new_shared_rate_limiter(),
         bounty_broadcast: tokio::sync::broadcast::channel(16).0,

@@ -84,11 +84,21 @@
 // Kubernetes or Docker Compose can use this to avoid routing traffic to an
 // instance whose database connection is broken.  `/health` stays cheap and
 // database-independent so it remains a pure liveness check.
+//
+// ## Security headers (#1115)
+//
+// The outermost layer, `security_headers`, adds `X-Content-Type-Options`,
+// `Referrer-Policy` and `X-Frame-Options` to every response (JSON, SSE, CORS
+// preflights and errors from inner layers). `Strict-Transport-Security` is
+// only sent when `HSTS_ENABLED=true`, i.e. when the service is reached over
+// HTTPS. See `security_headers.rs` and docs/security.md.
 
+use sqlx::Row;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 
 use axum::{
     body::Body,
@@ -121,6 +131,7 @@ mod metrics;
 mod notifications;
 mod rate_limit;
 mod routes;
+mod security_headers;
 mod sse_limit;
 #[cfg(test)]
 mod test_helpers;
@@ -135,17 +146,20 @@ use notifications::{
     create_email_subscription, start_email_notifier, unsubscribe_email, verify_email,
 };
 use routes::bounties::{
-    bounty_stream, claim_bounty, get_bounty_route, list_bounties, list_bounties_by_assignee,
+    bounty_stream, claim_bounty, export_bounties_csv, get_bounty_route, list_bounties,
+    list_bounties_by_assignee,
 };
+use routes::feed::open_bounties_feed;
 use routes::leaderboard::get_leaderboard_route;
 use routes::reputation::get_reputation_history;
 use routes::tx::{
     new_shared_rate_limiter, query_audit_logs, resolve_dispute, self_claim, AppState,
 };
+use security_headers::{security_headers, SecurityHeadersConfig};
 use webhooks::{
     create_subscription_route, delete_subscription_route, get_subscription_route,
-    list_subscriptions_route, start_webhook_dispatcher, RetryConfig, SsrfPolicy, WebhookClient,
-    WebhookTargetGuard,
+    list_failed_webhooks_route, list_subscriptions_route, replay_webhook_route,
+    start_webhook_dispatcher, RetryConfig, SsrfPolicy, WebhookClient, WebhookTargetGuard,
 };
 
 /// Maximum allowed request body size (1 MiB).
@@ -178,12 +192,16 @@ const CORS_ALLOWED_ORIGINS_ENV: &str = "CORS_ALLOWED_ORIGINS";
 const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
 const CONTRACT_VERSION_WARN_ONLY_ENV: &str = "CONTRACT_VERSION_WARN_ONLY";
 static CONTRACT_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+const OTEL_EXPORTER_OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
 /// OpenAPI description of the bounty read API (#865), served at
 /// `/api-docs/openapi.json` and rendered by the Swagger UI page (#866).
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "MergeMint backend API"),
+    info(
+        title = "MergeMint backend API",
+        description = "Rate-limited responses include X-RateLimit-Limit and X-RateLimit-Remaining; 429 responses include Retry-After in seconds."
+    ),
     paths(
         routes::bounties::list_bounties,
         routes::bounties::list_bounties_by_assignee,
@@ -194,6 +212,12 @@ static CONTRACT_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new(
         routes::reputation::get_reputation_history,
         routes::stats::get_stats_route,
         routes::tx::query_audit_logs,
+        routes::tx::cancel_bounty_transaction,
+        routes::tx::top_up_bounty_transaction,
+        routes::tx::extend_deadline_transaction,
+        routes::tx::submit_signed_transaction,
+        webhooks::list_failed_webhooks_route,
+        webhooks::replay_webhook_route,
         notifications::create_email_subscription,
         notifications::verify_email,
         notifications::unsubscribe_email,
@@ -209,6 +233,12 @@ static CONTRACT_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new(
         routes::tx::AppError,
         routes::tx::QueryAuditLogsResponse,
         routes::reputation::ReputationHistoryPage,
+        routes::tx::CancelBountyRequest,
+        routes::tx::TopUpBountyRequest,
+        routes::tx::ExtendDeadlineRequest,
+        routes::tx::UnsignedTransactionResponse,
+        routes::tx::SubmitSignedTransactionRequest,
+        routes::tx::SubmitTransactionResponse,
         db::AuditLog,
         db::LeaderboardEntry,
         db::LeaderboardPage,
@@ -216,6 +246,8 @@ static CONTRACT_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new(
         db::StatsResponse,
         db::TokenTotal,
         db::WebhookSubscription,
+        webhooks::FailedWebhookDelivery,
+        webhooks::FailedWebhookPage,
         notifications::CreateEmailSubscriptionRequest,
     )),
     tags(
@@ -273,12 +305,38 @@ async fn main() {
             .unwrap()
     });
 
+    let tracer = std::env::var(OTEL_EXPORTER_OTLP_ENDPOINT_ENV)
+        .ok()
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .and_then(|endpoint| {
+            use opentelemetry_otlp::WithExportConfig as _;
+            opentelemetry_otlp::new_pipeline()
+                .tracing()
+                .with_exporter(
+                    opentelemetry_otlp::new_exporter()
+                        .tonic()
+                        .with_endpoint(endpoint),
+                )
+                .install_batch(opentelemetry_sdk::runtime::Tokio)
+                .map_err(|error| {
+                    eprintln!("OpenTelemetry exporter setup failed: {error}");
+                    error
+                })
+                .ok()
+        });
     let registry = tracing_subscriber::registry().with(env_filter);
 
-    if log_format_is_json() {
-        registry.with(fmt::layer().json()).init();
-    } else {
-        registry.with(fmt::layer()).init();
+    match (log_format_is_json(), tracer) {
+        (true, Some(tracer)) => registry
+            .with(fmt::layer().json())
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .init(),
+        (false, Some(tracer)) => registry
+            .with(fmt::layer())
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .init(),
+        (true, None) => registry.with(fmt::layer().json()).init(),
+        (false, None) => registry.with(fmt::layer()).init(),
     }
 
     warn_if_reward_token_allowlist_empty();
@@ -300,9 +358,7 @@ async fn main() {
         if let (Some(rpc_url), Some(contract_id)) = (rpc_url, contract_id) {
             let version_result = std::env::var("CONTRACT_VERSION_SOURCE_ACCOUNT")
                 .map_err(anyhow::Error::from)
-                .and_then(|source_account| {
-                    Ok((rpc_url.clone(), contract_id.clone(), source_account))
-                });
+                .map(|source_account| (rpc_url.clone(), contract_id.clone(), source_account));
             match version_result {
                 Ok((rpc_url, contract_id, source_account)) => {
                     match contract_version::check_contract_version(
@@ -363,10 +419,59 @@ async fn main() {
     }
 
     let shared_db = new_shared_db();
-    if let Some(pool) = postgres {
+    if let Some(pool) = postgres.clone() {
         db::set_postgres_pool(&shared_db, pool);
     }
     let idempotency = new_shared_idempotency_store();
+    // Durable webhook delivery needs Postgres; without DATABASE_URL the
+    // dispatcher falls back to in-process delivery.
+    if let Some(pool) = postgres.as_ref() {
+        for (migration, what) in [
+            (
+                include_str!("../migrations/0005_create_webhook_deliveries.sql"),
+                "webhook delivery storage",
+            ),
+            (
+                include_str!("../migrations/0002_create_webhook_subscriptions.sql"),
+                "webhook subscription storage",
+            ),
+            (
+                include_str!("../migrations/0002_create_audit_logs_table.sql"),
+                "audit log storage",
+            ),
+        ] {
+            for statement in migration
+                .split(';')
+                .filter(|statement| !statement.trim().is_empty())
+            {
+                if let Err(error) = sqlx::query(statement).execute(pool).await {
+                    tracing::error!(%error, "failed to initialize {what}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        let subscriptions = sqlx::query(
+            "SELECT id, url, secret, event_types, active, created_at FROM webhook_subscriptions WHERE active = TRUE",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("failed to restore webhook subscriptions");
+        let mut store = db::acquire_db(&shared_db);
+        store.webhook_subscriptions = subscriptions
+            .into_iter()
+            .map(|row| {
+                Ok(db::WebhookSubscription {
+                    id: row.try_get("id")?,
+                    url: row.try_get("url")?,
+                    secret: row.try_get("secret")?,
+                    event_types: row.try_get("event_types")?,
+                    active: row.try_get("active")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .expect("failed to decode webhook subscriptions");
+    }
     let (bounty_broadcast, _) = tokio::sync::broadcast::channel(100);
     let sse_keep_alive_duration = read_sse_keep_alive_duration();
 
@@ -383,6 +488,7 @@ async fn main() {
 
     let state = Arc::new(AppState {
         db: shared_db,
+        postgres,
         idempotency,
         rate_limiter: new_shared_rate_limiter(),
         bounty_broadcast,
@@ -397,7 +503,7 @@ async fn main() {
     let webhook_client = WebhookClient::new(webhook_guard, Duration::from_secs(10))
         .expect("failed to build webhook HTTP client");
     let _webhook_dispatcher =
-        start_webhook_dispatcher(state.clone(), webhook_client, RetryConfig::default());
+        start_webhook_dispatcher(state.clone(), webhook_client, RetryConfig::from_env());
     let _email_notifier = start_email_notifier(state.clone());
     let _deadline_reminder_job = start_deadline_reminder_job(
         state.clone(),
@@ -407,6 +513,12 @@ async fn main() {
 
     let metrics = Arc::new(Metrics::new().with_sse_limiter(sse_limiter));
 
+    let admin_routes = Router::new()
+        .route("/audit-logs", get(query_audit_logs))
+        .route("/webhooks/failed", get(list_failed_webhooks_route))
+        .route("/webhooks/:id/replay", post(replay_webhook_route))
+        .route_layer(middleware::from_fn(require_admin));
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/api-docs/openapi.json", get(openapi_json))
@@ -414,8 +526,27 @@ async fn main() {
         .route("/ready", get(ready))
         .route("/tx/resolve-dispute", post(resolve_dispute))
         .route("/tx/self-claim", post(self_claim))
-        .route("/admin/audit-logs", get(query_audit_logs))
+        .route("/tx/cancel", post(routes::tx::cancel_bounty_transaction))
+        .route("/tx/top-up", post(routes::tx::top_up_bounty_transaction))
+        .route(
+            "/tx/extend-deadline",
+            post(routes::tx::extend_deadline_transaction),
+        )
+        .route("/tx/submit", post(routes::tx::submit_signed_transaction))
+        .route(
+            "/tx/cancel-bounty",
+            post(routes::tx::cancel_bounty_transaction),
+        )
+        .route(
+            "/tx/top-up-bounty",
+            post(routes::tx::top_up_bounty_transaction),
+        )
+        .route(
+            "/tx/extend-deadline-bounty",
+            post(routes::tx::extend_deadline_transaction),
+        )
         .route("/bounties", get(list_bounties))
+        .route("/bounties/export.csv", get(export_bounties_csv))
         .route("/bounties/:id", get(get_bounty_route))
         .route(
             "/bounties/assignee/:address",
@@ -430,6 +561,7 @@ async fn main() {
         // ── Bounty push channel (#482) ─────────────────────────────────────
         .route("/bounties/:id/claim", post(claim_bounty))
         .route("/bounties/stream", get(bounty_stream))
+        .route("/feed.xml", get(open_bounties_feed))
         .route(
             "/webhooks/subscriptions",
             post(create_subscription_route).get(list_subscriptions_route),
@@ -438,6 +570,7 @@ async fn main() {
             "/webhooks/subscriptions/:id",
             get(get_subscription_route).delete(delete_subscription_route),
         )
+        .nest("/admin", admin_routes)
         .route(
             "/notifications/subscriptions",
             post(create_email_subscription),
@@ -458,6 +591,21 @@ async fn main() {
         // by the matched route and response status.
         .layer(middleware::from_fn_with_state(metrics, track_metrics))
         // ── Request correlation IDs (#486) ─────────────────────────────────
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+                let request_id = request
+                    .headers()
+                    .get(REQUEST_ID_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("missing");
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    route = %request.uri().path(),
+                    request_id = %request_id,
+                )
+            }),
+        )
         .layer(PropagateRequestIdLayer::new(HeaderName::from_static(
             REQUEST_ID_HEADER,
         )))
@@ -466,11 +614,18 @@ async fn main() {
             MakeRequestUuid,
         ))
         // ── Tracing ────────────────────────────────────────────────────────
-        .layer(TraceLayer::new_for_http())
         // ── CORS ───────────────────────────────────────────────────────────
         .layer(cors_layer())
         // ── Body size limit (#476) ─────────────────────────────────────────
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
+        // ── Security headers (#1115) ───────────────────────────────────────
+        //
+        // Outermost so every response gets the headers, including 413s from
+        // the body limit and CORS preflights.
+        .layer(middleware::from_fn_with_state(
+            SecurityHeadersConfig::from_env(),
+            security_headers,
+        ));
 
     let listener = tokio::net::TcpListener::bind(LISTEN_ADDR)
         .await
@@ -487,6 +642,7 @@ async fn main() {
     .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("server error");
+    opentelemetry::global::shutdown_tracer_provider();
 }
 
 #[derive(Clone, Copy)]
@@ -562,6 +718,37 @@ async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
+async fn require_admin(request: Request<Body>, next: Next) -> Response {
+    let expected = std::env::var("ADMIN_API_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+    let supplied = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let authorized = expected
+        .as_deref()
+        .zip(supplied)
+        .is_some_and(|(expected, supplied)| {
+            expected.as_bytes().ct_eq(supplied.as_bytes()).unwrap_u8() == 1
+        });
+    if authorized {
+        next.run(request).await
+    } else {
+        let status = if expected.is_some() {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        (
+            status,
+            Json(serde_json::json!({ "error": "admin authorization required" })),
+        )
+            .into_response()
+    }
+}
+
 /// `GET /swagger-ui` — interactive API docs rendering `/api-docs/openapi.json`.
 async fn swagger_ui() -> Html<String> {
     Html(format!(
@@ -596,7 +783,9 @@ async fn health() -> &'static str {
 ///  * `503 database unavailable` if the database is closed or unreachable
 async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut ready = db::ping_db(&state.db).is_ok();
-    if let Some(pool) = db::read_db(&state.db).postgres.clone() {
+    // Bind the pool first so the read guard is dropped before the `.await`.
+    let pool = db::read_db(&state.db).postgres.clone();
+    if let Some(pool) = pool {
         ready &= sqlx::query("SELECT 1").execute(&pool).await.is_ok();
     }
     let version = CONTRACT_VERSION
@@ -615,7 +804,7 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     };
     (
         status,
-        Json(json!({ "status": text, "contractVersion": version })),
+        Json(serde_json::json!({ "status": text, "contractVersion": version })),
     )
 }
 
@@ -696,7 +885,12 @@ fn cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_methods([Method::GET, Method::POST])
         .allow_headers([CONTENT_TYPE, IF_NONE_MATCH])
-        .expose_headers([ETAG])
+        .expose_headers([
+            ETAG,
+            HeaderName::from_static("x-ratelimit-limit"),
+            HeaderName::from_static("x-ratelimit-remaining"),
+            HeaderName::from_static("retry-after"),
+        ])
         .allow_origin(AllowOrigin::list(allowed))
 }
 
@@ -779,6 +973,7 @@ mod tests {
         let (bounty_broadcast, _) = tokio::sync::broadcast::channel(10);
         let state = std::sync::Arc::new(super::AppState {
             db: shared_db,
+            postgres: None,
             idempotency,
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast,
@@ -820,6 +1015,7 @@ mod tests {
         let (bounty_broadcast, _) = tokio::sync::broadcast::channel(10);
         let state = std::sync::Arc::new(super::AppState {
             db: shared_db,
+            postgres: None,
             idempotency,
             rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
             bounty_broadcast,
@@ -942,6 +1138,7 @@ mod tests {
         );
         let state = Arc::new(AppState {
             db,
+            postgres: None,
             idempotency: new_shared_idempotency_store(),
             rate_limiter: new_shared_rate_limiter(),
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,

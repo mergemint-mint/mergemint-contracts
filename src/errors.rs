@@ -77,6 +77,8 @@ pub enum ContractError {
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
+// The one sanctioned panic: every typed contract error funnels through here.
+#[allow(clippy::panic)]
 #[inline(never)]
 pub fn fail(e: ContractError) -> ! {
     panic!("{}", message(e))

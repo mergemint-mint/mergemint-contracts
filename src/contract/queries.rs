@@ -44,7 +44,7 @@ fn paginate(
     };
     let mut i = start;
     while i < end {
-        result.push_back(all_ids.get(i).unwrap());
+        result.push_back(all_ids.get(i).unwrap_or_else(|| fail(ContractError::CorruptedIndex)));
         i += 1;
     }
     let next = if end < total { Some(end) } else { None };
@@ -135,15 +135,10 @@ impl MergeMintContract {
     /// any IDs beyond the cap are ignored.
     pub fn get_bounties_by_ids(env: Env, ids: Vec<BountyId>) -> Vec<BountyMeta> {
         let mut result: Vec<BountyMeta> = Vec::new(&env);
-        let mut i = 0u32;
-        for id in ids.iter() {
-            if i >= MAX_LIMIT {
-                break;
-            }
+        for id in ids.iter().take(MAX_LIMIT as usize) {
             if let Some(meta) = storage::get_bounty_meta(&env, &id) {
                 result.push_back(meta);
             }
-            i += 1;
         }
         result
     }
@@ -294,7 +289,7 @@ impl MergeMintContract {
         let mut i = all.len();
         while i > 0 {
             i -= 1;
-            newest_first.push_back(all.get(i).unwrap());
+            newest_first.push_back(all.get(i).unwrap_or_else(|| fail(ContractError::CorruptedIndex)));
         }
         paginate(&env, newest_first, Some(offset), limit).0
     }

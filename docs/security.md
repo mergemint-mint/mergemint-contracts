@@ -2,7 +2,7 @@
 
 > For a structured STRIDE analysis across the contract, backend, frontend and wallet, see [threat-model.md](threat-model.md).
 
-This document analyses known attack vectors against the MergeMint contract, rates their severity, describes current mitigations, and identifies residual risk. It covers the **current no-escrow design** (the contract never holds a token balance; the verifier pushes tokens directly from their own wallet) as well as the **planned escrow model** where the contract will custody funds.
+This document analyses known attack vectors against the MergeMint contract, rates their severity, describes current mitigations, and identifies residual risk. It covers the **current no-escrow design** (the contract never holds a token balance; the [verifier](glossary.md#verifier) pushes tokens directly from their own wallet) as well as the **planned escrow model** where the contract will custody funds.
 
 ---
 
@@ -46,7 +46,7 @@ Low. A typo in `propose_admin` cannot lock the contract because acceptance requi
 
 **Severity:** High
 
-**Description:** The verifier role is unconstrained by the contract — any address that calls `complete_bounty` and has a sufficient token balance can pay a reward. A verifier and a bounty creator (or a verifier acting alone) can therefore collude: they designate a fake contributor as assignee via `claim_bounty`, then the verifier calls `complete_bounty` to transfer tokens to that address and award +10 reputation — all without any genuine work having been done. Because the contract has no on-chain way to verify off-chain contribution quality, this is a social-trust attack rather than a code flaw.
+**Description:** The verifier role is unconstrained by the contract — any address that calls `complete_bounty` and has a sufficient token balance can pay a reward. A verifier and a bounty creator (or a verifier acting alone) can therefore collude: they designate a fake contributor as [assignee](glossary.md#assignee) via `claim_bounty`, then the verifier calls `complete_bounty` to transfer tokens to that address and award +10 reputation — all without any genuine work having been done. Because the contract has no on-chain way to verify off-chain contribution quality, this is a social-trust attack rather than a code flaw.
 
 **Affected functions:** `claim_bounty`, `complete_bounty`
 
@@ -147,3 +147,82 @@ if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
 **Severity:** Low (current model), High (escrow model)
 
 **Description:** `complete_bounty` calls `token.transfer` before updating `bounty.status` to `STATUS_COMPLETED` and persisting the change. In the EVM this ordering would be a critical reentrancy bug. On Soroban, the runtime enforces single-contract-at-a-time execution — a token contract cannot call back into `MergeMintContract` during the same invocation — eliminating classic reentrancy in the current design.
+
+---
+
+## Backend security headers
+
+The backend adds these headers to every response, including JSON routes, the
+`/bounties/stream` SSE stream, CORS preflights and error responses (413, 504).
+A value set by a handler is never overwritten. See
+`mergemint-backend/src/security_headers.rs`.
+
+| Header                      | Value                       | Why                                                        |
+| --------------------------- | --------------------------- | ---------------------------------------------------------- |
+| `X-Content-Type-Options`    | `nosniff`                   | Browsers never treat a JSON body as HTML or script.        |
+| `Referrer-Policy`           | `no-referrer`               | API URLs (e.g. email verification links) are never leaked. |
+| `X-Frame-Options`           | `DENY`                      | Pages such as `/swagger-ui` cannot be framed.              |
+| `Strict-Transport-Security` | `max-age=<n>` (opt-in only) | Browsers keep using HTTPS for the API.                     |
+
+HSTS must only be sent when clients reach the backend over HTTPS, which is
+usually through a TLS-terminating proxy. It is off by default so local HTTP
+development keeps working.
+
+| Env var                   | Default    | Meaning                                       |
+| ------------------------- | ---------- | --------------------------------------------- |
+| `HSTS_ENABLED`            | `false`    | Send `Strict-Transport-Security` when `true`. |
+| `HSTS_MAX_AGE_SECS`       | `31536000` | HSTS `max-age` in seconds.                    |
+| `HSTS_INCLUDE_SUBDOMAINS` | `false`    | Add `includeSubDomains` when `true`.          |
+
+These headers do not change CORS (`Access-Control-*` headers are still set by
+the CORS layer) or SSE (`Content-Type`, caching and streaming are untouched).
+To check a deployment, run a header scanner such as
+`curl -sI https://<api-host>/health` or <https://securityheaders.com>.
+
+## Frontend Content Security Policy
+
+The frontend ships a strict Content Security Policy that limits what an XSS
+bug, for example in a Markdown bounty description, could do. The policy is
+built in `frontend/src/security/csp.ts` and:
+
+- is sent by `vite preview`, which serves the production build;
+- is written to `dist/_headers` on `vite build`, which Netlify and Cloudflare
+  Pages read. Other hosts (nginx, a CDN) should copy the header from that file.
+
+The Vite dev server does not send it, because Vite injects an inline
+React-refresh script there. Test the policy with `vite build && vite preview`.
+
+### Rollout: report-only first, then enforce
+
+| `VITE_CSP_MODE`         | Header sent                           |
+| ----------------------- | ------------------------------------- |
+| `report-only` (default) | `Content-Security-Policy-Report-Only` |
+| `enforce`               | `Content-Security-Policy`             |
+| `off`                   | none                                  |
+
+Set `VITE_CSP_REPORT_URI` to collect violation reports. Once a release runs in
+report-only mode with no unexpected violations in the console or the reports
+(check wallet connect, bounty pages, the live SSE feed and the stats page),
+switch to `enforce`.
+
+### Allowed origins
+
+| Directive         | Allowed                                     | Why                                                                                                              |
+| ----------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `script-src`      | `'self'`                                    | Only the app's own bundled scripts. No `unsafe-inline` or `unsafe-eval`, and `index.html` has no inline scripts. |
+| `connect-src`     | `'self'`                                    | Backend API and SSE when served under the same origin (`/api/v1`).                                               |
+|                   | Origin of `VITE_API_BASE_URL`               | Backend API and SSE when hosted on a separate origin.                                                            |
+|                   | `https://soroban-testnet.stellar.org`, `https://horizon-testnet.stellar.org` | Default RPC and Horizon for `VITE_NETWORK=testnet`.                         |
+|                   | `https://horizon.stellar.org`               | Default Horizon for `VITE_NETWORK=mainnet`.                                                                      |
+|                   | Origins in `VITE_RPC_URLS`                  | Extra RPC/Horizon endpoints (comma-separated).                                                                   |
+| `frame-src`       | `https://albedo.link`                       | The Albedo wallet's signing frame.                                                                               |
+| `style-src`       | `'self' 'unsafe-inline'`                    | A few components render small `<style>` blocks. Styles cannot run code.                                          |
+| `img-src`         | `'self' data:`                              | App images and inline icons.                                                                                     |
+| `worker-src`      | `'self'`                                    | The offline service worker.                                                                                      |
+| `object-src`      | `'none'`                                    | No plugins.                                                                                                      |
+| `frame-ancestors` | `'none'`                                    | The app cannot be framed (clickjacking).                                                                         |
+
+Freighter and xBull are browser extensions. Their content scripts talk to the
+page with `window.postMessage`, which CSP does not restrict, so they need no
+entry. If a new wallet or external service is added, add its origin in
+`csp.ts` and in this table.

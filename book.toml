@@ -1,0 +1,35 @@
+# mdBook configuration for the docs site (#1113).
+#
+# Build locally:   mdbook serve      (http://localhost:3000)
+# CI:              .github/workflows/docs.yml builds on every PR touching docs
+#                  and deploys to GitHub Pages from main.
+#
+# The sidebar is docs/SUMMARY.md. Its first section mirrors the documentation
+# index in README.md; keep the two in sync.
+
+[book]
+title = "MergeMint Documentation"
+authors = ["MergeMint contributors"]
+language = "en"
+src = "docs"
+
+[build]
+# Inside target/ so it is already git-ignored.
+build-dir = "target/book"
+# Fail instead of creating empty pages for entries missing from docs/.
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/mergemint-mint/mergemint-contracts"
+edit-url-template = "https://github.com/mergemint-mint/mergemint-contracts/edit/main/docs/{path}"
+
+[output.html.search]
+enable = true
+
+# Fails the build on broken internal links (missing pages or files).
+[output.linkcheck]
+follow-web-links = false
+# Links to files outside docs/ would 404 on the published site, so they fail
+# the build. Link to the file on GitHub instead.
+traverse-parent-directories = false
+warning-policy = "error"

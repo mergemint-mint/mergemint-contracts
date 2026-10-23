@@ -1,0 +1,16 @@
+{
+  "entryPoints": ["src/index.ts"],
+  "out": "docs",
+  "plugin": [],
+  "theme": "default",
+  "includeVersion": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "excludeInternal": true,
+  "excludeExternals": false,
+  "validation": {
+    "notDocumented": true,
+    "invalidLink": true
+  },
+  "titleLink": "https://github.com/mergemint-mint/mergemint-contracts"
+}

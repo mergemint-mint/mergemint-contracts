@@ -244,6 +244,23 @@ function sleep(ms: number): Promise<void> {
 
 // === SDK
 
+/** Minimum supported contract version (semantic versioning). */
+const SUPPORTED_CONTRACT_VERSION_MIN = "1.0.0";
+
+/** Maximum supported contract version (semantic versioning). */
+const SUPPORTED_CONTRACT_VERSION_MAX = "1.99.99";
+
+/** Numeric `major.minor.patch` comparison; a plain string compare misorders `1.10.0` vs `1.9.0`. */
+function compareSemver(a: string, b: string): number {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let k = 0; k < 3; k++) {
+    const d = (pa[k] ?? 0) - (pb[k] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
 export class MergeMintSDK {
   private readonly rpc: SorobanRpc.Server;
   private readonly contract: Contract;
@@ -251,6 +268,8 @@ export class MergeMintSDK {
   private readonly contractId: string;
   private readonly retry: RetryOptions;
   private readonly feeBumpRetry: FeeBumpRetryOptions | null;
+  private versionCheckPerformed = false;
+  private readonly skipVersionCheck: boolean;
 
   /**
    * Creates an SDK bound to a single Soroban RPC endpoint and contract.
@@ -261,7 +280,8 @@ export class MergeMintSDK {
    * and {@link MAINNET}). Pass `retry` to make every RPC round-trip tolerate
    * transient failures — see {@link RetryOptions}. Pass `feeBumpRetry` to
    * enable exponential fee-bump retries on transaction submission under
-   * congestion — see {@link FeeBumpRetryOptions}.
+   * congestion — see {@link FeeBumpRetryOptions}. Pass `skipVersionCheck: true`
+   * to skip the lazy contract version compatibility check (advanced users only).
    * @throws {@link MergeMintSdkError} if `rpcUrl` still contains a placeholder,
    * if `contractId` is invalid, or if any retry option is out of range.
    */
@@ -281,6 +301,50 @@ export class MergeMintSDK {
     this.contractId = config.contractId.trim();
     this.retry = normalizeRetry(config.retry);
     this.feeBumpRetry = normalizeFeeBumpRetry(config.feeBumpRetry);
+    this.skipVersionCheck = config.skipVersionCheck ?? false;
+  }
+
+  /**
+   * Checks if the contract version is compatible with this SDK.
+   * Called lazily on the first read operation unless `skipVersionCheck` is true.
+   *
+   * @throws MergeMintSdkError if the contract version is incompatible.
+   */
+  private async ensureCompatibleVersion(): Promise<void> {
+    if (this.versionCheckPerformed || this.skipVersionCheck) return;
+
+    this.versionCheckPerformed = true;
+
+    try {
+      const result = await this.simulateRead("version", []);
+      if (!result) {
+        throw new MergeMintSdkError(
+          "Contract version check failed: no version returned.",
+          "INCOMPATIBLE_CONTRACT"
+        );
+      }
+
+      const version = String(scValToNative(result));
+      if (!this.isVersionInRange(version)) {
+        throw new MergeMintSdkError(
+          `Incompatible contract version: "${version}". This SDK supports versions ${SUPPORTED_CONTRACT_VERSION_MIN} to ${SUPPORTED_CONTRACT_VERSION_MAX}. Upgrade the SDK or pass skipVersionCheck: true to override this check.`,
+          "INCOMPATIBLE_CONTRACT"
+        );
+      }
+    } catch (error) {
+      if (error instanceof MergeMintSdkError) throw error;
+      throw new MergeMintSdkError(
+        `Failed to check contract version: ${error instanceof Error ? error.message : String(error)}`,
+        "VERSION_CHECK_FAILED"
+      );
+    }
+  }
+
+  private isVersionInRange(version: string): boolean {
+    return (
+      compareSemver(version, SUPPORTED_CONTRACT_VERSION_MIN) >= 0 &&
+      compareSemver(version, SUPPORTED_CONTRACT_VERSION_MAX) <= 0
+    );
   }
 
   // === Read methods (no transaction needed)
@@ -292,9 +356,11 @@ export class MergeMintSDK {
    * @returns The decoded {@link Bounty}, or `null` when the contract account is
    * unreachable, the simulation errors, or no bounty exists for that id.
    * @throws {@link MergeMintSdkError} if `bountyId` is not valid hex, or if the
-   * RPC transport fails on every attempt allowed by the configured retry policy.
+   * RPC transport fails on every attempt allowed by the configured retry policy,
+   * or if the contract version is incompatible with this SDK.
    */
   async getBounty(bountyId: string): Promise<Bounty | null> {
+    await this.ensureCompatibleVersion();
     const result = await this.simulateRead("get_bounty", [hexToBytesN(bountyId)]);
     if (result === null || result === undefined) {
       return null;
@@ -918,13 +984,13 @@ export class MergeMintSDK {
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new MergeMintSdkError(
-        `Fee estimation failed: ${parseSimulationError(sim)}`,
+        `Fee estimation failed: ${parseSimulationError(sim.error).message}`,
         "SIMULATION_FAILED"
       );
     }
 
     const result = sim as SorobanRpc.Api.SimulateTransactionSuccessResponse;
-    const resourceFeeStroops = BigInt(result.resourceFee || "1000000");
+    const resourceFeeStroops = BigInt(result.minResourceFee || "1000000");
     const inclusionFeeStroops = BigInt(BASE_FEE);
     const totalFeeStroops = resourceFeeStroops + inclusionFeeStroops;
 

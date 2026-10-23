@@ -46,14 +46,16 @@ pub async fn check_contract_version(
             auth: VecM::default(),
         }),
     };
-    let mut transaction = Transaction::default();
-    transaction.source_account = MuxedAccount::Ed25519(Uint256(source.0));
-    transaction.fee = 100_000;
-    transaction.seq_num = SequenceNumber(0);
-    transaction.operations = vec![operation]
-        .try_into()
-        .map_err(|_| anyhow!("could not construct version query transaction"))?;
-    transaction.ext = TransactionExt::V1(SorobanTransactionData::default());
+    let transaction = Transaction {
+        source_account: MuxedAccount::Ed25519(Uint256(source.0)),
+        fee: 100_000,
+        seq_num: SequenceNumber(0),
+        operations: vec![operation]
+            .try_into()
+            .map_err(|_| anyhow!("could not construct version query transaction"))?,
+        ext: TransactionExt::V1(SorobanTransactionData::default()),
+        ..Default::default()
+    };
     let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
         tx: transaction,
         signatures: VecM::default(),

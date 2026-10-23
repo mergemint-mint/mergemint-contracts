@@ -1,0 +1,77 @@
+name: E2E Docker Compose Stack
+
+# Boots the docker-compose backing services (Stellar quickstart, Postgres and
+# the backend), then runs the Playwright suite against the frontend dev server
+# that Playwright itself starts (see frontend/playwright.config.ts).
+
+on:
+  push:
+    branches: [main, "feat/**", "fix/**"]
+    paths:
+      - "frontend/**"
+      - "mergemint-backend/**"
+      - "src/**"
+      - "docker-compose.yml"
+      - ".github/workflows/e2e-docker-compose.yml"
+  pull_request:
+    paths:
+      - "frontend/**"
+      - "mergemint-backend/**"
+      - "src/**"
+      - "docker-compose.yml"
+      - ".github/workflows/e2e-docker-compose.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-docker:
+    name: Playwright E2E against docker-compose stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      # The compose `frontend` service is skipped: Playwright's webServer runs
+      # `npm run dev` on :3000 itself and refuses to reuse a server under CI.
+      - name: Start docker-compose stack
+        run: docker compose up -d --build --wait --wait-timeout 900 stellar postgres backend
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm install --ignore-scripts
+
+      - name: Install Playwright
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        working-directory: frontend
+        run: npm run test:e2e
+        env:
+          CI: true
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Upload Playwright results on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-results
+          path: |
+            frontend/test-results/
+            frontend/playwright-report/
+          retention-days: 7
+
+      - name: Stop docker-compose stack
+        if: always()
+        run: docker compose down -v
