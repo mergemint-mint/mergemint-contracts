@@ -1,0 +1,12 @@
+[
+  {
+    "path": "dist/index.js",
+    "limit": "50 KB",
+    "name": "ESM build"
+  },
+  {
+    "path": "dist/index.d.ts",
+    "limit": "30 KB",
+    "name": "TypeScript definitions"
+  }
+]

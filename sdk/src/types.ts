@@ -19,6 +19,11 @@ export interface NetworkConfig {
    * network congestion.  When omitted, no fee bump is attempted.
    */
   feeBumpRetry?: FeeBumpRetryOptions;
+  /**
+   * Skip the lazy contract version compatibility check performed before the
+   * first read. Advanced users only; defaults to `false`.
+   */
+  skipVersionCheck?: boolean;
 }
 
 export interface Bounty {
@@ -196,7 +201,9 @@ export type MergeMintErrorCode =
   | 'TRANSACTION_FAILED'
   | 'UNAUTHORIZED'
   | 'NOT_FOUND'
-  | 'FEE_BUMP_FAILED';
+  | 'FEE_BUMP_FAILED'
+  | 'INCOMPATIBLE_CONTRACT'
+  | 'VERSION_CHECK_FAILED';
 
 export class MergeMintSdkError extends Error {
   public readonly code: MergeMintErrorCode;

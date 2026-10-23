@@ -10,6 +10,8 @@
 # Jobs:
 #   typecheck  — `tsc --noEmit` over `sdk/src`
 #   test       — the sdk package's jest suite
+#   size-limit — bundle size budget enforcement (ESM and types)
+#   typedoc    — API documentation generation with link validation
 #   changelog  — a version bump in `sdk/package.json` must ship a CHANGELOG entry
 #
 # All jobs are scoped to changes under `sdk/` so they do not fire on unrelated
@@ -77,7 +79,56 @@ jobs:
         run: npm test
 
   # --------------------------------------------------------------------------
-  # 3. Changelog gate
+  # 3. Bundle size check
+  # --------------------------------------------------------------------------
+  size-limit:
+    name: Bundle size check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build SDK
+        run: npm run build
+
+      - name: Check bundle size
+        run: npm run size-limit
+
+  # --------------------------------------------------------------------------
+  # 4. TypeDoc generation with link validation
+  # --------------------------------------------------------------------------
+  typedoc:
+    name: Generate API docs
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate TypeDoc with validation
+        run: npm run docs
+
+  # --------------------------------------------------------------------------
+  # 5. Changelog gate
   # --------------------------------------------------------------------------
   #
   # A release is only discoverable if the version bump is documented, so when a

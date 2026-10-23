@@ -47,10 +47,12 @@ export class FreighterAdapter implements WalletAdapter {
   private freighter: any;
 
   constructor() {
-    if (typeof window === "undefined") {
+    // The SDK compiles without the DOM lib, so reach `window` via globalThis.
+    const win = (globalThis as { window?: { freighter?: unknown } }).window;
+    if (win === undefined) {
       throw new Error("FreighterAdapter can only be used in the browser");
     }
-    this.freighter = (window as any).freighter;
+    this.freighter = win.freighter;
     if (!this.freighter) {
       throw new Error("Freighter extension not found. Please install the Freighter extension.");
     }
@@ -105,7 +107,10 @@ export class FreighterAdapter implements WalletAdapter {
       }),
     });
 
-    const data = await response.json();
+    const data = (await response.json()) as {
+      error?: { message: string };
+      result: { hash: string };
+    };
     if (data.error) {
       throw new Error(`RPC error: ${data.error.message}`);
     }
