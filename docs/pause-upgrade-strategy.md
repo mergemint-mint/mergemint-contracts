@@ -187,6 +187,6 @@ The admin key must be:
 
 ## References
 
-- [Soroban upgradeable contract example](https://developers.stellar.org/docs/smart-contracts/example-contracts/upgradeable-contract)
+- [Soroban upgradeable contract example](https://developers.stellar.org/docs/build/smart-contracts/example-contracts/upgradeable-contract)
 - `docs/security.md` — `require_auth` placement audit and escrow threat model
 - Soroban SDK `Deployer::update_current_contract_wasm`

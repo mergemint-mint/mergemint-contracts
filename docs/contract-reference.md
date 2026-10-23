@@ -135,7 +135,7 @@ Creates a bounty in status `open` and returns its ID.
 
 **Auth:** `creator.require_auth()`. This runs **after** the argument
 validation below, not first. It is the one exception to the rule in
-[security.md](security.md#require_auth-placement-audit).
+[the `require_auth` placement audit](https://github.com/mergemint-mint/mergemint-contracts/blob/630ceb04f272013c9645d62351bbf91c28b73126/docs/security.md#require_auth-placement-audit).
 
 **Errors (in order):**
 

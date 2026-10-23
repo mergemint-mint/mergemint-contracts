@@ -1,0 +1,29 @@
+# Link-check configuration for lychee (https://lychee.cli.rs).
+# Pull requests run it with --offline (relative links and #fragments only);
+# a weekly scheduled run also checks external URLs.
+# See .github/workflows/docs-checks.yml. Run locally with `make docs-check`.
+
+# Fail on links to a heading that does not exist (e.g. file.md#missing).
+include_fragments = "full"
+
+max_concurrency = 8
+timeout = 20
+max_retries = 3
+
+# 429 = rate limited; the URL exists, the host is just throttling CI.
+accept = ["200..=299", "429"]
+
+exclude = [
+  # Local dev servers referenced in setup guides.
+  "^https?://localhost",
+  "^https?://127\\.0\\.0\\.1",
+  "^https?://0\\.0\\.0\\.0",
+  # Friendbot links carry a <placeholder> address and return 400 by design.
+  "^https://friendbot\\.stellar\\.org",
+  # Example/placeholder hosts.
+  "^https?://([a-z0-9-]+\\.)*example\\.(com|org)",
+]
+
+# Ignore mailto: links and private/loopback IPs.
+exclude_all_private = true
+include_mail = false

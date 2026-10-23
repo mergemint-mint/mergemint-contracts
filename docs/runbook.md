@@ -202,6 +202,7 @@ If the fix requires integrators to change anything (new contract address, SDK ve
 4. Deploy to mainnet:
    - **With `upgrade` available** (follow-up ticket #2): `stellar contract install` the new WASM, then `upgrade --admin $ADMIN --new_wasm_hash <HASH>`. The contract address stays the same.
    - **Without `upgrade`:** deploy a new contract (`scripts/deploy.sh`), then update `CONTRACT_ID` in backend config, frontend env, and SDK docs.
+5. Tag the fix (`git tag vX.Y.Z && git push origin vX.Y.Z`) so the release workflow publishes the WASM and its hash, and confirm the deployed contract matches it ([Verifying a release WASM](#verifying-a-release-wasm)).
 
 ---
 
@@ -248,6 +249,44 @@ stellar contract invoke --id $CONTRACT_ID --network $NETWORK --source-account $A
 ```
 
 Record in the incident-drill log how long each step took and anything in this runbook that was wrong or unclear, then fix the doc.
+
+---
+
+## Verifying a release WASM
+
+Every `v*` tag runs the `release` job in `.github/workflows/build.yml`. It builds the contract with `scripts/build-release-wasm.sh` (toolchain pinned by `rust-toolchain.toml`, `Cargo.lock` with `--locked`, the size-optimized `release` profile, target `wasm32v1-none`) and attaches to the GitHub release:
+
+- `mergemint_contracts-<tag>.wasm`: the contract
+- `mergemint_contracts-<tag>.wasm.sha256`: its SHA-256, also printed at the top of the release notes
+- a [build provenance attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) proving the file was built by this repository's workflow from that tag
+
+The build is reproducible: the same commit gives byte-identical WASM on any Linux x86_64 machine, independent of the checkout path. Use the steps below to check that a contract on chain is the released code.
+
+```bash
+TAG=v0.1.0
+REPO=mergemint-mint/mergemint-contracts
+
+# 1. Download the release files and check the hash file
+gh release download "$TAG" --repo "$REPO" --pattern 'mergemint_contracts-*'
+sha256sum -c "mergemint_contracts-$TAG.wasm.sha256"
+
+# 2. Check the provenance attestation (signed by GitHub Actions for this repo and tag)
+gh attestation verify "mergemint_contracts-$TAG.wasm" --repo "$REPO"
+
+# 3. Rebuild from source and compare. The script refuses a RUSTUP_TOOLCHAIN override
+#    so that rust-toolchain.toml picks the compiler.
+git fetch --tags && git checkout "$TAG"
+scripts/build-release-wasm.sh "$TAG" /tmp/rebuild
+diff <(cut -d' ' -f1 /tmp/rebuild/mergemint_contracts-$TAG.wasm.sha256) \
+     <(cut -d' ' -f1 mergemint_contracts-$TAG.wasm.sha256) && echo "rebuild matches release"
+
+# 4. Compare with the deployed contract. Soroban identifies uploaded code by the
+#    SHA-256 of the WASM bytes, so the on-chain code must hash to the same value.
+stellar contract fetch --id "$CONTRACT_ID" --network "$NETWORK" --out-file onchain.wasm
+sha256sum onchain.wasm "mergemint_contracts-$TAG.wasm"
+```
+
+If any hash differs, do not treat the deployment as the release. Check that you built the exact tag with no local changes (`git status`) and that `rustc --version` matches the toolchain listed in the release notes. If both are right, the deployed code is not the released code: declare an incident (§ 1).
 
 ---
 

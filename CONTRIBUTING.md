@@ -13,6 +13,7 @@ Thank you for your interest in contributing! This guide covers everything you ne
 - [Code Standards](#code-standards)
 - [Branch Naming](#branch-naming)
 - [Pull Request Process](#pull-request-process)
+- [Frontend Preview Deployments](#frontend-preview-deployments)
 - [Test Snapshots](#test-snapshots)
 - [Security Considerations](#security-considerations)
 
@@ -102,7 +103,7 @@ Push your branch to your fork and open a PR against `mergemint-mint/mergemint-co
 - [ ] `Closes #<issue-number>` in the description
 - [ ] A short explanation of **what** changed and **why**, plus any trade-offs
 - [ ] Pasted output of the test command(s) for the area you touched
-- [ ] Screenshots for anything visual (frontend changes, Storybook stories)
+- [ ] Screenshots for anything visual (frontend changes, Storybook stories); for `frontend/` changes, the [preview link](#frontend-preview-deployments) helps too
 - [ ] One logical change; small diffs get reviewed faster than large ones
 - [ ] All [required CI checks](#ci--required-status-checks) green
 
@@ -265,6 +266,29 @@ Every `uses:` in `.github/workflows/` must reference a full 40-character commit 
 ```
 
 Tags can be moved to point at different code; SHAs cannot. Dependabot (`.github/dependabot.yml`, `github-actions` ecosystem) opens weekly PRs that bump both the SHA and the version comment. To look up the SHA for a new action, run `git ls-remote --tags https://github.com/<owner>/<repo>`.
+
+---
+
+## Frontend Preview Deployments
+
+Every pull request that changes `frontend/` gets its own preview of the app, built against **Stellar testnet**, so reviewers can try UI changes without running the frontend locally.
+
+1. **Frontend Preview** (`.github/workflows/frontend-preview.yml`) builds `frontend/` with `VITE_NETWORK=testnet` and uploads the site as an artifact. It runs the PR's code with a read-only token and **no secrets**, so it is safe for pull requests from forks.
+2. **Frontend Preview Deploy** (`frontend-preview-deploy.yml`) starts when the build finishes. It runs from `main`, not from the PR, downloads the static files, deploys them to Cloudflare Pages and posts (then keeps updating) a comment on the PR with the URL: `https://pr-<number>.<project>.pages.dev`. It never checks out or runs PR code, so the Cloudflare credentials are never available to it.
+3. **Frontend Preview Cleanup** (`frontend-preview-cleanup.yml`) deletes the PR's preview deployments when the PR is closed or merged, and updates the comment.
+
+If the comment does not appear, check the **Frontend Preview** run on your PR: the deploy only runs after a successful build. PRs from first-time contributors also need a maintainer to approve their workflow runs first.
+
+**Maintainer setup** (one time):
+
+| Where | Name | Value |
+| --- | --- | --- |
+| Environment `frontend-preview` → secret | `CLOUDFLARE_API_TOKEN` | API token with the *Cloudflare Pages: Edit* permission |
+| Environment `frontend-preview` → secret | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
+| Environment `frontend-preview` → variable | `CLOUDFLARE_PAGES_PROJECT` | Optional. Pages project name (default `mergemint-frontend-preview`); create it once with `npx wrangler pages project create <name> --production-branch main` |
+| Repository → variable | `PREVIEW_API_BASE_URL` | Testnet backend the previews call, e.g. `https://<testnet-api-host>/api/v1`. If unset, previews call `/api/v1` on the preview host. |
+
+Until `CLOUDFLARE_API_TOKEN` is set, the deploy and cleanup jobs skip with a notice instead of failing.
 
 ---
 

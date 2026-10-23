@@ -1,0 +1,32 @@
+# Spell-check configuration for `typos` (https://github.com/crate-ci/typos).
+# CI runs it on the files listed by scripts/docs-files.sh; see
+# .github/workflows/docs-checks.yml. Run locally with `make docs-check`.
+
+[default]
+# Skip strings that are almost always identifiers rather than prose:
+# Stellar account/contract addresses (G.../C.../S... base32, 56 chars),
+# hex hashes and transaction ids.
+extend-ignore-re = [
+  "\\b[GCS][A-Z2-7]{55}\\b",
+  "\\b[0-9a-fA-F]{40,64}\\b",
+]
+
+# Project terms. `typos` only flags known misspellings, so these are listed
+# to document intent and to stop a future dictionary update from "correcting"
+# them.
+[default.extend-words]
+soroban = "soroban"
+xdr = "xdr"
+mergemint = "mergemint"
+stellar = "stellar"
+sep = "sep"
+
+[files]
+extend-exclude = [
+  "CHANGELOG.md",
+  "**/package-lock.json",
+  "Cargo.lock",
+  "target/",
+  "node_modules/",
+  "test_snapshots/",
+]

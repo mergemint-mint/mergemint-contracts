@@ -35,7 +35,6 @@ See [docs/architecture.md](docs/architecture.md) for contract data flow and stor
 | [`backend/`](backend/)                       | Health-check endpoint logic (indexer lag, DB reachability, network passphrase validation)            | TypeScript                         |
 | [`frontend/`](frontend/)                     | Main web app: bounty list/detail, create bounty, contributor profile, wallet connect                 | React, Vite, Vitest, Playwright    |
 | [`mergemint-frontend/`](mergemint-frontend/) | Lightweight React frontend package used by the root npm workspace                                    | React, Vite, Vitest                |
-| [`app/`](app/)                               | Reusable form components for the bounty and contributor flows (`@mergemint/app`)                     | React, TypeScript                  |
 | [`sdk/`](sdk/)                               | Typed TypeScript SDK wrapping the contract's XDR interface (`@mergemint/sdk`)                        | TypeScript, `@stellar/stellar-sdk` |
 | [`contracts/bounty/`](contracts/bounty/)     | Batch/parallel contributor-refresh prototype (see [docs/batch-refresh.md](docs/batch-refresh.md))    | Solidity                           |
 | [`test/`](test/)                             | Hardhat tests for the batch-refresh prototype and bounty fixtures                                    | JavaScript                         |
