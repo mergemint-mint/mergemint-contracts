@@ -52,6 +52,24 @@
 // a chain transaction — instead of dropping them mid-flight when a deploy
 // sends SIGTERM.
 //
+// ## Webhook SSRF guard (#1116)
+//
+// Webhook target URLs are refused at registration when they resolve to a
+// private, loopback, link-local or metadata address. Deliveries go through a
+// client whose DNS resolver checks every address again before connecting, so
+// DNS rebinding cannot get around the registration check. Set
+// `WEBHOOK_ALLOW_PRIVATE_TARGETS=true` to allow local receivers in
+// development. See `webhooks::ssrf`.
+//
+// ## SSE connection caps (#1118)
+//
+// `GET /bounties/stream` allows `SSE_MAX_CONNECTIONS_PER_IP` (default 32)
+// connections per client IP and `SSE_MAX_CONNECTIONS` (default 1024) in
+// total, and returns 429 over either cap. The server is started with
+// connect-info so the handler can see the peer address. The open-connection
+// count is exported as the `mergemint_sse_active_connections` gauge. See
+// `sse_limit`.
+//
 // ## Health checks
 //
 // `GET /health` returns `200 ok` once the server is listening. The runtime
@@ -68,7 +86,7 @@
 // database-independent so it remains a pure liveness check.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -101,6 +119,7 @@ mod metrics;
 mod notifications;
 mod rate_limit;
 mod routes;
+mod sse_limit;
 #[cfg(test)]
 mod test_helpers;
 mod webhooks;
@@ -116,7 +135,8 @@ use routes::tx::{
 };
 use webhooks::{
     create_subscription_route, delete_subscription_route, get_subscription_route,
-    list_subscriptions_route, start_webhook_dispatcher, RetryConfig,
+    list_subscriptions_route, start_webhook_dispatcher, RetryConfig, SsrfPolicy, WebhookClient,
+    WebhookTargetGuard,
 };
 use deadline_reminders::{
     read_deadline_reminder_interval, read_deadline_reminder_lead_time,
@@ -251,6 +271,18 @@ async fn main() {
     let idempotency = new_shared_idempotency_store();
     let (bounty_broadcast, _) = tokio::sync::broadcast::channel(100);
     let sse_keep_alive_duration = read_sse_keep_alive_duration();
+
+    let ssrf_policy = SsrfPolicy::from_env();
+    if ssrf_policy.allow_private_targets {
+        tracing::warn!(
+            env = webhooks::ssrf::ALLOW_PRIVATE_TARGETS_ENV,
+            "webhook SSRF protection is OFF: private and loopback targets are allowed. \
+             Use this for local development only"
+        );
+    }
+    let webhook_guard = WebhookTargetGuard::new(ssrf_policy);
+    let sse_limiter = sse_limit::SseConnectionLimiter::from_env();
+
     let state = Arc::new(AppState {
         db: shared_db,
         idempotency,
@@ -258,12 +290,14 @@ async fn main() {
         bounty_broadcast,
         leaderboard_cache: routes::leaderboard::new_leaderboard_cache(),
         sse_keep_alive_duration,
+        webhook_guard: webhook_guard.clone(),
+        sse_limiter: sse_limiter.clone(),
     });
 
-    let webhook_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .unwrap_or_default();
+    // No fallback to a default client here: that client would skip the SSRF
+    // guard.
+    let webhook_client = WebhookClient::new(webhook_guard, Duration::from_secs(10))
+        .expect("failed to build webhook HTTP client");
     let _webhook_dispatcher =
         start_webhook_dispatcher(state.clone(), webhook_client, RetryConfig::default());
     let _email_notifier = start_email_notifier(state.clone());
@@ -273,7 +307,7 @@ async fn main() {
         read_deadline_reminder_interval(),
     );
 
-    let metrics = Arc::new(Metrics::new());
+    let metrics = Arc::new(Metrics::new().with_sse_limiter(sse_limiter));
 
     let app = Router::new()
         .route("/health", get(health))
@@ -339,10 +373,15 @@ async fn main() {
 
     tracing::info!(addr = LISTEN_ADDR, "mergemint-backend listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server error");
+    // Connect-info gives handlers the peer address, which the SSE per-IP cap
+    // needs.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("server error");
 }
 
 #[derive(Clone, Copy)]
@@ -558,6 +597,8 @@ mod tests {
             bounty_broadcast,
             leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
             sse_keep_alive_duration: std::time::Duration::from_secs(15),
+            webhook_guard: Default::default(),
+            sse_limiter: Default::default(),
         });
 
         let app = axum::Router::new()
@@ -595,6 +636,8 @@ mod tests {
             bounty_broadcast,
             leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
             sse_keep_alive_duration: std::time::Duration::from_secs(15),
+            webhook_guard: Default::default(),
+            sse_limiter: Default::default(),
         });
 
         let app = axum::Router::new()
@@ -713,6 +756,8 @@ mod tests {
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
             leaderboard_cache: routes::leaderboard::new_leaderboard_cache(),
             sse_keep_alive_duration: Duration::from_secs(15),
+            webhook_guard: Default::default(),
+            sse_limiter: Default::default(),
         });
         let app = Router::new()
             .route("/admin/audit-logs", get(query_audit_logs))

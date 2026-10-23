@@ -8,6 +8,10 @@
 #   *.rs in mergemint-backend/                 cargo fmt --check, cargo clippy
 #   JS/TS sources                              eslint
 #   JS/TS/JSON/CSS/Markdown/YAML               prettier --check
+#   all staged changes                         gitleaks (optional, see below)
+#
+# The gitleaks secret scan runs only when gitleaks is installed; otherwise it
+# is skipped with a note. See scripts/gitleaks-pre-commit.sh.
 #
 # Usage:  ./scripts/install-hooks.sh
 # Bypass: git commit --no-verify   (CI still runs the same checks)
@@ -108,6 +112,12 @@ if [ "${#PRETTIER_FILES[@]}" -gt 0 ]; then
   fi
 fi
 
+# ── Secrets (optional: skipped when gitleaks is not installed) ──────────────
+
+if [ -x scripts/gitleaks-pre-commit.sh ]; then
+  scripts/gitleaks-pre-commit.sh || fail "gitleaks found a possible secret in the staged changes."
+fi
+
 echo "✔ Pre-commit checks passed."
 EOF
 
@@ -116,4 +126,8 @@ echo "Pre-commit hook installed at $PRE_COMMIT"
 
 if [ ! -x node_modules/.bin/eslint ] || [ ! -x node_modules/.bin/prettier ]; then
   echo "Note: run 'npm install' at the repo root so the hook can run eslint and prettier."
+fi
+
+if ! command -v gitleaks > /dev/null 2>&1; then
+  echo "Note: install gitleaks (https://github.com/gitleaks/gitleaks#installing) to scan commits for secrets."
 fi

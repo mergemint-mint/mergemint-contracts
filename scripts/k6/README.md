@@ -4,13 +4,15 @@
 (`mergemint-backend/`). They cover the four route groups that see real traffic.
 You can run each one alone, or run all four at once as a mixed load.
 
-| Scenario | Script      | Route(s)                                                  | Load model                                    |
-| -------- | ----------- | --------------------------------------------------------- | --------------------------------------------- |
-| list     | `list.js`   | `GET /api/v1/bounties?limit=N` (+ one `cursor` page)      | open, `LIST_RPS` req/s (default 30)           |
-| filter   | `filter.js` | `GET /api/v1/bounties/assignee/{address}?limit=N`         | open, `FILTER_RPS` req/s (default 15)         |
-| stream   | `stream.js` | `GET /api/v1/bounties/stream` (Server-Sent Events)        | closed, `STREAM_VUS` subscribers (default 25) |
-| tx       | `tx.js`     | `POST /tx/self-claim`, `POST /tx/resolve-dispute` (50/50) | open, `TX_RPS` req/s (default 5)              |
-| mixed    | `mixed.js`  | all of the above, concurrently                            | all of the above                              |
+| Scenario  | Script         | Route(s)                                                  | Load model                                        |
+| --------- | -------------- | --------------------------------------------------------- | ------------------------------------------------- |
+| list      | `list.js`      | `GET /api/v1/bounties?limit=N` (+ one `cursor` page)      | open, `LIST_RPS` req/s (default 30)               |
+| filter    | `filter.js`    | `GET /api/v1/bounties/assignee/{address}?limit=N`         | open, `FILTER_RPS` req/s (default 15)             |
+| stream    | `stream.js`    | `GET /api/v1/bounties/stream` (Server-Sent Events)        | closed, `STREAM_VUS` subscribers (default 25)     |
+| tx        | `tx.js`        | `POST /tx/self-claim`, `POST /tx/resolve-dispute` (50/50) | open, `TX_RPS` req/s (default 5)                  |
+| mixed     | `mixed.js`     | all of the above, concurrently                            | all of the above                                  |
+| sse       | `sse.js`       | `GET /bounties/stream` + event trigger (see below)        | closed, `SSE_CLIENTS` subscribers (default 200)   |
+| sse-limit | `sse-limit.js` | `GET /bounties/stream` connection caps (see below)        | `SSE_LIMIT_ATTEMPTS` streams at once (default 40) |
 
 The default mix is roughly what we expect a busy frontend to generate. Reads
 dominate. Filtered reads happen about half as often as plain lists. There are
@@ -48,20 +50,31 @@ k6 exits with code **99** when any threshold fails, so the scripts can gate CI.
 
 ### Configuration
 
-| Variable              | Default                 | Meaning                                                         |
-| --------------------- | ----------------------- | --------------------------------------------------------------- |
-| `BASE_URL`            | `http://localhost:8080` | Backend origin                                                  |
-| `API_PREFIX`          | `/api/v1`               | Prefix for the bounty read routes                               |
-| `DURATION`            | `2m`                    | Steady-state duration (after ramp-up)                           |
-| `RAMP`                | `30s`                   | Ramp-up duration                                                |
-| `LIST_RPS`            | `30`                    | list requests per second                                        |
-| `FILTER_RPS`          | `15`                    | filter requests per second                                      |
-| `TX_RPS`              | `5`                     | tx requests per second                                          |
-| `STREAM_VUS`          | `25`                    | concurrent SSE subscribers                                      |
-| `STREAM_HOLD_SECONDS` | `20`                    | how long each subscriber holds a connection before reconnecting |
-| `PAGE_LIMIT`          | `20`                    | `limit` used by the list scenario                               |
-| `ASSIGNEES`           | 3 sample G… addresses   | comma-separated addresses for filter/tx payloads                |
-| `BOUNTY_IDS`          | 2 sample IDs            | comma-separated bounty IDs for tx payloads                      |
+| Variable                 | Default                 | Meaning                                                          |
+| ------------------------ | ----------------------- | ---------------------------------------------------------------- |
+| `BASE_URL`               | `http://localhost:8080` | Backend origin                                                   |
+| `API_PREFIX`             | `/api/v1`               | Prefix for the bounty read routes                                |
+| `DURATION`               | `2m`                    | Steady-state duration (after ramp-up)                            |
+| `RAMP`                   | `30s`                   | Ramp-up duration                                                 |
+| `LIST_RPS`               | `30`                    | list requests per second                                         |
+| `FILTER_RPS`             | `15`                    | filter requests per second                                       |
+| `TX_RPS`                 | `5`                     | tx requests per second                                           |
+| `STREAM_VUS`             | `25`                    | concurrent SSE subscribers                                       |
+| `STREAM_HOLD_SECONDS`    | `20`                    | how long each subscriber holds a connection before reconnecting  |
+| `PAGE_LIMIT`             | `20`                    | `limit` used by the list scenario                                |
+| `ASSIGNEES`              | 3 sample G… addresses   | comma-separated addresses for filter/tx payloads                 |
+| `BOUNTY_IDS`             | 2 sample IDs            | comma-separated bounty IDs for tx payloads                       |
+| `SSE_CLIENTS`            | `200`                   | sse: concurrent stream subscribers                               |
+| `SSE_HOLD_SECONDS`       | `30`                    | sse: how long each subscriber holds a stream before reconnecting |
+| `TRIGGER_RPS`            | `2`                     | sse: events published per second                                 |
+| `SSE_LATENCY_P95_MS`     | `250`                   | sse: p95 delivery latency threshold                              |
+| `SSE_LATENCY_P99_MS`     | `500`                   | sse: p99 delivery latency threshold                              |
+| `SSE_LIMIT_ATTEMPTS`     | `40`                    | sse-limit: streams opened at once                                |
+| `SSE_EXPECTED_CAP`       | `32`                    | sse-limit: the backend's `SSE_MAX_CONNECTIONS_PER_IP`            |
+| `SSE_LIMIT_HOLD_SECONDS` | `5`                     | sse-limit: how long each stream is held                          |
+
+`API_PREFIX` may be set to an empty string. The backend binary mounts its
+routes at `/` (no `/api/v1`), so run against it with `API_PREFIX=`.
 
 To exercise the success paths instead of the "not found" paths, set
 `ASSIGNEES` and `BOUNTY_IDS` to records that exist in the backend you are
@@ -101,10 +114,84 @@ case: it means the server kept the stream open. As a result:
 - `STREAM_HOLD_SECONDS` must be longer than the server keep-alive interval
   (axum default: 15 s). Otherwise an idle but healthy stream can close before
   it has received any bytes.
+- All stream VUs share one IP, so keep `STREAM_VUS` at or below the backend's
+  `SSE_MAX_CONNECTIONS_PER_IP` (default 32). Above it the extra connections
+  get `429`.
 - `sse_events_received` counts `bounty_updated` events. It only goes above
   zero if something triggers bounty updates while the test runs.
 
+## SSE scenarios (`sse.js`, `sse-limit.js`)
+
+`stream.js` can only hold a plain GET open, so it cannot see individual
+events. The two SSE scenarios use the
+[xk6-sse](https://github.com/phymbert/xk6-sse) extension, which delivers each
+event to the script as it arrives. Build a k6 binary that includes it once:
+
+```bash
+scripts/k6/build-k6-sse.sh   # writes scripts/k6/bin/k6-sse (git-ignored); needs xk6 or Docker
+```
+
+`run.sh` uses that binary for `sse` and `sse-limit` (override with
+`K6_SSE_BIN`). k6's automatic extension download does not work here: the
+extension registry only lists xk6-sse 0.1.x, which predates k6 v2.
+
+### `sse.js`: load and delivery latency
+
+```bash
+# Backend with the per-IP cap off, since every k6 client shares one IP
+(cd mergemint-backend && SSE_MAX_CONNECTIONS_PER_IP=0 SSE_MAX_CONNECTIONS=0 cargo run --release)
+
+API_PREFIX= scripts/k6/run.sh sse
+API_PREFIX= SSE_CLIENTS=1000 DURATION=1m scripts/k6/run.sh sse
+```
+
+Two scenarios run together:
+
+- **`sse_clients`** ramps to `SSE_CLIENTS` subscribers over `RAMP` and holds
+  them for `DURATION`. Each one keeps a stream open for `SSE_HOLD_SECONDS`,
+  closes it, and reconnects.
+- **`sse_trigger`** starts once the ramp-up is done and publishes
+  `TRIGGER_RPS` events per second through `lib/events.js`. Each event is a
+  `POST /bounties/{id}/claim`, which writes to the same broadcast channel the
+  indexer uses. The bounty id carries the send time, so every client can work
+  out how long the event took to arrive. Trigger and clients run in one k6
+  process, so they share a clock.
+
+| Metric                     | Threshold                  | Meaning                                                         |
+| -------------------------- | -------------------------- | --------------------------------------------------------------- |
+| `sse_event_latency`        | p95 < 250 ms, p99 < 500 ms | time from publishing an event to a client receiving it          |
+| `sse_connect_time`         | p95 < 500 ms               | time until the stream's response headers arrive                 |
+| `sse_connection_ok`        | > 99 %                     | streams that stayed open for their whole hold window            |
+| `sse_dropped_connections`  | (reported)                 | streams that ended early: server closed it, network error       |
+| `sse_rejected_connections` | (reported)                 | streams refused with `429` by the connection caps               |
+| `sse_events_delivered`     | > 0                        | `bounty_updated` events received across all clients             |
+| `sse_events_triggered`     | (reported)                 | events published; ideally delivered ≈ triggered × `SSE_CLIENTS` |
+
+Delivered can be a little below triggered × clients. A client that is
+between streams when an event goes out misses it, because the stream does
+not replay. Dropped connections are also logged with how long they lasted.
+
+Baseline numbers are in [`docs/benchmarks.md`](../../docs/benchmarks.md#sse-stream-load-issue-1120).
+
+### `sse-limit.js`: connection caps
+
+Opens `SSE_LIMIT_ATTEMPTS` streams at once from one IP against a backend with
+its normal caps. It passes when at most `SSE_EXPECTED_CAP` are accepted, the
+rest get `429` with `Retry-After`, and nothing else comes back:
+
+```bash
+(cd mergemint-backend && cargo run --release)    # default cap: 32 per IP
+API_PREFIX= scripts/k6/run.sh sse-limit
+```
+
+While it runs, `GET /metrics` shows `mergemint_sse_active_connections` at the
+cap and `mergemint_sse_rejected_connections_total{reason="per_ip"}` counting
+the 429s. The gauge goes back to 0 once the streams close.
+
 ## Current backend status
+
+The bounty routes are now mounted at `/` (for example `/bounties/stream`), so
+run against the binary with `API_PREFIX=`. Earlier notes follow.
 
 When these scenarios were written, `mergemint-backend/src/main.rs` mounted
 only the `/tx/*` routes. The bounty read routes are implemented in

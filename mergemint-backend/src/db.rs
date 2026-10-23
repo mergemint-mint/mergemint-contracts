@@ -581,6 +581,7 @@ fn paginate(mut bounties: Vec<Bounty>, limit: i64) -> BountyPage {
 /// Query audit logs with inclusive timestamp filters and a stable descending
 /// `(timestamp, id)` cursor. The caller requests one extra row to determine
 /// whether another page exists.
+#[allow(clippy::too_many_arguments)]
 pub fn query_audit_logs(
     db: &SharedDb,
     actor: Option<&str>,

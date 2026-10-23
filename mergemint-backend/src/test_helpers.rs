@@ -57,13 +57,15 @@ pub fn validate_openapi_response(
     normalize_nullable_schemas(&mut root);
     let validator = jsonschema::JSONSchema::compile(&root)
         .map_err(|error| format!("invalid OpenAPI response schema for GET {path}: {error}"))?;
-    match validator.validate(body) {
+    // Bind the result so the borrowed error iterator is dropped before `validator`.
+    let result = match validator.validate(body) {
         Ok(()) => Ok(()),
         Err(errors) => Err(errors
             .map(|error| format!("{}: {error}", error.instance_path))
             .collect::<Vec<_>>()
             .join("; ")),
-    }
+    };
+    result
 }
 
 fn normalize_nullable_schemas(schema: &mut Value) {

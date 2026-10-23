@@ -125,3 +125,53 @@ Approximate per-bounty persistent-storage footprint before and after `archive_bo
 | `BountySummary` (post-archive) | id, creator, assignee, status, reward | ~90–110 bytes (fixed-ish; one optional `Address`) |
 
 Archiving a finished bounty also removes its `Bounty(id)` and `BountyMeta(id)` persistent entries entirely, so those stop being extended by `extend_ttl` on every read — the dominant long-run rent cost for bounties nobody touches again. The exact bytes-saved figure depends on the bounty's tag/milestone/verifier/description sizes; this table gives the field-level shape rather than a single measured number (no `cargo` run was performed to produce an exact benchmark).
+
+---
+
+## SSE stream load (Issue #1120)
+
+Load baseline for `GET /bounties/stream`, measured with
+[`scripts/k6/sse.js`](../scripts/k6/sse.js). The scenario ramps up long-lived
+SSE subscribers, publishes `bounty_updated` events at a fixed rate, and
+records how long each event takes to reach each client. Setup and metric
+definitions are in [`scripts/k6/README.md`](../scripts/k6/README.md#sse-scenarios-ssejs-sse-limitjs).
+
+**Environment:** 2026-10-20, branch `security/webhook-ssrf-sse-limits-gitleaks-k6`.
+Release build of `mergemint-backend` run directly (`cargo run --release`), k6 v2.3.0 + xk6-sse v0.2.0. Backend and
+k6 shared one 2-vCPU / 8 GB dev container, so the latency figures include k6's
+own CPU contention. Connection caps were turned off
+(`SSE_MAX_CONNECTIONS_PER_IP=0 SSE_MAX_CONNECTIONS=0`) because every client
+came from one IP. Keep-alive interval 15 s (default), `TRIGGER_RPS=2`,
+`SSE_HOLD_SECONDS=30`, `RAMP=30s`.
+
+| Clients | Steady state | Events triggered | Events delivered | Dropped connections | Connect p95 | Latency median | Latency p95 | Latency p99 | Latency max |
+| ------: | -----------: | ---------------: | ---------------: | ------------------: | ----------: | -------------: | ----------: | ----------: | ----------: |
+| 200     | 2 min        | 240              | 47,999 / 48,000  | 0 (988 streams)     | 2 ms        | 4 ms           | 7 ms        | 15 ms       | 29 ms       |
+| 1,000   | 1 min        | 121              | 121,000 / 121,000 | 0 (2,987 streams)  | 24 ms       | 21 ms          | 34 ms       | 55 ms       | 155 ms      |
+
+Latency is measured from just before the trigger request is sent, so it
+includes the trigger's HTTP round trip (4 to 7 ms on average here) as well as the
+broadcast fan-out. In the 200-client run one event was missed by a client
+that was reconnecting between hold windows. That is expected: the stream does
+not replay missed events.
+
+The k6 thresholds (`sse_event_latency` p95 < 250 ms, p99 < 500 ms) leave a
+wide margin over these numbers. Tighten them once there is a baseline from
+production-like hardware with k6 on a separate machine.
+
+Reproduce:
+
+```bash
+scripts/k6/build-k6-sse.sh
+(cd mergemint-backend && SSE_MAX_CONNECTIONS_PER_IP=0 SSE_MAX_CONNECTIONS=0 cargo run --release)
+API_PREFIX= scripts/k6/run.sh sse
+API_PREFIX= SSE_CLIENTS=1000 DURATION=1m scripts/k6/run.sh sse
+```
+
+### Connection caps (Issue #1118)
+
+`scripts/k6/sse-limit.js` against the same build with default caps (32 per IP,
+1,024 total): 40 streams opened at once from one IP gave **32 accepted and 8
+refused with `429` + `Retry-After`**, and nothing else. `/metrics` showed
+`mergemint_sse_active_connections 32` during the hold and `0` afterwards, with
+`mergemint_sse_rejected_connections_total{reason="per_ip"} 8`.

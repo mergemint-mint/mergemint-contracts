@@ -36,6 +36,37 @@ curl -X POST https://api.mergemint.io/api/webhooks/subscriptions \
 
 * Leave `event_types` empty or use `["*"]` to subscribe to all events.
 
+### Allowed Target URLs
+
+To stop webhooks from being used to reach internal services (SSRF), the
+backend only delivers to public addresses. A registration is refused with
+`400 Bad Request` when the URL:
+
+* uses a scheme other than `http` or `https`, or
+* is, or resolves to, any of these addresses (one blocked DNS answer is
+  enough to refuse the whole host):
+  * loopback (`127.0.0.0/8`, `::1`) and unspecified (`0.0.0.0/8`, `::`)
+  * private ranges (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`)
+  * link-local (`169.254/16`, `fe80::/10`), which includes the cloud
+    metadata endpoint `169.254.169.254` and `fd00:ec2::254`
+  * carrier-grade NAT (`100.64/10`), multicast, documentation, benchmarking
+    and reserved ranges
+  * IPv6 forms that embed one of the above (`::ffff:10.0.0.1`, NAT64, 6to4)
+
+Odd IPv4 spellings such as `http://2130706433/` or `http://0x7f.1/` are
+normalised first, so they are caught as well.
+
+The check runs again on every delivery. The webhook client resolves the host
+itself and connects only to addresses that pass, so a DNS record that changes
+to an internal address after registration (DNS rebinding) is refused. Such a
+delivery fails at once and is not retried. Webhook requests do not follow
+redirects and ignore proxy settings, so a `3xx` response counts as a failed
+delivery.
+
+**Local development:** to deliver to a receiver on `localhost` or a private
+network, start the backend with `WEBHOOK_ALLOW_PRIVATE_TARGETS=true`. The
+backend logs a warning at startup when this is on. Never set it in production.
+
 ### List Subscriptions
 
 ```bash

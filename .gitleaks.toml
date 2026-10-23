@@ -1,0 +1,54 @@
+# gitleaks configuration (#1117).
+#
+# Used by the `gitleaks` job in .github/workflows/security.yml and by the
+# optional pre-commit hook (scripts/gitleaks-pre-commit.sh). Starts from the
+# gitleaks default ruleset and adds a rule for Stellar secret seeds.
+#
+# Before adding an allowlist entry, make sure the value really is fake or
+# public. If a real secret was committed, rotate it first: deleting it from
+# the tree does not remove it from git history.
+#
+# Run locally: gitleaks git --config .gitleaks.toml --redact
+
+title = "MergeMint gitleaks config"
+
+[extend]
+useDefault = true
+
+# Stellar secret seeds: "S" + 55 base32 characters. A leaked seed gives full
+# control of the account, and the default rules do not cover this format.
+[[rules]]
+id = "stellar-secret-seed"
+description = "Stellar secret seed (S... strkey)"
+regex = '''\b(S[A-D][A-Z2-7]{54})\b'''
+secretGroup = 1
+entropy = 4
+keywords = ["s"]
+
+# Public Stellar strkeys (G... accounts, C... contracts) look like API keys to
+# the generic rule, but they are public identifiers, not secrets.
+[[allowlists]]
+description = "Public Stellar account and contract addresses"
+regexTarget = "secret"
+regexes = ['''^[GC][A-Z2-7]{55}$''']
+
+# Test fixtures, snapshots and lockfiles hold fake keys or integrity hashes.
+[[allowlists]]
+description = "Test fixtures and generated files"
+paths = [
+  '''(^|/)fixtures/''',
+  '''(^|/)test_snapshots/''',
+  '''(^|/)proptest-regressions/''',
+  '''(^|/)__snapshots__/''',
+  '''(^|/)(tests?|__tests__)/''',
+  '''\.(test|spec)\.(ts|tsx|js|jsx|mjs)$''',
+  '''(^|/)mocks?(/|\.(ts|js)$)''',
+  '''(^|/)(package-lock\.json|Cargo\.lock|yarn\.lock|pnpm-lock\.yaml)$''',
+  '''(^|/)openapi\.snapshot\.json$''',
+]
+
+# Example placeholders in docs, e.g. "whsec_your_shared_signing_secret_here".
+[[allowlists]]
+description = "Documentation placeholders"
+regexTarget = "secret"
+regexes = ['''(?i)(your|example|placeholder|changeme|dummy|fake|xxxx)''']

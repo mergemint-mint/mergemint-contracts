@@ -19,7 +19,30 @@ use crate::db::{
 use crate::events::decode_bounty_event;
 use crate::routes::tx::AppState;
 
+pub mod ssrf;
+
+pub use ssrf::{SsrfPolicy, WebhookTargetGuard};
+
 type HmacSha256 = Hmac<Sha256>;
+
+/// HTTP client for webhook deliveries. Every request goes through the SSRF
+/// guard: IP-literal targets are checked before sending, and hostnames are
+/// checked by the guarded DNS resolver on every connection (#1116).
+#[derive(Debug, Clone)]
+pub struct WebhookClient {
+    http: reqwest::Client,
+    guard: WebhookTargetGuard,
+}
+
+impl WebhookClient {
+    /// Build a client whose deliveries are checked by `guard`.
+    pub fn new(guard: WebhookTargetGuard, timeout: Duration) -> reqwest::Result<Self> {
+        Ok(Self {
+            http: guard.build_client(timeout)?,
+            guard,
+        })
+    }
+}
 
 /// Delivery payload delivered to webhook subscriber endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -66,6 +89,8 @@ pub enum WebhookDeliveryError {
     SerializationError(String),
     ClientError(StatusCode, String),
     MaxRetriesExceeded(usize, String),
+    /// The target URL is invalid or points at a blocked address. Not retried.
+    RejectedTarget(String),
 }
 
 impl std::fmt::Display for WebhookDeliveryError {
@@ -78,6 +103,7 @@ impl std::fmt::Display for WebhookDeliveryError {
             Self::MaxRetriesExceeded(attempts, msg) => {
                 write!(f, "Delivery failed after {attempts} attempts: {msg}")
             }
+            Self::RejectedTarget(msg) => write!(f, "Webhook target rejected: {msg}"),
         }
     }
 }
@@ -133,7 +159,7 @@ pub fn calculate_backoff_delay(attempt: usize, config: &RetryConfig) -> Duration
 
 /// Deliver a webhook payload to a single subscription with exponential backoff retries.
 pub async fn deliver_webhook_payload(
-    client: &reqwest::Client,
+    client: &WebhookClient,
     subscription: &WebhookSubscription,
     payload: &WebhookPayload,
     retry_config: &RetryConfig,
@@ -142,6 +168,13 @@ pub async fn deliver_webhook_payload(
         .map_err(|e| WebhookDeliveryError::SerializationError(e.to_string()))?;
     let signature_hex = compute_hmac_sha256(&subscription.secret, &payload_bytes);
     let signature_header = format!("sha256={signature_hex}");
+
+    // IP literals never reach the guarded resolver, so check them here.
+    // Hostnames are checked when the connection is opened.
+    client
+        .guard
+        .check_literal(&subscription.url)
+        .map_err(|err| WebhookDeliveryError::RejectedTarget(err.to_string()))?;
 
     let mut last_error_message = String::new();
 
@@ -152,6 +185,7 @@ pub async fn deliver_webhook_payload(
         }
 
         let request = client
+            .http
             .post(&subscription.url)
             .header("Content-Type", "application/json")
             .header("X-MergeMint-Signature", &signature_header)
@@ -178,6 +212,16 @@ pub async fn deliver_webhook_payload(
                 last_error_message = format!("HTTP status {status}");
             }
             Err(err) => {
+                // The guarded resolver refused the address. Retrying would
+                // get the same answer, so stop here.
+                if let Some(target_err) = ssrf::target_error_in_chain(&err) {
+                    tracing::warn!(
+                        subscription_id = %subscription.id,
+                        error = %target_err,
+                        "webhook delivery blocked by SSRF guard"
+                    );
+                    return Err(WebhookDeliveryError::RejectedTarget(target_err.to_string()));
+                }
                 last_error_message = err.to_string();
             }
         }
@@ -192,7 +236,7 @@ pub async fn deliver_webhook_payload(
 /// Find all matching subscriptions in the database and dispatch a webhook event to each.
 pub async fn dispatch_event(
     db: &SharedDb,
-    client: &reqwest::Client,
+    client: &WebhookClient,
     payload: &WebhookPayload,
     retry_config: &RetryConfig,
 ) -> Vec<Result<(), WebhookDeliveryError>> {
@@ -232,7 +276,7 @@ pub fn build_bounty_event_payload(
 /// Spawn the asynchronous background task that listens for broadcast bounty events and dispatches webhooks.
 pub fn start_webhook_dispatcher(
     state: Arc<AppState>,
-    client: reqwest::Client,
+    client: WebhookClient,
     retry_config: RetryConfig,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -283,6 +327,15 @@ pub async fn create_subscription_route(
             Json(serde_json::json!({
                 "error": "Invalid webhook URL: must start with http:// or https://"
             })),
+        ));
+    }
+
+    // SSRF guard (#1116): refuse targets that resolve to private, loopback,
+    // link-local or metadata addresses. Delivery checks again.
+    if let Err(err) = state.webhook_guard.validate_url(trimmed_url).await {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err.to_string() })),
         ));
     }
 
@@ -377,6 +430,7 @@ pub async fn delete_subscription_route(
 
 #[cfg(test)]
 mod tests {
+    use super::ssrf::test_support::MockResolver;
     use super::*;
     use crate::db::new_shared_db;
     use crate::routes::tx::new_shared_rate_limiter;
@@ -384,6 +438,211 @@ mod tests {
     use axum::Router;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
+
+    /// Client for tests whose receiver listens on loopback, so private
+    /// targets must be allowed.
+    fn local_test_client() -> WebhookClient {
+        WebhookClient::new(
+            WebhookTargetGuard::new(SsrfPolicy::allow_private()),
+            Duration::from_secs(10),
+        )
+        .unwrap()
+    }
+
+    /// Start a receiver on 127.0.0.1 that counts hits. Returns its port.
+    async fn spawn_counting_receiver(hits: Arc<AtomicUsize>) -> u16 {
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        port
+    }
+
+    fn test_subscription(url: String) -> WebhookSubscription {
+        WebhookSubscription {
+            id: "sub-ssrf".to_string(),
+            url,
+            secret: "key".to_string(),
+            event_types: vec!["*".to_string()],
+            active: true,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn test_payload() -> WebhookPayload {
+        WebhookPayload {
+            id: "evt-ssrf".to_string(),
+            event: "bounty_updated".to_string(),
+            timestamp: Utc::now(),
+            bounty_id: "bounty-1".to_string(),
+            data: serde_json::json!({}),
+        }
+    }
+
+    fn fast_retry() -> RetryConfig {
+        RetryConfig {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(5),
+            backoff_factor: 1.0,
+            max_delay: Duration::from_millis(10),
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_to_blocked_ip_literal_is_rejected_without_sending() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let port = spawn_counting_receiver(hits.clone()).await;
+        let client = WebhookClient::new(
+            WebhookTargetGuard::with_resolver(SsrfPolicy::strict(), MockResolver::new()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        for url in [
+            format!("http://127.0.0.1:{port}/hook"),
+            format!("http://[::ffff:127.0.0.1]:{port}/hook"),
+            format!("http://2130706433:{port}/hook"),
+        ] {
+            let result = deliver_webhook_payload(
+                &client,
+                &test_subscription(url.clone()),
+                &test_payload(),
+                &fast_retry(),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(WebhookDeliveryError::RejectedTarget(_))),
+                "{url}: expected RejectedTarget, got {result:?}"
+            );
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no request may reach the receiver"
+        );
+    }
+
+    #[tokio::test]
+    async fn dns_rebinding_to_loopback_is_blocked_at_delivery() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let port = spawn_counting_receiver(hits.clone()).await;
+
+        // First lookup (registration) gets a public address. Every later
+        // lookup (delivery) gets loopback, where the receiver listens.
+        let resolver = MockResolver::new()
+            .answer("rebind.example", &["93.184.215.14"])
+            .answer("rebind.example", &["127.0.0.1"]);
+        let guard = WebhookTargetGuard::with_resolver(SsrfPolicy::strict(), resolver.clone());
+        let url = format!("http://rebind.example:{port}/hook");
+
+        guard
+            .validate_url(&url)
+            .await
+            .expect("registration sees the public address and accepts the URL");
+
+        let client = WebhookClient::new(guard, Duration::from_secs(5)).unwrap();
+        let result = deliver_webhook_payload(
+            &client,
+            &test_subscription(url),
+            &test_payload(),
+            &fast_retry(),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(WebhookDeliveryError::RejectedTarget(ref msg)) if msg.contains("127.0.0.1")),
+            "expected RejectedTarget naming the rebound address, got {result:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "rebound address must never be contacted"
+        );
+        assert_eq!(
+            resolver.lookup_count("rebind.example"),
+            2,
+            "delivery must resolve again (once) instead of reusing the registration answer or retrying"
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_connects_to_the_address_the_guard_resolved() {
+        // With the dev override on, a hostname mapped to loopback by the
+        // guard's resolver is delivered to. This shows the HTTP client uses
+        // the guarded resolver: "hook.test" does not exist in real DNS.
+        let hits = Arc::new(AtomicUsize::new(0));
+        let port = spawn_counting_receiver(hits.clone()).await;
+        let resolver = MockResolver::new().answer("hook.test", &["127.0.0.1"]);
+        let client = WebhookClient::new(
+            WebhookTargetGuard::with_resolver(SsrfPolicy::allow_private(), resolver),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let result = deliver_webhook_payload(
+            &client,
+            &test_subscription(format!("http://hook.test:{port}/hook")),
+            &test_payload(),
+            &fast_retry(),
+        )
+        .await;
+        assert!(result.is_ok(), "got {result:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        // A public-looking receiver that redirects to an internal address
+        // must not cause a second request.
+        let hits = Arc::new(AtomicUsize::new(0));
+        let internal_port = spawn_counting_receiver(hits.clone()).await;
+        let location = format!("http://127.0.0.1:{internal_port}/hook");
+        let redirector = Router::new().route(
+            "/hook",
+            post(move || {
+                let location = location.clone();
+                async move {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, location)],
+                    )
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, redirector).await.unwrap();
+        });
+
+        let result = deliver_webhook_payload(
+            &local_test_client(),
+            &test_subscription(format!("http://127.0.0.1:{redirect_port}/hook")),
+            &test_payload(),
+            &RetryConfig {
+                max_attempts: 1,
+                ..fast_retry()
+            },
+        )
+        .await;
+        assert!(result.is_err(), "a 3xx is not a successful delivery");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "redirect target must not be contacted"
+        );
+    }
 
     #[test]
     fn test_hmac_sha256_generation_and_verification() {
@@ -518,7 +777,7 @@ mod tests {
             data: serde_json::json!({ "status": "claimed" }),
         };
 
-        let client = reqwest::Client::new();
+        let client = local_test_client();
         let config = RetryConfig::default();
 
         let result = deliver_webhook_payload(&client, &subscription, &payload, &config).await;
@@ -582,7 +841,7 @@ mod tests {
             max_delay: Duration::from_millis(100),
         };
 
-        let client = reqwest::Client::new();
+        let client = local_test_client();
         let result = deliver_webhook_payload(&client, &subscription, &payload, &config).await;
         assert!(result.is_ok());
         assert_eq!(attempts_count.load(Ordering::SeqCst), 3);
@@ -634,7 +893,7 @@ mod tests {
             max_delay: Duration::from_millis(100),
         };
 
-        let client = reqwest::Client::new();
+        let client = local_test_client();
         let result = deliver_webhook_payload(&client, &subscription, &payload, &config).await;
         assert!(matches!(
             result,
@@ -689,7 +948,7 @@ mod tests {
             max_delay: Duration::from_millis(100),
         };
 
-        let client = reqwest::Client::new();
+        let client = local_test_client();
         let result = deliver_webhook_payload(&client, &subscription, &payload, &config).await;
         assert!(matches!(
             result,
@@ -710,6 +969,14 @@ mod tests {
             bounty_broadcast: tokio::sync::broadcast::channel(16).0,
             leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
             sse_keep_alive_duration: std::time::Duration::from_secs(15),
+            webhook_guard: WebhookTargetGuard::with_resolver(
+                SsrfPolicy::strict(),
+                MockResolver::new()
+                    .answer("example.com", &["93.184.215.14"])
+                    .answer("internal.example", &["10.0.0.8"])
+                    .answer("localhost", &["127.0.0.1", "::1"]),
+            ),
+            sse_limiter: Default::default(),
         });
 
         let router = Router::new()
@@ -757,6 +1024,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(empty_secret_resp.status(), StatusCode::BAD_REQUEST);
+
+        // SSRF guard: internal targets are refused at registration (#1116).
+        for blocked in [
+            "http://127.0.0.1:9000/hook",
+            "http://localhost/hook",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/hook",
+            "https://internal.example/hook",
+        ] {
+            let resp = client
+                .post(&base_url)
+                .header("Content-Type", "application/json")
+                .body(
+                    serde_json::to_vec(&serde_json::json!({ "url": blocked, "secret": "s" }))
+                        .unwrap(),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{blocked} must be refused"
+            );
+        }
+        assert!(list_webhook_subscriptions(&state.db).is_empty());
 
         let create_resp = client
             .post(&base_url)
@@ -860,6 +1153,8 @@ mod tests {
             bounty_broadcast: bounty_broadcast.clone(),
             leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
             sse_keep_alive_duration: std::time::Duration::from_secs(15),
+            webhook_guard: Default::default(),
+            sse_limiter: Default::default(),
         });
 
         add_webhook_subscription(
@@ -870,7 +1165,7 @@ mod tests {
             vec!["*".to_string()],
         );
 
-        let client = reqwest::Client::new();
+        let client = local_test_client();
         let dispatcher_handle = start_webhook_dispatcher(
             state.clone(),
             client,

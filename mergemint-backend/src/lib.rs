@@ -5,6 +5,7 @@ pub mod deadline_reminders;
 pub mod notifications;
 pub mod rate_limit;
 pub mod routes;
+pub mod sse_limit;
 pub mod validation;
 pub mod webhooks;
 
