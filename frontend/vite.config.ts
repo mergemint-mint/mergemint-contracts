@@ -1,8 +1,9 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
+import { cspPlugin } from "./src/vite-plugin-csp";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), cspPlugin()],
   build: {
     target: 'esnext',
     minify: 'terser',

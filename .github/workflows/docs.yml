@@ -1,0 +1,84 @@
+# .github/workflows/docs.yml
+#
+# Build the MergeMint docs with mdBook and deploy them to GitHub Pages.
+#
+# Implements issue #1113 — "mdBook docs and GitHub Pages deployment".
+#
+# Triggers:
+#   - Push to main when docs/, book.toml or this workflow file changes.
+#   - Pull requests touching the same paths (build-only, no deploy).
+#
+# The deploy step runs only on pushes to main (not on PRs). It uses the
+# official mdBook action to install the binary, then the GitHub Pages
+# deploy action to publish the built book.
+#
+# Link-checking: mdBook's built-in linkcheck output backend is enabled in
+# book.toml with `warning-policy = "error"`, so any broken internal link
+# causes the build job to fail.
+
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - ".github/workflows/docs.yml"
+
+# Allow only one concurrent deploy; cancel any in-progress run when a new
+# push lands so stale builds never overwrite a newer one.
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+# Required for the GitHub Pages deploy action.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. Build & link-check
+  # --------------------------------------------------------------------------
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "0.4.40"
+
+      - name: Build book (includes link-check)
+        run: mdbook build
+
+      - name: Upload Pages artefact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: book
+
+  # --------------------------------------------------------------------------
+  # 2. Deploy to GitHub Pages (main branch only)
+  # --------------------------------------------------------------------------
+  deploy:
+    name: Deploy
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
