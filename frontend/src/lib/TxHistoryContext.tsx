@@ -8,12 +8,16 @@ export interface TxRecord {
   status: TxStatus;
   description: string;
   timestamp: number;
+  /** Raw XDR of the transaction envelope, available once the tx is submitted. */
+  xdr?: string;
+  /** Transaction fee in stroops (1 XLM = 10,000,000 stroops). */
+  fee?: string;
 }
 
 interface TxHistoryContextType {
   records: TxRecord[];
   add: (description: string) => string;
-  update: (id: string, status: TxStatus, hash: string) => void;
+  update: (id: string, status: TxStatus, hash: string, xdr?: string, fee?: string) => void;
   clear: () => void;
 }
 
@@ -36,9 +40,14 @@ export function TxHistoryProvider({ children }: { children: React.ReactNode }) {
     return id;
   }, []);
 
-  const update = useCallback((id: string, status: TxStatus, hash: string) => {
-    setRecords(prev => prev.map(r => r.id === id ? { ...r, status, hash } : r));
-  }, []);
+  const update = useCallback(
+    (id: string, status: TxStatus, hash: string, xdr?: string, fee?: string) => {
+      setRecords(prev =>
+        prev.map(r => (r.id === id ? { ...r, status, hash, xdr, fee } : r))
+      );
+    },
+    []
+  );
 
   const clear = useCallback(() => {
     setRecords([]);

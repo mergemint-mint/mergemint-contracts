@@ -208,6 +208,41 @@ Fired when a dispute is opened by the creator or assignee.
 }
 ```
 
+### `deadline_approaching`
+Fired once when a claimed, unsubmitted bounty enters the configured reminder
+window. It is published on both the bounty SSE stream and webhook dispatcher.
+The default lead time is 24 hours and can be changed with
+`DEADLINE_REMINDER_LEAD_HOURS`.
+
+---
+
+## Email notifications
+
+Contributors can opt in for a wallet address and email address with
+`POST /notifications/subscriptions`:
+
+```json
+{
+  "contributor_address": "G...",
+  "email": "contributor@example.com"
+}
+```
+
+The address is subscribed only after the verification email is confirmed at
+`GET /notifications/verify?token=...`. Every notification includes a unique
+unsubscribe link at `GET /notifications/unsubscribe?token=...`. Supported
+messages cover claim approvals, approval/dispute updates, deadline reminders,
+and payouts.
+
+Configure the SMTP host, TLS port, sender address, and optional credentials with
+`SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_USERNAME`, and `SMTP_PASSWORD`.
+Delivery uses implicit TLS. `PUBLIC_BASE_URL` is required to create verification
+and unsubscribe links.
+
+The scheduled reminder uses `DEADLINE_REMINDER_INTERVAL_SECS` (default 60) and
+`DEADLINE_REMINDER_LEAD_HOURS` (default 24). A reminder is recorded once per
+bounty, and submitted bounties are excluded.
+
 ---
 
 ## 5. Signature Verification

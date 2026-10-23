@@ -1149,12 +1149,14 @@ dependencies = [
  "hmac",
  "jsonschema",
  "reqwest",
+ "rustls 0.23.43",
  "serde",
  "serde_json",
  "sha2",
  "sqlx",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.4.13",
  "tower-http 0.5.2",
@@ -1162,6 +1164,7 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "uuid",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

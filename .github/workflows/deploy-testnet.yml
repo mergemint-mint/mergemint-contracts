@@ -62,7 +62,7 @@ jobs:
           echo "::warning::${msg}; skipping testnet deploy."
           echo "Testnet deploy skipped: \`STELLAR_DEPLOYER_SECRET_KEY\` is not configured." >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@v7
         if: steps.secret.outputs.configured == 'true'
 
       - name: Install Rust toolchain from rust-toolchain.toml

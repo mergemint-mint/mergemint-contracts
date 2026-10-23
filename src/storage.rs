@@ -1169,3 +1169,24 @@ pub fn remove_allowed_reward_token(env: &Env, token: &Address) {
         .instance()
         .remove(&DataKey::AllowedRewardToken(token.clone()));
 }
+
+pub fn get_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::Admin)
+}
+
+pub fn set_admin(env: &Env, admin: &Address) {
+    env.storage().instance().set(&DataKey::Admin, admin);
+}
+
+pub fn get_min_reward_amount(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::MinRewardAmount(token.clone()))
+        .unwrap_or(0)
+}
+
+pub fn set_min_reward_amount(env: &Env, token: &Address, amount: &i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::MinRewardAmount(token.clone()), amount);
+}

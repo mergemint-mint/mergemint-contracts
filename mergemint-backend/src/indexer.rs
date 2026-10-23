@@ -38,6 +38,7 @@ const TUPLE_EVENTS: &[&str] = &[
     "reward_paid",
     "approval_recorded",
     "dispute_resolved",
+    "work_submitted",
 ];
 
 /// Events that are keyed by contributor address and carry no `bounty_id` at
@@ -173,6 +174,10 @@ pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: b
             }
         };
 
+        if matches!(event_name.as_str(), "reward_paid" | "reputation_changed") {
+            crate::routes::leaderboard::invalidate_leaderboard_cache();
+        }
+
         // ── Issue 2: log unrecognised events instead of silent drop ──────
         //
         // Prior to this fix, events not in SINGLE_VALUE_EVENTS/TUPLE_EVENTS
@@ -204,6 +209,45 @@ pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: b
     }
     // When page_complete is false, last_ledger is deliberately left unchanged
     // so the next poll retries from the same start boundary.
+}
+
+/// Process indexer events and publish them to the backend notification channel
+/// after a complete page is received, avoiding duplicate notifications when a
+/// truncated page is fetched again.
+pub fn poll_once_and_publish(
+    state: &mut IndexerState,
+    events: &[RawEvent],
+    page_complete: bool,
+    db: &crate::db::SharedDb,
+    sender: &tokio::sync::broadcast::Sender<String>,
+) {
+    poll_once(state, events, page_complete);
+    if !page_complete {
+        return;
+    }
+
+    for event in events {
+        let Some(TopicDecodeResult::Ok(event_name)) = event.topics.first() else {
+            continue;
+        };
+        let Some(bounty_id) =
+            extract_bounty_id_hex(std::slice::from_ref(event_name), &event.value_hex)
+        else {
+            continue;
+        };
+        match event_name.as_str() {
+            "bounty_claimed" => {
+                if let Some(TopicDecodeResult::Ok(assignee)) = event.topics.get(1) {
+                    crate::db::mark_bounty_claimed(db, &bounty_id, assignee);
+                }
+            }
+            "work_submitted" => crate::db::mark_bounty_submitted(db, &bounty_id),
+            _ => {}
+        }
+        if let Err(error) = sender.send(crate::events::encode_bounty_event(event_name, &bounty_id)) {
+            warn!(%error, event = %event_name, "failed to publish indexed bounty event");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

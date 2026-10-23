@@ -7,8 +7,8 @@
 /// POST /bounties/{id}/claim          claim a bounty (broadcasts on the stream)
 /// GET  /bounties/stream              SSE stream of bounty state changes (#482)
 use axum::{
-    extract::{ConnectInfo, Path, Query, State},
-    http::{header::RETRY_AFTER, HeaderMap, StatusCode},
+    extract::{Path, Query, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -28,6 +28,7 @@ use crate::db::{
     list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, Bounty,
     BountyPage, BountySortField, SortOrder,
 };
+use crate::events::decode_bounty_event;
 use crate::routes::tx::AppState;
 
 // ── Query params ──────────────────────────────────────────────────────────────
@@ -48,6 +49,8 @@ pub struct ListParams {
     pub status: Option<String>,
     /// Optional tag filter. Matched against the bounty's indexed tag column.
     pub tag: Option<String>,
+    /// Optional case-insensitive full-text query over bounty title and description.
+    pub q: Option<String>,
     /// Optional sort column (`created`, `reward`, `deadline`). Deserialization
     /// is restricted to [`BountySortField`], so an unrecognised value is
     /// rejected with 400 by the query extractor and never reaches the store.
@@ -58,7 +61,7 @@ pub struct ListParams {
 
 /// Statuses a bounty may be filtered by. Kept in sync with the values the
 /// store writes; anything outside this set is a client error.
-const VALID_STATUSES: [&str; 4] = ["open", "claimed", "completed", "cancelled"];
+const VALID_STATUSES: [&str; 5] = ["open", "claimed", "submitted", "completed", "cancelled"];
 
 /// Cursors encode a `created_at` position, so they only page correctly when
 /// the listing is ordered newest first (the default `created` + `desc`).
@@ -121,9 +124,13 @@ fn decode_cursor(cursor: &str) -> Option<(DateTime<Utc>, String)> {
 #[utoipa::path(
     get,
     path = "/bounties",
-    params(ListParams),
+    params(
+        ListParams,
+        ("If-None-Match" = Option<String>, Header, description = "Return 304 when the current page matches this ETag"),
+    ),
     responses(
         (status = 200, description = "Paginated list of bounties", body = BountyPage),
+        (status = 304, description = "The bounty list has not changed"),
         (status = 400, description = "Invalid filter, sort or cursor", body = crate::routes::tx::AppError),
     ),
     tag = "bounties"
@@ -131,7 +138,8 @@ fn decode_cursor(cursor: &str) -> Option<(DateTime<Utc>, String)> {
 pub async fn list_bounties(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListParams>,
-) -> Result<Json<BountyPage>, (StatusCode, Json<crate::routes::tx::AppError>)> {
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, Json<crate::routes::tx::AppError>)> {
     if let Some(status) = params.status.as_deref() {
         if !VALID_STATUSES.contains(&status) {
             return Err(crate::routes::tx::AppError::bad_request(format!(
@@ -141,6 +149,8 @@ pub async fn list_bounties(
             )));
         }
     }
+
+    let query = normalize_search_query(params.q.as_deref())?;
 
     // Decode the opaque cursor when present. A malformed token is a client
     // error rather than a silent reset to the first page.
@@ -181,6 +191,7 @@ pub async fn list_bounties(
         cursor_ts,
         params.status.as_deref(),
         params.tag.as_deref(),
+        query.as_deref(),
         sort,
         order,
     );
@@ -193,7 +204,44 @@ pub async fn list_bounties(
         }
     }
 
-    Ok(Json(page))
+    Ok(conditional_json_response(page, &headers))
+}
+
+const MAX_SEARCH_QUERY_CHARS: usize = 128;
+
+fn normalize_search_query(
+    query: Option<&str>,
+) -> Result<Option<String>, (StatusCode, Json<crate::routes::tx::AppError>)> {
+    let Some(query) = query else {
+        return Ok(None);
+    };
+    if query.chars().count() > MAX_SEARCH_QUERY_CHARS || query.chars().any(char::is_control) {
+        return Err(crate::routes::tx::AppError::bad_request(
+            "search query must be at most 128 characters and contain no control characters",
+        ));
+    }
+    let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    Ok((!normalized.is_empty()).then_some(normalized))
+}
+
+fn conditional_json_response<T: Serialize>(value: T, headers: &HeaderMap) -> Response {
+    let serialized = serde_json::to_vec(&value).unwrap_or_default();
+    let etag = format!("W/\"{}\"", hex::encode(Sha256::digest(serialized)));
+    let matches = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').map(str::trim).any(|candidate| {
+                candidate == "*"
+                    || candidate.trim_start_matches("W/") == etag.trim_start_matches("W/")
+            })
+        });
+    let etag = HeaderValue::from_str(&etag).expect("generated ETag is a valid header value");
+    if matches {
+        (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response()
+    } else {
+        (StatusCode::OK, [(header::ETAG, etag)], Json(value)).into_response()
+    }
 }
 
 /// `GET /bounties/assignee/{address}`
@@ -251,7 +299,7 @@ pub async fn list_bounties_by_assignee(
 /// alphabet. This is not a full checksum validation — it only rejects
 /// inputs malformed enough that querying the store for them can never be
 /// meaningful.
-fn is_syntactically_valid_address(address: &str) -> bool {
+pub(crate) fn is_syntactically_valid_address(address: &str) -> bool {
     address.len() == 56
         && matches!(address.as_bytes().first(), Some(b'G') | Some(b'C'))
         && address
@@ -263,12 +311,8 @@ fn is_syntactically_valid_address(address: &str) -> bool {
 ///
 /// Server-Sent Events channel that broadcasts a bounty ID whenever a bounty's
 /// state changes (see `claim_bounty`). Clients subscribe once and receive
-/// incremental push notifications instead of polling. Event name is
-/// `bounty_updated`, payload `{"bountyId":"<id>"}`. Implements issue #482.
-///
-/// Concurrent connections are capped per client IP and globally (#1118, see
-/// `sse_limit`). Over a cap the request gets `429` with `Retry-After`. The
-/// slot is freed when the client disconnects and the stream is dropped.
+/// incremental push notifications instead of polling. State changes use the
+/// `bounty_updated` event; deadline reminders use `deadline_approaching`.
 #[utoipa::path(
     get,
     path = "/bounties/stream",
@@ -296,16 +340,17 @@ pub async fn bounty_stream(
     };
 
     let rx = state.bounty_broadcast.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(move |result| {
-        // The closure owns the permit, so the slot lives exactly as long as
-        // the stream and is freed when the client disconnects.
-        let _permit = &permit;
-        result.ok().map(|bounty_id| {
-            Ok::<_, Infallible>(
-                Event::default()
-                    .event("bounty_updated")
-                    .data(format!(r#"{{"bountyId":"{}"}}"#, bounty_id)),
-            )
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        result.ok().map(|message| {
+            let event = decode_bounty_event(&message);
+            let sse_event = if event.name == "deadline_approaching" {
+                "deadline_approaching"
+            } else {
+                "bounty_updated"
+            };
+            Ok(Event::default()
+                .event(sse_event)
+                .data(serde_json::json!({"bountyId": event.bounty_id}).to_string()))
         })
     });
 
@@ -326,6 +371,7 @@ const SSE_RETRY_AFTER_SECS: &str = "5";
     path = "/bounties/{id}/claim",
     params(
         ("id" = String, Path, description = "Bounty identifier"),
+        ("If-None-Match" = Option<String>, Header, description = "Return 304 when the bounty matches this ETag"),
     ),
     responses(
         (status = 200, description = "Bounty claimed", body = ClaimResponse),
@@ -337,7 +383,9 @@ pub async fn claim_bounty(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let _ = state.bounty_broadcast.send(id.clone());
+    let _ = state
+        .bounty_broadcast
+        .send(crate::events::encode_bounty_event("bounty_claimed", &id));
 
     Json(ClaimResponse {
         id,
@@ -361,6 +409,7 @@ pub struct ClaimResponse {
     ),
     responses(
         (status = 200, description = "Bounty found", body = Bounty),
+        (status = 304, description = "The bounty has not changed"),
         (status = 404, description = "Bounty not found", body = crate::routes::tx::AppError),
         (status = 500, description = "Internal server error", body = crate::routes::tx::AppError),
     ),
@@ -369,9 +418,10 @@ pub struct ClaimResponse {
 pub async fn get_bounty_route(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<Bounty>, (StatusCode, Json<crate::routes::tx::AppError>)> {
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, Json<crate::routes::tx::AppError>)> {
     if let Some(bounty) = crate::db::get_bounty(&state.db, &id) {
-        Ok(Json(bounty))
+        Ok(conditional_json_response(bounty, &headers))
     } else {
         Err(crate::routes::tx::AppError::not_found("bounty not found"))
     }
@@ -381,6 +431,7 @@ pub async fn get_bounty_route(
 mod tests {
     use super::*;
     use crate::db::{acquire_db, new_shared_db, new_shared_idempotency_store, Bounty};
+    use serde::de::DeserializeOwned;
 
     fn test_state() -> Arc<AppState> {
         Arc::new(AppState {
@@ -393,6 +444,13 @@ mod tests {
             webhook_guard: Default::default(),
             sse_limiter: Default::default(),
         })
+    }
+
+    async fn response_json<T: DeserializeOwned>(response: Response) -> T {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
     }
 
     /// Seed `count` bounties into `state`'s store so a page can actually be
@@ -577,23 +635,27 @@ mod tests {
         seed_bounty(&state, "b", 10, Some(now + chrono::Duration::days(2)), now);
         seed_bounty(&state, "c", 20, Some(now + chrono::Duration::days(1)), now);
 
-        let Json(page) = list_bounties(
+        let response = list_bounties(
             State(state.clone()),
             Query(params(Some(BountySortField::Reward), Some(SortOrder::Asc))),
+            HeaderMap::new(),
         )
         .await
         .unwrap();
+        let page: BountyPage = response_json(response).await;
         assert_eq!(ids(&page), ["b", "c", "a"]);
 
-        let Json(page) = list_bounties(
+        let response = list_bounties(
             State(state),
             Query(params(
                 Some(BountySortField::Deadline),
                 Some(SortOrder::Asc),
             )),
+            HeaderMap::new(),
         )
         .await
         .unwrap();
+        let page: BountyPage = response_json(response).await;
         // Bounties without a deadline trail those that have one.
         assert_eq!(ids(&page), ["c", "b", "a"]);
     }
@@ -604,7 +666,7 @@ mod tests {
         let mut p = params(Some(BountySortField::Reward), None);
         p.cursor = Some(Utc::now());
 
-        let (status, _) = list_bounties(State(state), Query(p))
+        let (status, _) = list_bounties(State(state), Query(p), HeaderMap::new())
             .await
             .expect_err("cursor + reward sort must be rejected");
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -636,12 +698,15 @@ mod tests {
         let mut p = params(None, None);
         p.status = Some("open".to_string());
         p.tag = Some("rust".to_string());
-        let Json(page) = list_bounties(State(state.clone()), Query(p)).await.unwrap();
+        let response = list_bounties(State(state.clone()), Query(p), HeaderMap::new())
+            .await
+            .unwrap();
+        let page: BountyPage = response_json(response).await;
         assert_eq!(ids(&page), ["open-rust"]);
 
         let mut p = params(None, None);
         p.status = Some("bogus".to_string());
-        let (status, _) = list_bounties(State(state), Query(p))
+        let (status, _) = list_bounties(State(state), Query(p), HeaderMap::new())
             .await
             .expect_err("unknown status must be rejected");
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -652,9 +717,10 @@ mod tests {
         let state = test_state();
         seed_bounties(&state, 1);
 
-        let result = get_bounty_route(State(state), Path("0".to_string())).await;
+        let result = get_bounty_route(State(state), Path("0".to_string()), HeaderMap::new()).await;
 
-        let Json(bounty) = result.expect("must return bounty");
+        let response = result.expect("must return bounty");
+        let bounty: Bounty = response_json(response).await;
         assert_eq!(bounty.id, "0");
         assert_eq!(bounty.creator, "carol");
     }
@@ -663,7 +729,8 @@ mod tests {
     async fn get_bounty_route_returns_404_if_not_found() {
         let state = test_state();
 
-        let result = get_bounty_route(State(state), Path("999".to_string())).await;
+        let result =
+            get_bounty_route(State(state), Path("999".to_string()), HeaderMap::new()).await;
 
         let (status, Json(body)) = result.expect_err("must return 404");
         assert_eq!(status, StatusCode::NOT_FOUND);

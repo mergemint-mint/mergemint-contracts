@@ -89,17 +89,20 @@
   border-radius: 4px;
   margin-bottom: 8px;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .tx-info {
-  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
 }
 
 .tx-desc {
   margin: 0 0 4px 0;
   font-weight: 500;
+  flex: 1;
 }
 
 .tx-status {
@@ -107,6 +110,7 @@
   padding: 2px 8px;
   border-radius: 2px;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .status-pending {
@@ -124,9 +128,16 @@
   color: #7f1d1d;
 }
 
+/* Row holding the explorer link and expand/collapse button */
+.tx-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .tx-link {
   display: inline-block;
-  margin-left: 12px;
   color: #3b82f6;
   text-decoration: none;
   font-size: 12px;
@@ -136,8 +147,106 @@
   text-decoration: underline;
 }
 
+/* Expand / collapse trigger */
+.tx-expand-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary, #6b7280);
+  font-size: 12px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tx-expand-btn:hover {
+  color: var(--text-primary, #111827);
+}
+
+/* Expanded details panel */
+.tx-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color, #e5e7eb);
+  animation: fadeIn 0.15s ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tx-details {
+    animation: none;
+  }
+}
+
+.tx-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tx-detail-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary, #6b7280);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tx-detail-value {
+  font-size: 13px;
+  word-break: break-all;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-primary, #111827);
+}
+
+.tx-hash-text {
+  font-family: monospace;
+  word-break: break-all;
+}
+
+/* XDR section — scrollable preformatted block */
+.tx-detail-xdr .tx-xdr-value {
+  font-family: monospace;
+  font-size: 11px;
+  background: var(--bg-tertiary, #f3f4f6);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 4px;
+  padding: 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  max-height: 120px;
+  color: var(--text-primary, #111827);
+}
+
 .empty {
   text-align: center;
   color: var(--text-secondary, #6b7280);
   padding: 32px 16px;
+}
+
+/* Responsive: full-width on narrow viewports */
+@media (max-width: 440px) {
+  .tx-history-drawer {
+    width: 100%;
+  }
 }

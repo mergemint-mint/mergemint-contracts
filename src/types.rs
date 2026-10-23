@@ -113,6 +113,10 @@ pub enum DataKey {
     /// Admin-configured minimum `reward_amount` for bounties paid in a given
     /// token. Absent means only the global `MIN_REWARD_AMOUNT` applies.
     MinReward(Address),
+    /// Admin-configured minimum `reward_amount` for bounties paid in a given
+    /// token, keyed by the token address. Absent means only the global
+    /// `MIN_REWARD_AMOUNT` applies.
+    MinRewardAmount(Address),
     /// Address proposed by `transfer_admin`, pending `accept_admin`.
     PendingAdmin,
     /// Address proposed by `transfer_bounty_ownership` to take over a

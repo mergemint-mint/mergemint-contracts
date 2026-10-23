@@ -16,6 +16,7 @@ use crate::db::{
     add_webhook_subscription, delete_webhook_subscription, get_bounty, get_webhook_subscription,
     list_webhook_subscriptions, SharedDb, WebhookSubscription,
 };
+use crate::events::decode_bounty_event;
 use crate::routes::tx::AppState;
 
 pub mod ssrf;
@@ -284,15 +285,21 @@ pub fn start_webhook_dispatcher(
         loop {
             match rx.recv().await {
                 Ok(raw_message) => {
-                    let (event_name, bounty_id) =
-                        if let Some((evt, id)) = raw_message.split_once(':') {
-                            (evt.to_string(), id.to_string())
-                        } else {
-                            ("bounty_updated".to_string(), raw_message)
-                        };
-
-                    let payload = build_bounty_event_payload(&state.db, &event_name, &bounty_id);
-                    let _ = dispatch_event(&state.db, &client, &payload, &retry_config).await;
+                    let event = decode_bounty_event(&raw_message);
+                    let payload =
+                        build_bounty_event_payload(&state.db, &event.name, &event.bounty_id);
+                    for result in
+                        dispatch_event(&state.db, &client, &payload, &retry_config).await
+                    {
+                        if let Err(error) = result {
+                            tracing::error!(
+                                event = %event.name,
+                                bounty_id = %event.bounty_id,
+                                %error,
+                                "webhook delivery failed"
+                            );
+                        }
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     tracing::warn!("Webhook dispatcher lagged behind by {missed} events");

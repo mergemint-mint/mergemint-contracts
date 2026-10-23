@@ -17,16 +17,16 @@ jobs:
           - contracts/Cargo.toml
           - backend/Cargo.toml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: EmbarkStudios/cargo-deny-action@v1
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: ${{ matrix.manifest }}
           log-level: warn
 
       - name: Comment on PR if licenses fail
         if: failure() && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             github.rest.issues.createComment({

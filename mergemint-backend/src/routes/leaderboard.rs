@@ -9,6 +9,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -30,6 +31,9 @@ const MAX_LIST_LIMIT: i64 = 100;
 
 /// Cache expiry time in seconds
 const CACHE_EXPIRY_SECS: u64 = 60;
+static CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 
 // ── In-memory cache ──────────────────────────────────────────────────────────────
 
@@ -38,6 +42,7 @@ const CACHE_EXPIRY_SECS: u64 = 60;
 pub struct CachedLeaderboard {
     pub data: LeaderboardPage,
     pub expires_at: Instant,
+    generation: u64,
 }
 
 /// Shared, thread-safe leaderboard cache
@@ -46,6 +51,26 @@ pub type LeaderboardCache = Arc<RwLock<Option<CachedLeaderboard>>>;
 /// Create a new, empty leaderboard cache
 pub fn new_leaderboard_cache() -> LeaderboardCache {
     Arc::new(RwLock::new(None))
+}
+
+/// Invalidate cached rankings after an indexed reward or reputation event.
+pub fn invalidate_leaderboard_cache() {
+    CACHE_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn leaderboard_cache_counts() -> (u64, u64) {
+    (
+        CACHE_HITS.load(Ordering::Relaxed),
+        CACHE_MISSES.load(Ordering::Relaxed),
+    )
+}
+
+fn cache_ttl() -> Duration {
+    let seconds = std::env::var("LEADERBOARD_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(CACHE_EXPIRY_SECS);
+    Duration::from_secs(seconds.clamp(1, 3600))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -85,7 +110,10 @@ pub async fn get_leaderboard_route(
 
     // If cache hit and not expired, return cached value
     if let Some(cached_entry) = cached {
-        if Instant::now() < cached_entry.expires_at {
+        if cached_entry.generation == CACHE_GENERATION.load(Ordering::Relaxed)
+            && Instant::now() < cached_entry.expires_at
+        {
+            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             // Truncate to requested limit if needed
             let mut page = cached_entry.data.clone();
             let limit_usize = usize::try_from(limit).unwrap_or(0);
@@ -94,7 +122,10 @@ pub async fn get_leaderboard_route(
         }
     }
 
+    CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+
     // Cache miss or expired: fetch fresh data from database
+    let generation = CACHE_GENERATION.load(Ordering::Relaxed);
     let page = db_get_leaderboard(&state.db, MAX_LIST_LIMIT);
 
     // Store in cache with expiry time
@@ -107,7 +138,8 @@ pub async fn get_leaderboard_route(
             data: LeaderboardPage {
                 entries: page.entries.clone(),
             },
-            expires_at: Instant::now() + Duration::from_secs(CACHE_EXPIRY_SECS),
+            expires_at: Instant::now() + cache_ttl(),
+            generation,
         });
     }
 

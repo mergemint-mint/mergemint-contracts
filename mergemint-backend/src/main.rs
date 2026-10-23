@@ -93,7 +93,10 @@ use std::time::Duration;
 use axum::{
     body::Body,
     extract::State,
-    http::{header::CONTENT_TYPE, HeaderName, HeaderValue, Method, Request, StatusCode},
+    http::{
+        header::{CONTENT_TYPE, ETAG, IF_NONE_MATCH},
+        HeaderName, HeaderValue, Method, Request, StatusCode,
+    },
     middleware,
     middleware::Next,
     response::{Html, IntoResponse, Response},
@@ -110,7 +113,10 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 use utoipa::OpenApi;
 
 mod db;
+mod deadline_reminders;
+mod events;
 mod metrics;
+mod notifications;
 mod rate_limit;
 mod routes;
 mod sse_limit;
@@ -131,6 +137,13 @@ use webhooks::{
     create_subscription_route, delete_subscription_route, get_subscription_route,
     list_subscriptions_route, start_webhook_dispatcher, RetryConfig, SsrfPolicy, WebhookClient,
     WebhookTargetGuard,
+};
+use deadline_reminders::{
+    read_deadline_reminder_interval, read_deadline_reminder_lead_time,
+    start_deadline_reminder_job,
+};
+use notifications::{
+    create_email_subscription, start_email_notifier, unsubscribe_email, verify_email,
 };
 
 /// Maximum allowed request body size (1 MiB).
@@ -174,7 +187,11 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
         routes::bounties::claim_bounty,
         routes::bounties::bounty_stream,
         routes::leaderboard::get_leaderboard_route,
+        routes::stats::get_stats_route,
         routes::tx::query_audit_logs,
+        notifications::create_email_subscription,
+        notifications::verify_email,
+        notifications::unsubscribe_email,
         webhooks::list_subscriptions_route,
         webhooks::get_subscription_route,
     ),
@@ -189,9 +206,15 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
         db::AuditLog,
         db::LeaderboardEntry,
         db::LeaderboardPage,
+        db::StatsResponse,
+        db::TokenTotal,
         db::WebhookSubscription,
+        notifications::CreateEmailSubscriptionRequest,
     )),
-    tags((name = "bounties", description = "Bounty listing and live updates"))
+    tags(
+        (name = "bounties", description = "Bounty listing and live updates"),
+        (name = "notifications", description = "Email notification subscriptions")
+    )
 )]
 struct ApiDoc;
 
@@ -277,6 +300,12 @@ async fn main() {
         .expect("failed to build webhook HTTP client");
     let _webhook_dispatcher =
         start_webhook_dispatcher(state.clone(), webhook_client, RetryConfig::default());
+    let _email_notifier = start_email_notifier(state.clone());
+    let _deadline_reminder_job = start_deadline_reminder_job(
+        state.clone(),
+        read_deadline_reminder_lead_time(),
+        read_deadline_reminder_interval(),
+    );
 
     let metrics = Arc::new(Metrics::new().with_sse_limiter(sse_limiter));
 
@@ -295,6 +324,7 @@ async fn main() {
             get(list_bounties_by_assignee),
         )
         .route("/leaderboard", get(get_leaderboard_route))
+        .route("/stats", get(routes::stats::get_stats_route))
         // ── Bounty push channel (#482) ─────────────────────────────────────
         .route("/bounties/:id/claim", post(claim_bounty))
         .route("/bounties/stream", get(bounty_stream))
@@ -306,6 +336,9 @@ async fn main() {
             "/webhooks/subscriptions/:id",
             get(get_subscription_route).delete(delete_subscription_route),
         )
+        .route("/notifications/subscriptions", post(create_email_subscription))
+        .route("/notifications/verify", get(verify_email))
+        .route("/notifications/unsubscribe", get(unsubscribe_email))
         .with_state(state)
         .merge(metrics_router(metrics.clone()))
         // Timeout wraps the handler stack, while metrics remains outermost so
@@ -475,7 +508,8 @@ fn cors_layer() -> CorsLayer {
 
     CorsLayer::new()
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers([CONTENT_TYPE])
+        .allow_headers([CONTENT_TYPE, IF_NONE_MATCH])
+        .expose_headers([ETAG])
         .allow_origin(AllowOrigin::list(allowed))
 }
 
@@ -639,6 +673,7 @@ mod tests {
             "/bounties/assignee/{address}",
             "/admin/audit-logs",
             "/leaderboard",
+            "/stats",
             "/webhooks/subscriptions",
             "/webhooks/subscriptions/{id}",
         ] {
@@ -733,6 +768,7 @@ mod tests {
                 get(list_bounties_by_assignee),
             )
             .route("/leaderboard", get(get_leaderboard_route))
+            .route("/stats", get(routes::stats::get_stats_route))
             .route("/webhooks/subscriptions", get(list_subscriptions_route))
             .route("/webhooks/subscriptions/:id", get(get_subscription_route))
             .with_state(state);
@@ -745,6 +781,7 @@ mod tests {
             ("/bounties/bounty-1", "/bounties/{id}"),
             (assignee_uri.as_str(), "/bounties/assignee/{address}"),
             ("/leaderboard", "/leaderboard"),
+            ("/stats", "/stats"),
             ("/webhooks/subscriptions", "/webhooks/subscriptions"),
             (
                 "/webhooks/subscriptions/sub-1",

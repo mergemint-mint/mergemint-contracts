@@ -17,6 +17,7 @@ taken from the handler code and unit tests instead. Those are marked
 - [Idempotency keys](#idempotency-keys)
 - Routes:
   [`GET /bounties`](#get-bounties) ·
+  [`GET /stats`](#get-stats) ·
   [`GET /bounties/assignee/:address`](#get-bountiesassigneeaddress) ·
   [`POST /bounties/:id/claim`](#post-bountiesidclaim) ·
   [`GET /bounties/stream`](#get-bountiesstream) ·
@@ -39,6 +40,8 @@ CORS_ALLOWED_ORIGINS=http://localhost:5173 cargo run
 | `CORS_ALLOWED_ORIGINS` | Comma-separated list of browser origins allowed to call the API. When empty or unset, no cross-origin browser requests are allowed. |
 | `ALLOWLISTED_REWARD_TOKENS` | Comma-separated reward-token allow-list for create-bounty flows. A warning is logged at startup when it is empty. |
 | `REQUEST_TIMEOUT_SECS` | Positive whole seconds for the global non-streaming request timeout. Default: `30`; invalid values use the default. |
+| `STATS_CACHE_TTL_SECS` | `/stats` cache TTL in seconds. Default: `30`, clamped to `1..=3600`. |
+| `LEADERBOARD_CACHE_TTL_SECS` | Leaderboard cache TTL in seconds. Default: `60`, clamped to `1..=3600`. |
 | `RUST_LOG` | Log filter. Default: `mergemint_backend=info,tower_http=debug,axum::rejection=trace`. |
 
 The server always binds `0.0.0.0:8080`. The examples below use:
@@ -82,7 +85,7 @@ excluded from the request timeout so streams can remain open.
 | Max request body | 1 MiB (`MAX_BODY_BYTES`) | `413 Payload Too Large` |
 | Request timeout | 30 s by default (`REQUEST_TIMEOUT_SECS`) | `504 Gateway Timeout` with the standard `{ "code": 504, "message": "request timed out" }` body. `/bounties/stream` is excluded. |
 | Correlation ID | `x-request-id` | Echoed back when you send one, otherwise a UUID v4 is generated. It is included in every server log line for the request. |
-| CORS | `CORS_ALLOWED_ORIGINS` | Methods `GET, POST`. Allowed request headers: **`content-type` only**. |
+| CORS | `CORS_ALLOWED_ORIGINS` | Methods `GET, POST`. Allowed request headers: `content-type`, `if-none-match`; response header `etag` is exposed. |
 
 ### `GET /admin/audit-logs`
 
@@ -229,11 +232,13 @@ Lists bounties with cursor pagination, newest-first by default.
 | `cursor` | RFC 3339 timestamp | none | Returns rows with `created_at` strictly older than the cursor. Pass the previous page's `next_cursor`. URL-encode `+` offsets as `%2B`. Only supported with the default ordering (`sort=created&order=desc`) — any other `sort`/`order` combined with `cursor` returns 400. |
 | `sort` | `reward` \| `deadline` \| `created` | `created` | Whitelisted column to order by. Any other value is rejected with 400. |
 | `order` | `asc` \| `desc` | `desc` | Sort direction. Any other value is rejected with 400. |
+| `q` | string | none | Case-insensitive terms matched against title and description. Terms are all required; input is limited to 128 characters. |
 
 ```bash
 curl -i "$BASE/bounties?limit=5"
 curl -i "$BASE/bounties?sort=reward&order=desc"
 curl -i "$BASE/bounties?sort=deadline&order=asc"
+curl -i "$BASE/bounties?q=wallet+integration"
 ```
 
 ```http
@@ -271,6 +276,16 @@ curl -i "$BASE/bounties?cursor=notadate"
 curl -i "$BASE/bounties?sort=reward&cursor=2026-09-01T00:00:00Z"
 # HTTP/1.1 400 Bad Request
 ```
+
+List and detail responses include a weak `ETag`. Send it as `If-None-Match` on
+the next request to receive `304 Not Modified` when the serialized response is
+unchanged.
+
+### `GET /stats`
+
+Returns `open_bounties`, `active_contributors`, and `total_paid_out`. Payout
+amounts are grouped by reward-token contract address and are never combined
+across tokens. Results are cached for 30 seconds by default.
 
 ---
 
