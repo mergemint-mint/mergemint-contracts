@@ -1,7 +1,7 @@
 # Versioning Policy
 
 This project follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
-All notable changes are recorded in [CHANGELOG.md](../CHANGELOG.md).
+All notable changes are recorded in [CHANGELOG.md](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CHANGELOG.md).
 
 ## Version Format
 
@@ -81,9 +81,9 @@ rules above. Do not edit these versions by hand.
 
 Releases are cut by [release-please](https://github.com/googleapis/release-please)
 from [Conventional Commits](https://www.conventionalcommits.org/) on `main`. The
-workflow is [`.github/workflows/release-please.yml`](../.github/workflows/release-please.yml);
-its configuration lives in [`release-please-config.json`](../release-please-config.json)
-and the current versions in [`.release-please-manifest.json`](../.release-please-manifest.json).
+workflow is [`.github/workflows/release-please.yml`](https://github.com/mergemint-mint/mergemint-contracts/blob/main/.github/workflows/release-please.yml);
+its configuration lives in [`release-please-config.json`](https://github.com/mergemint-mint/mergemint-contracts/blob/main/release-please-config.json)
+and the current versions in [`.release-please-manifest.json`](https://github.com/mergemint-mint/mergemint-contracts/blob/main/.release-please-manifest.json).
 
 ### Components
 
@@ -91,8 +91,8 @@ Each component has its own version, changelog, tag and release PR:
 
 | Component  | Path                 | Release type | Tag               | Changelog                                                             |
 | ---------- | -------------------- | ------------ | ----------------- | --------------------------------------------------------------------- |
-| `contract` | `.` (root crate)     | `rust`       | `contract-vX.Y.Z` | [`CHANGELOG.md`](../CHANGELOG.md)                                     |
-| `backend`  | `mergemint-backend/` | `rust`       | `backend-vX.Y.Z`  | [`mergemint-backend/CHANGELOG.md`](../mergemint-backend/CHANGELOG.md) |
+| `contract` | `.` (root crate)     | `rust`       | `contract-vX.Y.Z` | [`CHANGELOG.md`](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CHANGELOG.md)                                     |
+| `backend`  | `mergemint-backend/` | `rust`       | `backend-vX.Y.Z`  | [`mergemint-backend/CHANGELOG.md`](https://github.com/mergemint-mint/mergemint-contracts/blob/main/mergemint-backend/CHANGELOG.md) |
 | `sdk`      | `sdk/`               | `node`       | `sdk-vX.Y.Z`      | `sdk/CHANGELOG.md` (created on the first SDK release)                 |
 
 A commit belongs to a component when it touches files under that component's path.
@@ -111,7 +111,7 @@ frontends, `docs/` and `.github/`.
 4. release-please tags the merge commit (`<component>-vX.Y.Z`) and creates a GitHub
    release with the same notes.
 5. For an `sdk` release, the workflow then calls
-   [`sdk-publish.yml`](../.github/workflows/sdk-publish.yml), which checks the tag
+   [`sdk-publish.yml`](https://github.com/mergemint-mint/mergemint-contracts/blob/main/.github/workflows/sdk-publish.yml), which checks the tag
    matches `sdk/package.json` and publishes `@mergemint/sdk` to npm. Pushing an
    `sdk-v*` tag by hand still triggers the same publish.
 
@@ -168,6 +168,6 @@ release PR's changelog entry and delete the `[Unreleased]` section.
 ## Current Version
 
 The current version of each component is recorded in
-[`.release-please-manifest.json`](../.release-please-manifest.json). The value returned
+[`.release-please-manifest.json`](https://github.com/mergemint-mint/mergemint-contracts/blob/main/.release-please-manifest.json). The value returned
 by the on-chain `version()` query must always match the latest `contract` release in
-[CHANGELOG.md](../CHANGELOG.md); release-please keeps the two in step.
+[CHANGELOG.md](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CHANGELOG.md); release-please keeps the two in step.

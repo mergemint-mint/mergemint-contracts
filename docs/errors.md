@@ -67,7 +67,7 @@ Soroban contracts use numeric error codes mapped via the `#[contracterror]` macr
 - **Definition:** The funding account lacks sufficient tokens for the required transfer.
 - **Trigger Points:**
   - `create_bounty`: Creator lacks enough SEP-41 reward tokens to fund escrow.
-  - `top_up`: Funder does not hold the specified additional amount.
+  - `sponsor_bounty` ([top-up](glossary.md#top-up)): Sponsor does not hold the specified additional amount.
 - **Resolution:** Prompt the user to deposit additional tokens into their Stellar account.
 
 ### Code 6: `InvalidState`
@@ -76,7 +76,7 @@ Soroban contracts use numeric error codes mapped via the `#[contracterror]` macr
   - Claiming a bounty whose status is not `Open`.
   - Completing a bounty whose status is not `InProgress`.
   - Approving a bounty that has already been approved, cancelled, or is under active dispute.
-  - Calling `top_up` after a bounty has already expired or completed.
+  - Calling `sponsor_bounty` ([top-up](glossary.md#top-up)) after a bounty has already expired or completed.
 - **Resolution:** Check `get_bounty(id).status` prior to presenting write actions in the UI.
 
 ### Code 7: `Overflow`

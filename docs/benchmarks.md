@@ -131,10 +131,10 @@ Archiving a finished bounty also removes its `Bounty(id)` and `BountyMeta(id)` p
 ## SSE stream load (Issue #1120)
 
 Load baseline for `GET /bounties/stream`, measured with
-[`scripts/k6/sse.js`](../scripts/k6/sse.js). The scenario ramps up long-lived
+[`scripts/k6/sse.js`](https://github.com/mergemint-mint/mergemint-contracts/blob/main/scripts/k6/sse.js). The scenario ramps up long-lived
 SSE subscribers, publishes `bounty_updated` events at a fixed rate, and
 records how long each event takes to reach each client. Setup and metric
-definitions are in [`scripts/k6/README.md`](../scripts/k6/README.md#sse-scenarios-ssejs-sse-limitjs).
+definitions are in [`scripts/k6/README.md`](https://github.com/mergemint-mint/mergemint-contracts/blob/main/scripts/k6/README.md#sse-scenarios-ssejs-sse-limitjs).
 
 **Environment:** 2026-10-20, branch `security/webhook-ssrf-sse-limits-gitleaks-k6`.
 Release build of `mergemint-backend` run directly (`cargo run --release`), k6 v2.3.0 + xk6-sse v0.2.0. Backend and

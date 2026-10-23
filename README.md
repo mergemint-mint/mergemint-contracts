@@ -122,6 +122,10 @@ snapshots.
 
 ## Documentation
 
+The docs are published at <https://mergemint-mint.github.io/mergemint-contracts/>, with search and
+navigation. They are built from [`docs/`](docs/) with mdBook (`mdbook serve` to preview locally); the
+site's sidebar ([docs/SUMMARY.md](docs/SUMMARY.md)) mirrors this table, so update both together.
+
 | Topic                                    | Doc                                                                        |
 | ---------------------------------------- | -------------------------------------------------------------------------- |
 | Getting started on testnet               | [docs/getting-started.md](docs/getting-started.md)                         |
@@ -142,6 +146,7 @@ snapshots.
 | Backend load testing (k6)                | [scripts/k6/README.md](scripts/k6/README.md)                               |
 | Glossary                                 | [docs/glossary.md](docs/glossary.md)                                       |
 | Contributor FAQ                          | [docs/contributor-faq.md](docs/contributor-faq.md)                         |
+| Glossary of MergeMint terms              | [docs/glossary.md](docs/glossary.md)                                       |
 | SDK usage                                | [sdk/README.md](sdk/README.md)                                             |
 | Changelog (contract interface)           | [CHANGELOG.md](CHANGELOG.md)                                               |
 | Backend changelog                        | [mergemint-backend/CHANGELOG.md](mergemint-backend/CHANGELOG.md)           |

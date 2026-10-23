@@ -84,6 +84,14 @@
 // Kubernetes or Docker Compose can use this to avoid routing traffic to an
 // instance whose database connection is broken.  `/health` stays cheap and
 // database-independent so it remains a pure liveness check.
+//
+// ## Security headers (#1115)
+//
+// The outermost layer, `security_headers`, adds `X-Content-Type-Options`,
+// `Referrer-Policy` and `X-Frame-Options` to every response (JSON, SSE, CORS
+// preflights and errors from inner layers). `Strict-Transport-Security` is
+// only sent when `HSTS_ENABLED=true`, i.e. when the service is reached over
+// HTTPS. See `security_headers.rs` and docs/security.md.
 
 use sqlx::Row;
 use std::io::{Read, Write};
@@ -147,6 +155,7 @@ use routes::reputation::get_reputation_history;
 use routes::tx::{
     new_shared_rate_limiter, query_audit_logs, resolve_dispute, self_claim, AppState,
 };
+use security_headers::{security_headers, SecurityHeadersConfig};
 use webhooks::{
     create_subscription_route, delete_subscription_route, get_subscription_route,
     list_failed_webhooks_route, list_subscriptions_route, replay_webhook_route,
@@ -607,20 +616,16 @@ async fn main() {
         // ── Tracing ────────────────────────────────────────────────────────
         // ── CORS ───────────────────────────────────────────────────────────
         .layer(cors_layer())
+        // ── Body size limit (#476) ─────────────────────────────────────────
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         // ── Security headers (#1115) ───────────────────────────────────────
         //
-        // Adds X-Content-Type-Options, X-Frame-Options, Referrer-Policy,
-        // X-XSS-Protection, and Permissions-Policy to every response.
-        // Strict-Transport-Security is only emitted when HSTS_ENABLED=true
-        // (i.e. the service is confirmed to be behind HTTPS).
-        // Placed inside the CORS layer so CORS preflight responses also carry
-        // the headers, but the CORS headers themselves are not overwritten.
+        // Outermost so every response gets the headers, including 413s from
+        // the body limit and CORS preflights.
         .layer(middleware::from_fn_with_state(
-            security_headers::hsts_enabled(),
-            security_headers::security_headers_middleware,
-        ))
-        // ── Body size limit (#476) ─────────────────────────────────────────
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
+            SecurityHeadersConfig::from_env(),
+            security_headers,
+        ));
 
     let listener = tokio::net::TcpListener::bind(LISTEN_ADDR)
         .await

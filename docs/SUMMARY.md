@@ -1,54 +1,57 @@
 # Summary
 
-[Introduction](../README.md)
+[Introduction](README.md)
 
----
+# Documentation
 
-# Getting Started
+<!-- Mirrors the "Documentation" table in README.md. Keep the two in sync. -->
 
 - [Getting started on testnet](getting-started.md)
 - [Stellar CLI troubleshooting](troubleshooting.md)
-- [Tutorials: Your first bounty](tutorials/first-bounty.md)
-
-# Architecture & Design
-
 - [Contract architecture and storage layout](architecture.md)
 - [Event schema](event-schema.md)
 - [Horizon / RPC polling in the indexer](horizon-polling.md)
 - [Integrations](integrations.md)
-- [Passkey authentication](passkey-auth.md)
-- [Shared type generation](shared-type-generation.md)
-- [`create_bounty` parameter design](create-bounty-params-design.md)
-- [Batch and parallel contributor refresh](batch-refresh.md)
-- [Bounty refresh](bounty-refresh.md)
-
-# Security
-
 - [Security model](security.md)
-- [Threat model](threat-model.md)
 - [Pause and upgrade strategy](pause-upgrade-strategy.md)
 - [Escrow implementation plan](escrow-implementation-plan.md)
-
-# Operations
-
-- [Runbook](runbook.md)
+- [`create_bounty` parameter design](create-bounty-params-design.md)
+- [Passkey authentication](passkey-auth.md)
+- [Shared type generation](shared-type-generation.md)
 - [Migrations](migration.md)
 - [Benchmarks](benchmarks.md)
-- [Versioning](versioning.md)
-- [Webhooks](webhooks.md)
-
-# Reference
-
-- [Contract reference](contract-reference.md)
-- [Error codes](errors.md)
-- [Glossary](glossary.md)
-- [SDK cookbook](sdk-cookbook.md)
-
-# Contributing
-
+- [Batch and parallel contributor refresh](batch-refresh.md)
 - [Contributor FAQ](contributor-faq.md)
-- [Testing guide](testing.md)
+- [Glossary](glossary.md)
+- [Elsewhere in the repository](repository-docs.md)
 
----
+# More docs
 
-[Changelog](../CHANGELOG.md)
+- [Tutorial: your first bounty](tutorials/first-bounty.md)
+- [Contract function reference](contract-reference.md)
+- [Error code reference](errors.md)
+- [Threat model (STRIDE)](threat-model.md)
+- [Incident runbook](runbook.md)
+- [Testing](testing.md)
+- [Versioning policy](versioning.md)
+- [Webhooks](webhooks.md)
+- [SDK cookbook](sdk-cookbook.md)
+- [Bounty refresh](bounty-refresh.md)
+- [Milestone tracker implementation](milestone-tracker-implementation.md)
+- [Milestone tracker visual reference](milestone-tracker-visual-reference.md)
+- [ADR-0001: Canonical frontend directory](adr-0001-frontend-canonical-directory.md)
+- [Change notes](changes/lifecycle-parity.md)
+  - [Solidity / Soroban lifecycle parity](changes/lifecycle-parity.md)
+  - [Access control matrix](changes/access-control-matrix.md)
+  - [Gas regression tests](changes/gas-regression-tests.md)
+  - [IBountyManager NatSpec](changes/ibounty-manager-natspec.md)
+- [Issue notes](issue-notes/validation-parity.md)
+  - [Validation parity](issue-notes/validation-parity.md)
+  - [Dark mode audit](issue-notes/dark-mode-audit.md)
+  - [E2E dispute flow](issue-notes/e2e-dispute-flow.md)
+  - [`shortenAddress` formats](issue-notes/shorten-address-contract-format.md)
+- [PR notes](pr-notes/dual-contract-rationale.md)
+  - [Dual-contract rationale](pr-notes/dual-contract-rationale.md)
+  - [Backend fmt diff clarity](pr-notes/backend-fmt-diff-clarity.md)
+  - [MockBountyManager invalid status](pr-notes/mock-bounty-manager-invalid-status.md)
+  - [Solidity static analysis CI](pr-notes/solidity-static-analysis-ci.md)

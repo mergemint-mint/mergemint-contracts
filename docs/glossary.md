@@ -1,181 +1,194 @@
 # Glossary
 
-Definitions for terms used across the MergeMint contract, backend, SDK and
-documentation. Terms are listed alphabetically; each heading doubles as an
-HTML anchor so other docs can link directly to a definition (e.g.
-`[assignee](glossary.md#assignee)`).
+Terms used across the MergeMint docs, defined by what the contract actually
+does. When a doc and this page disagree, the code in `src/contract/` wins and
+this page should be fixed. See the [contract reference](contract-reference.md)
+for full function signatures and errors.
+
+[Admin](#admin) · [Appeal window](#appeal-window) ·
+[Approval threshold](#approval-threshold) · [Arbitrator](#arbitrator) ·
+[Assignee](#assignee) · [Bounty](#bounty) · [Claim](#claim) ·
+[Claim window](#claim-window) · [Contributor](#contributor) ·
+[Creator](#creator) · [Deadline](#deadline) · [Dispute](#dispute) ·
+[Milestone](#milestone) · [Reputation](#reputation) ·
+[Reputation penalty](#reputation-penalty) ·
+[Required verifiers](#required-verifiers) · [Reward token](#reward-token) ·
+[Share](#share) · [Sponsor](#sponsor) · [Stale claim](#stale-claim) ·
+[Status](#status) · [Submission](#submission) · [Top-up](#top-up) ·
+[Verifier](#verifier)
 
 ---
 
-## Arbitrator
+### Admin
 
-An address authorised to resolve a [dispute](#dispute) by calling
-`resolve_dispute`. The arbitrator decides whether the bounty reward should
-be paid to the [assignee](#assignee) or refunded to the [creator](#creator).
+The contract-wide administrator. It is set once with `init_admin`, can be
+handed over with the two-step `transfer_admin` / `accept_admin`, and is the
+only address allowed to change contract settings such as the
+[claim window](#claim-window), [reputation penalty](#reputation-penalty),
+[appeal window](#appeal-window) and reward-token allowlist. The admin has
+**no** say in individual bounties: it is not the [arbitrator](#arbitrator).
 
-After the arbitrator records their decision the contract stores a
-[`PendingResolution`](../src/types.rs) entry. The resolution is not
-finalised immediately: it sits behind an [appeal window](#appeal-window)
-so the losing party has an opportunity to call `appeal_dispute`.
+### Appeal window
 
-See [`docs/security.md`](security.md) for threat-model notes on arbitrator
-selection and dispute collusion.
+The number of ledgers after an [arbitrator](#arbitrator)'s decision during
+which the creator or an assignee may call `appeal_dispute`. Set by the
+[admin](#admin) with `set_appeal_window`. With the default of `0`,
+`resolve_dispute` settles immediately. Otherwise the decision is stored and
+only takes effect when someone calls `finalize_dispute` after the window. Each
+dispute can be appealed once.
 
----
+### Approval threshold
 
-## Appeal window
+How many [required verifiers](#required-verifiers) must call
+`approve_completion` before a bounty completes. Only used when
+`required_verifiers` is set. `0` is treated as `1`, and it can never exceed the
+number of required verifiers.
 
-A configurable number of ledgers — set by the admin via `set_appeal_window`
-and stored as `DataKey::AppealWindow` — that must elapse after an
-[arbitrator](#arbitrator) records their decision before `finalize_dispute`
-can execute the payout. Setting the appeal window to `0` restores
-pre-appeal, immediate-finalisation behaviour.
+### Arbitrator
 
----
+The address that settles a [dispute](#dispute) with `resolve_dispute`. The
+contract requires the arbitrator to be the bounty's [creator](#creator); there
+is no independent arbitrator or admin role. The arbitrator must also meet the
+bounty's `min_reputation`. Resolving with `complete` pays the assignees from
+the arbitrator's own wallet; resolving with `cancel` refunds the creator from
+the contract.
 
-## Assignee
+### Assignee
 
-A contributor address listed in `Bounty.assignees`. An assignee is created
-when a [contributor](#contributor) calls `claim_bounty` and is accepted onto
-the bounty. Each entry in the `Vec<(Address, u32)>` is a pair of the
-assignee's address and the ledger sequence at which they claimed.
+A [contributor](#contributor) who has [claimed](#claim) a bounty and is
+listed in `Bounty.assignees`, together with their [share](#share). A bounty
+can have up to `max_assignees` assignees. An assignee can never be the
+creator, and can never act as the verifier of the same bounty.
 
-A bounty can have at most `max_assignees` concurrent assignees. When the
-bounty completes, each assignee receives a proportional share of the reward
-and their reputation score is incremented.
+### Bounty
 
----
+A unit of paid work recorded on-chain: a reward amount in a
+[reward token](#reward-token), a [creator](#creator), its
+[assignees](#assignee), a [status](#status) and optional
+[milestones](#milestone), [deadline](#deadline) and
+[required verifiers](#required-verifiers). It is identified by a `BountyId`
+(32 bytes).
 
-## Bounty
+### Claim
 
-The primary work unit on MergeMint. A `Bounty` struct records the creator,
-reward token and amount, status, deadlines, tags, [milestones](#milestone),
-and [assignees](#assignee). Bounties are stored under `DataKey::Bounty(id)`
-with additional metadata (title, description) in `DataKey::BountyMeta(id)`.
+Calling `claim_bounty` to become an [assignee](#assignee). A claim needs the
+bounty to be `open` (or `in_progress` with free assignee slots), the deadline
+not passed, enough [reputation](#reputation), and no other active claim by the
+same contributor. Unclaiming (`unclaim_bounty`) releases the slot. A claim
+that sits idle too long becomes a [stale claim](#stale-claim).
 
-Bounty lifecycle: `open` → `in_progress` → `submitted` → `completed`
-(or `cancelled` / `disputed`). See [`docs/architecture.md`](architecture.md)
-for the full state machine diagram.
+### Claim window
 
----
+The number of ledgers after the first claim on a bounty before that claim
+counts as a [stale claim](#stale-claim). Defaults to `120960` ledgers (about
+seven days) and can be changed by the [admin](#admin) with `set_claim_window`.
 
-## Claim
+### Contributor
 
-The act of a [contributor](#contributor) calling `claim_bounty` to become
-an [assignee](#assignee). A claim is subject to:
+Any address with a contributor profile (`Contributor`), which stores its
+[reputation](#reputation), `total_earned`, `contribution_count`,
+`active_claims` and optional metadata. A profile is created the first time an
+address claims a bounty, is paid or sets its metadata.
 
-- `min_reputation` — the contributor must meet the bounty's minimum reputation threshold.
-- `claim_cooldown` — a contributor who recently unclaimed the same bounty must wait.
-- `claim_window` — if no progress is submitted within the window, the claim becomes stale and can be released by `release_stale_claim`.
+### Creator
 
----
+The address that called `create_bounty`, also called the bounty owner. It can
+cancel an `open` bounty, extend its deadline, reassign it, edit its tags, and
+is the [arbitrator](#arbitrator) of its disputes. Ownership can be moved with
+`transfer_bounty_ownership` / `accept_bounty_ownership`.
 
-## Claim window
+### Deadline
 
-An admin-configured number of ledgers (`DataKey::ClaimWindow`) after which
-an in-progress claim with no work submission becomes *stale*. Any caller
-can then invoke `release_stale_claim` to free the assignee slot. A
-[reputation penalty](#reputation-penalty) is applied to the assignee whose
-claim is released.
+An optional ledger sequence on a bounty (and optionally on each
+[milestone](#milestone)). After it, the bounty can no longer be claimed, and
+anyone can call `expire_bounty` on an `open` bounty to refund the creator.
 
----
+### Dispute
 
-## Contributor
+A bounty in the `disputed` [status](#status), entered when its creator or an
+assignee calls `raise_dispute`. Either party can attach evidence hashes with
+`add_dispute_evidence`. It ends when the [arbitrator](#arbitrator)'s decision
+is applied, possibly after an [appeal window](#appeal-window).
 
-Any Stellar address that interacts with bounties. A `Contributor` record
-tracks `reputation`, `total_earned`, `contribution_count`, `active_claims`,
-and optional metadata. The record is created lazily on first interaction
-and stored under `DataKey::Contributor(address)`.
+### Milestone
 
----
+An optional staged payout inside a bounty. The milestone rewards must add up
+exactly to the bounty's reward. A [verifier](#verifier) pays one milestone at a
+time with `complete_milestone`, which pays every assignee their
+[share](#share) of it without changing the bounty status. The bounty can only
+be completed once all milestones are completed.
 
-## Creator
+### Reputation
 
-The Stellar address that called `create_bounty`. The creator funds the
-reward (in the no-escrow model, by holding the reward tokens and paying
-them at completion time). The creator can cancel the bounty while it is
-still `open`, and can propose new ownership via
-`transfer_bounty_ownership`.
+A contributor's score (`Contributor.reputation`). It goes up by `10` for each
+payout (milestone or full completion) and down by the
+[reputation penalty](#reputation-penalty) when a
+[stale claim](#stale-claim) is released. It never drops below `0`. Bounties can
+require a minimum reputation (`min_reputation`) to claim. Every change emits a
+`reputation_changed` event with the reason `completion` or `penalty`.
 
----
+### Reputation penalty
 
-## Dispute
+The reputation taken from each assignee when their claim is released by
+`release_stale_claim`. Defaults to `10` and can be changed by the
+[admin](#admin) with `set_reputation_penalty`. It is the only way reputation
+goes down.
 
-A state transition triggered by calling `raise_dispute` on an
-`in_progress` bounty. Once disputed, the bounty enters the `"disputed"`
-status and normal completion is blocked until an [arbitrator](#arbitrator)
-calls `resolve_dispute`.
+### Required verifiers
 
-Evidence hashes can be attached by calling `add_dispute_evidence`; they
-are stored under `DataKey::DisputeEvidence(bounty_id)`.
+An optional allow-list of addresses set at creation. When present, completion
+goes through `approve_completion` and needs the
+[approval threshold](#approval-threshold) to be reached. When absent, any
+single [verifier](#verifier) can complete the bounty.
 
----
+### Reward token
 
-## Escrow
+The SEP-41 token contract a bounty pays in. If the [admin](#admin) has
+allow-listed any token, only allow-listed tokens can be used. A per-token
+minimum reward can also be set.
 
-The planned future model where the contract itself holds the reward tokens
-on behalf of the creator. In the current *no-escrow* model the verifier
-holds the tokens and pushes them directly at completion time. The escrow
-implementation plan is documented in
-[`docs/escrow-implementation-plan.md`](escrow-implementation-plan.md).
+### Share
 
----
+An assignee's portion of the reward, in basis points (`10000` = 100%). The
+reward is split equally between `max_assignees`, and the first claimant gets
+any remainder.
 
-## Milestone
+### Sponsor
 
-An optional staged-payout entry in `Bounty.milestones`. Each `Milestone`
-has a `description`, a `reward` amount (in the same token as the parent
-bounty), a `completed` flag, and an optional per-milestone `deadline`
-ledger sequence. When all milestones are completed the bounty can be
-finalised.
+An address that adds funds to someone else's bounty with `sponsor_bounty`. See
+[top-up](#top-up).
 
-Milestones must be declared at creation time, their deadlines must be
-non-decreasing, and no individual deadline may exceed the parent bounty
-deadline.
+### Stale claim
 
----
+A claim on an `in_progress` bounty that is older than the
+[claim window](#claim-window). Anyone can call `release_stale_claim` on it:
+every assignee loses the [reputation penalty](#reputation-penalty) and their
+active-claim slot, and the bounty goes back to `open`.
 
-## Reputation
+### Status
 
-An unsigned 32-bit score (`Contributor.reputation`) that summarises a
-contributor's track record. Reputation increases by a fixed amount when a
-bounty completes with the contributor as an assignee. It is used as the
-gate for `min_reputation` checks on new bounties and decremented by the
-[reputation penalty](#reputation-penalty) when a stale claim is released.
+Where a bounty is in its lifecycle: `open`, `in_progress`, `submitted`,
+`disputed`, `completed`, `cancelled` or `expired`. See the
+[lifecycle diagram](architecture.md#lifecycle-diagram-mermaid).
 
----
+### Submission
 
-## Reputation penalty
+The work hash an assignee records with `submit_work`. It moves the bounty from
+`in_progress` to `submitted`.
 
-An admin-configured deduction (`DataKey::ReputationPenalty`, a `u32`)
-subtracted from an [assignee's](#assignee) reputation score when their
-stale claim is released by `release_stale_claim`. Defaults to `0` (no
-penalty) until configured by an admin call to `set_reputation_penalty`.
+### Top-up
 
----
+Adding more reward to an existing bounty. On-chain this is `sponsor_bounty`:
+the [sponsor](#sponsor) transfers the tokens into the contract,
+`reward_amount` grows by that amount, and the contribution is recorded so it
+can be refunded if the bounty is cancelled or expires. Top-ups are accepted
+while the bounty is `open`, `in_progress` or `submitted`. The SDK's `topUp`
+helper and some older docs call the entry point `top_up`.
 
-## Sponsor / Top-up
+### Verifier
 
-A third party can add funds to an existing bounty by calling
-`sponsor_bounty`. The contributed `(address, amount)` pairs are stored
-under `DataKey::Sponsors(bounty_id)` and are refunded pro rata if the
-bounty is cancelled or expires.
-
-The action of adding funds to an open bounty is also referred to as a
-**top-up** in the frontend and SDK.
-
----
-
-## Verifier
-
-The Stellar address that calls `complete_bounty` (single-verifier flow) or
-`approve_completion` (multi-verifier flow). In the no-escrow model the
-verifier holds the reward tokens and pushes them to each
-[assignee](#assignee) during completion.
-
-A verifier **cannot** be one of the bounty's assignees; the contract
-enforces this guard to prevent self-verification.
-
-When `Bounty.required_verifiers` is set, only addresses in that list may
-call `approve_completion`, and at least `approval_threshold` approvals
-must accumulate before the bounty auto-completes.
+The address that confirms work and triggers payment, through
+`complete_bounty`, `complete_milestone` or `approve_completion`. Any address
+other than an assignee can be the verifier, unless the bounty has
+[required verifiers](#required-verifiers), in which case only those addresses
+can approve.

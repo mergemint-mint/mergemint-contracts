@@ -1,26 +1,15 @@
-# .github/workflows/docs.yml
-#
-# Build the MergeMint docs with mdBook and deploy them to GitHub Pages.
-#
-# Implements issue #1113 — "mdBook docs and GitHub Pages deployment".
-#
-# Triggers:
-#   - Push to main when docs/, book.toml or this workflow file changes.
-#   - Pull requests touching the same paths (build-only, no deploy).
-#
-# The deploy step runs only on pushes to main (not on PRs). It uses the
-# official mdBook action to install the binary, then the GitHub Pages
-# deploy action to publish the built book.
-#
-# Link-checking: mdBook's built-in linkcheck output backend is enabled in
-# book.toml with `warning-policy = "error"`, so any broken internal link
-# causes the build job to fail.
-
 name: Docs
+
+# Builds the docs/ folder with mdBook (#1113). Every run fails on broken
+# internal links (mdbook-linkcheck). Pushes to main also deploy the site to
+# GitHub Pages; other branches and PRs only build.
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "docs/**"
+      - "fix/**"
     paths:
       - "docs/**"
       - "book.toml"
@@ -30,55 +19,56 @@ on:
       - "docs/**"
       - "book.toml"
       - ".github/workflows/docs.yml"
+  workflow_dispatch:
 
-# Allow only one concurrent deploy; cancel any in-progress run when a new
-# push lands so stale builds never overwrite a newer one.
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
-
-# Required for the GitHub Pages deploy action.
 permissions:
   contents: read
-  pages: write
-  id-token: write
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MDBOOK_VERSION: "0.4.40"
+  MDBOOK_LINKCHECK_VERSION: "0.7.7"
 
 jobs:
-  # --------------------------------------------------------------------------
-  # 1. Build & link-check
-  # --------------------------------------------------------------------------
   build:
-    name: Build
+    name: Build docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Install mdBook
-        uses: peaceiris/actions-mdbook@v2
-        with:
-          mdbook-version: "0.4.40"
+      - name: Install mdBook and mdbook-linkcheck
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          curl -fsSL -o /tmp/linkcheck.zip "https://github.com/Michael-F-Bryan/mdbook-linkcheck/releases/download/v${MDBOOK_LINKCHECK_VERSION}/mdbook-linkcheck.x86_64-unknown-linux-gnu.zip"
+          unzip -o /tmp/linkcheck.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/mdbook" "$HOME/.local/bin/mdbook-linkcheck"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Build book (includes link-check)
+      - name: Build (fails on broken links)
         run: mdbook build
 
-      - name: Upload Pages artefact
-        if: github.ref == 'refs/heads/main'
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: book
+          path: target/book/html
 
-  # --------------------------------------------------------------------------
-  # 2. Deploy to GitHub Pages (main branch only)
-  # --------------------------------------------------------------------------
   deploy:
-    name: Deploy
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy to GitHub Pages
-        id: deploy
+      - id: deployment
         uses: actions/deploy-pages@v4

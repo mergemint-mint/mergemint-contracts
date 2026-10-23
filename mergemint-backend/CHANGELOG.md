@@ -8,6 +8,10 @@ documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en
 ## [Unreleased]
 
 ### Added
+- Security headers on every response: `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer` and `X-Frame-Options: DENY`.
+  `Strict-Transport-Security` is sent only when `HSTS_ENABLED=true`
+  (`HSTS_MAX_AGE_SECS`, `HSTS_INCLUDE_SUBDOMAINS`). (#1115)
 - `GET /api/v1/bounties/assignee/{address}` — paginated list of bounties where
   `address` is recorded as an assignee in the `assignees` join table. Symmetric
   counterpart to the existing `bounties_by_creator` query. (#481)

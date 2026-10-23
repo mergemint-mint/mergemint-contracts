@@ -108,7 +108,8 @@ Contract events emitted for indexer integration.
 - **Reasons** (`reason` symbol):
   - `"completion"` — reward applied when a bounty assignee is paid out on completion
     (including arbitrator-resolved completion)
-  - `"penalty"` — reserved for future penalty paths (e.g. abandoned claims)
+  - `"penalty"` — [reputation penalty](glossary.md#reputation-penalty) applied to each
+    assignee when `release_stale_claim` releases a [stale claim](glossary.md#stale-claim)
   - `"decay"` — reserved for future time-based reputation decay
 - **Purpose**: Let the leaderboard and profile pages show why a contributor's score moved.
   Unlike the bounty-scoped events above, this event is keyed by `contributor_address`

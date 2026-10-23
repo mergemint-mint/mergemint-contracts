@@ -5,7 +5,7 @@
 **Companion docs:** [security.md](security.md) (catalogue of attack vectors and
 fixes), [contract-reference.md](contract-reference.md),
 [architecture.md](architecture.md#lifecycle-diagram-mermaid),
-[backend API guide](../mergemint-backend/docs/api.md)
+[backend API guide](https://github.com/mergemint-mint/mergemint-contracts/blob/main/mergemint-backend/docs/api.md)
 
 `security.md` lists individual vulnerabilities and their fixes. This document
 takes a **structured** view instead. It maps the system's components and trust
@@ -107,8 +107,8 @@ Two design facts drive most of the contract risk:
    contract's balance**. Nothing links a bounty to the funds that back it. The
    test suite funds the contract by minting straight to it
    (`src/test.rs`, `token_admin.mint(&contract_id, …)`).
-2. **The verifier role is unconstrained.** The only restriction on
-   `complete_bounty` is that the verifier must not be an assignee. The payout
+2. **The [verifier](glossary.md#verifier) role is unconstrained.** The only restriction on
+   `complete_bounty` is that the verifier must not be an [assignee](glossary.md#assignee). The payout
    now comes from the contract rather than the verifier's wallet, so the
    collusion analysis in [security.md #1](security.md#1-verifier-collusion)
    (which assumes the verifier pays) no longer holds.
@@ -208,7 +208,7 @@ and can trick users into signing, but it cannot move funds by itself.
 
 ## 5. New Trust Boundaries: Sponsors, Appeals & Ownership
 
-The protocol has evolved to support multi-funder sponsorship (`top_up`), multi-tiered dispute appeals, and contract/bounty ownership transfer. Each introduces distinct trust boundaries and attack surfaces.
+The protocol has evolved to support multi-funder sponsorship ([top-up](glossary.md#top-up), `sponsor_bounty`), multi-tiered dispute appeals, and contract/bounty ownership transfer. Each introduces distinct trust boundaries and attack surfaces.
 
 ### 5.1 Sponsor Funding & Refund Griefing Flow
 
@@ -221,7 +221,7 @@ sequenceDiagram
     participant Escrow as Bounty Escrow Pool
 
     Note over Sponsor,Escrow: Attack: Sponsor attempts to withdraw funds while contributor is actively working
-    Sponsor->>Contract: top_up(bounty_id, amount)
+    Sponsor->>Contract: sponsor_bounty(bounty_id, amount)
     Contract->>Escrow: Lock additional funds in bounty escrow
     Contributor->>Contract: claim_bounty(bounty_id)
     Contract-->>Contributor: Status = in_progress
@@ -232,8 +232,8 @@ sequenceDiagram
 
 | ID | STRIDE | Threat | Sev. | Current controls | Status |
 |---|---|---|---|---|---|
-| **C-T5** | T | **Sponsor Refund Griefing.** A third-party sponsor tops up a bounty to inflate the apparent reward, waits for a contributor to claim and complete substantial work, then attempts to withdraw or refund their contribution before payout approval. | High | In Soroban escrow logic (`src/contract/mutations.rs`), all `top_up` funds are atomically commingled into the locked bounty escrow pool. Funds cannot be unilaterally refunded or withdrawn by individual sponsors while the bounty is in `in_progress` status. | ✅ Mitigated in `src/contract/mutations.rs#top_up` and verified in `sdk/examples/06-top-up-bounty.ts`. |
-| **C-D4** | D | **Micro-donation Spam.** An attacker submits hundreds of dust-value `top_up` invocations to exhaust contract instance storage TTL or induce CPU limit failures during iteration. | Medium | Enforced minimum deposit threshold (`MIN_TOPUP_AMOUNT`) and per-bounty sponsor array cap. | ✅ Mitigated via checked thresholds in mutations. |
+| **C-T5** | T | **Sponsor Refund Griefing.** A third-party sponsor tops up a bounty to inflate the apparent reward, waits for a contributor to claim and complete substantial work, then attempts to withdraw or refund their contribution before payout approval. | High | In Soroban escrow logic (`src/contract/mutations.rs`), all `sponsor_bounty` funds are atomically commingled into the locked bounty escrow pool. Funds cannot be unilaterally refunded or withdrawn by individual sponsors while the bounty is in `in_progress` status. | ✅ Mitigated in `src/contract/mutations.rs#sponsor_bounty` and verified in `sdk/examples/06-top-up-bounty.ts`. |
+| **C-D4** | D | **Micro-donation Spam.** An attacker submits hundreds of dust-value `sponsor_bounty` invocations to exhaust contract instance storage TTL or induce CPU limit failures during iteration. | Medium | Enforced minimum deposit threshold (`MIN_TOPUP_AMOUNT`) and per-bounty sponsor array cap. | ✅ Mitigated via checked thresholds in mutations. |
 
 ---
 
