@@ -5,6 +5,22 @@ documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en
 
 ---
 
+## [0.2.0](https://github.com/mergemint-mint/mergemint-contracts/compare/backend-v0.1.0...backend-v0.2.0) (2026-10-23)
+
+
+### Added
+
+* add glossary, mdBook docs, CSP, and security headers ([4b11961](https://github.com/mergemint-mint/mergemint-contracts/commit/4b11961a971dac7dfbb403509f39feb169cbe2e7))
+* **backend:** add indexer reliability features ([f3f158b](https://github.com/mergemint-mint/mergemint-contracts/commit/f3f158b23ba68690c93ad8852040ca4ce513bd12))
+* **backend:** add security headers middleware ([698ce41](https://github.com/mergemint-mint/mergemint-contracts/commit/698ce41e146d20b6e6bf930f129880d37cd4889c)), closes [#1115](https://github.com/mergemint-mint/mergemint-contracts/issues/1115)
+* **backend:** resolve transaction and webhook issues ([3f84bbc](https://github.com/mergemint-mint/mergemint-contracts/commit/3f84bbcdff5273f2a2aaf9b0daa3c1176774288c))
+
+
+### Fixed
+
+* **backend:** recover stale webhook delivery leases ([944b2d2](https://github.com/mergemint-mint/mergemint-contracts/commit/944b2d2aa50e2874721cb35fab227344f8f8b862))
+* **backend:** restore truncated db.rs and missing sha2 import ([748680e](https://github.com/mergemint-mint/mergemint-contracts/commit/748680e7c42774264fe7dc9d721dc89c4fdd4014))
+
 ## [Unreleased]
 
 ### Added
