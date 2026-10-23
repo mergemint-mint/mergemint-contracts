@@ -941,7 +941,6 @@ fn test_fuzz_create_bounty_10k_cases() {
             }
         }
     }
-
 }
 
 proptest! {

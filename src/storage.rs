@@ -427,7 +427,11 @@ pub fn remove_bounty_from_status(env: &Env, bounty_id: &BountyId, status: &Symbo
         let mut trimmed: Vec<BountyId> = Vec::new(env);
         let mut i = 0u32;
         while i < new_last.len() - 1 {
-            trimmed.push_back(new_last.get(i).unwrap());
+            trimmed.push_back(
+                new_last
+                    .get(i)
+                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+            );
             i += 1;
         }
         set_status_page(env, status, last_page_idx, &trimmed);
@@ -440,7 +444,11 @@ pub fn remove_bounty_from_status(env: &Env, bounty_id: &BountyId, status: &Symbo
             if i == fpos {
                 new_target.push_back(last_item.clone());
             } else {
-                new_target.push_back(target_page.get(i).unwrap());
+                new_target.push_back(
+                    target_page
+                        .get(i)
+                        .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+                );
             }
             i += 1;
         }
@@ -457,7 +465,11 @@ pub fn remove_bounty_from_status(env: &Env, bounty_id: &BountyId, status: &Symbo
         let mut trimmed: Vec<BountyId> = Vec::new(env);
         let mut i = 0u32;
         while i < source.len() - 1 {
-            trimmed.push_back(source.get(i).unwrap());
+            trimmed.push_back(
+                source
+                    .get(i)
+                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+            );
             i += 1;
         }
         set_status_page(env, status, last_page_idx, &trimmed);
@@ -611,7 +623,11 @@ pub fn remove_open_bounty(env: &Env, bounty_id: &BountyId) {
         let mut trimmed: Vec<BountyId> = Vec::new(env);
         let mut i = 0u32;
         while i < last_page.len() - 1 {
-            trimmed.push_back(last_page.get(i).unwrap());
+            trimmed.push_back(
+                last_page
+                    .get(i)
+                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+            );
             i += 1;
         }
         set_open_bounties_page(env, last_page_idx, &trimmed);
@@ -623,7 +639,11 @@ pub fn remove_open_bounty(env: &Env, bounty_id: &BountyId) {
             if i == fpos {
                 new_target.push_back(last_item.clone());
             } else {
-                new_target.push_back(target_page.get(i).unwrap());
+                new_target.push_back(
+                    target_page
+                        .get(i)
+                        .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+                );
             }
             i += 1;
         }
@@ -639,7 +659,11 @@ pub fn remove_open_bounty(env: &Env, bounty_id: &BountyId) {
         let mut trimmed: Vec<BountyId> = Vec::new(env);
         let mut i = 0u32;
         while i < source.len() - 1 {
-            trimmed.push_back(source.get(i).unwrap());
+            trimmed.push_back(
+                source
+                    .get(i)
+                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+            );
             i += 1;
         }
         set_open_bounties_page(env, last_page_idx, &trimmed);
