@@ -7,6 +7,21 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.1.0](https://github.com/mergemint-mint/mergemint-contracts/compare/contract-v1.0.0...contract-v1.1.0) (2026-10-23)
+
+
+### Added
+
+* add glossary, mdBook docs, CSP, and security headers ([4b11961](https://github.com/mergemint-mint/mergemint-contracts/commit/4b11961a971dac7dfbb403509f39feb169cbe2e7))
+* **backend:** add indexer reliability features ([f3f158b](https://github.com/mergemint-mint/mergemint-contracts/commit/f3f158b23ba68690c93ad8852040ca4ce513bd12))
+* **backend:** resolve transaction and webhook issues ([3f84bbc](https://github.com/mergemint-mint/mergemint-contracts/commit/3f84bbcdff5273f2a2aaf9b0daa3c1176774288c))
+* **frontend:** add content security policy ([99e7140](https://github.com/mergemint-mint/mergemint-contracts/commit/99e7140a8146321b1200ee2dd9e044ef723d2707)), closes [#1114](https://github.com/mergemint-mint/mergemint-contracts/issues/1114)
+
+
+### Fixed
+
+* **contract:** remove duplicate code reintroduced by [#1153](https://github.com/mergemint-mint/mergemint-contracts/issues/1153) merge ([2502239](https://github.com/mergemint-mint/mergemint-contracts/commit/250223975a31e8a73f478c88cccde40256245e69))
+
 ## [Unreleased]
 
 Changes that have landed on `main` but are not yet associated with a tagged release.

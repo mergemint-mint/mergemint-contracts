@@ -9,7 +9,7 @@ const MAX_LIMIT: u32 = 50;
 /// This is the single source of truth for the contract version. It is bumped
 /// automatically by release-please (see `docs/versioning.md`) so clients can
 /// detect mismatches via `version()`. Keep the marker comment on the same line.
-const CONTRACT_VERSION: &str = "1.0.0"; // x-release-please-version
+const CONTRACT_VERSION: &str = "1.1.0"; // x-release-please-version
 
 /// Resolve a `cursor` + `limit` window into a flat slice of IDs.
 ///
