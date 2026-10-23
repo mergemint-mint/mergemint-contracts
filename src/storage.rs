@@ -794,11 +794,25 @@ pub fn get_pending_admin(env: &Env) -> Option<Address> {
 }
 
 pub fn set_pending_admin(env: &Env, pending: &Address) {
-    env.storage().instance().set(&DataKey::PendingAdmin, pending);
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingAdmin, pending);
 }
 
 pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
+}
+
+/// Whether the admin has paused the contract. Defaults to `false`.
+pub fn is_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&DataKey::Paused, &paused);
 }
 
 pub fn get_pending_owner(env: &Env, bounty_id: &BountyId) -> Option<Address> {
@@ -1168,25 +1182,4 @@ pub fn remove_allowed_reward_token(env: &Env, token: &Address) {
     env.storage()
         .instance()
         .remove(&DataKey::AllowedRewardToken(token.clone()));
-}
-
-pub fn get_admin(env: &Env) -> Option<Address> {
-    env.storage().instance().get(&DataKey::Admin)
-}
-
-pub fn set_admin(env: &Env, admin: &Address) {
-    env.storage().instance().set(&DataKey::Admin, admin);
-}
-
-pub fn get_min_reward_amount(env: &Env, token: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::MinRewardAmount(token.clone()))
-        .unwrap_or(0)
-}
-
-pub fn set_min_reward_amount(env: &Env, token: &Address, amount: &i128) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::MinRewardAmount(token.clone()), amount);
 }

@@ -22,6 +22,8 @@
   --mm-fg-muted: #5a6270;
   --mm-border: #d7dbe0;
   --mm-accent: #2f5fd8;
+  /* Text drawn on top of --mm-accent (buttons). Must keep >= 4.5:1 contrast. */
+  --mm-on-accent: #ffffff;
   --mm-error-bg: #fdecec;
   --mm-error-fg: #a31515;
   --mm-success-bg: #e8f6ec;
@@ -42,6 +44,7 @@
     --mm-fg-muted: #9aa2ad;
     --mm-border: #3a3f46;
     --mm-accent: #7fa4f5;
+    --mm-on-accent: #0f1624;
     --mm-error-bg: #3a1f1f;
     --mm-error-fg: #f2a6a6;
     --mm-success-bg: #1d3324;
@@ -478,7 +481,7 @@
 
 .topup-modal__max-button:hover {
   background: var(--mm-accent);
-  color: #ffffff;
+  color: var(--mm-on-accent);
 }
 
 .topup-modal__error {
@@ -555,7 +558,7 @@
 .topup-open-button {
   padding: 8px 16px;
   background: var(--mm-accent);
-  color: #ffffff;
+  color: var(--mm-on-accent);
   border: none;
   border-radius: 6px;
   font-weight: 500;

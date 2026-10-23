@@ -17,7 +17,7 @@ import { useTranslation } from './i18n';
 
 function Nav() {
   const location = useLocation();
-  const { address, connect, clearError } = useWallet();
+  const { address, connect, clearError, error } = useWallet();
   const { t } = useTranslation();
 
   // A prior connect() failure otherwise stays visible until the next
@@ -36,6 +36,11 @@ function Nav() {
       <Link to="/admin">{t('nav_admin')}</Link>
       <Link to="/create" role="button">{t('nav_create_bounty')}</Link>
       <WalletConnectButton address={address} onConnect={connect} />
+      {error && (
+        <p role="alert" className="wallet-connect-error">
+          {error}
+        </p>
+      )}
     </nav>
   );
 }

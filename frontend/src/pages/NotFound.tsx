@@ -5,7 +5,7 @@ interface NotFoundProps {
   message?: string;
 }
 
-export default function NotFound({
+export function NotFound({
   title = 'Page not found',
   message = "The page you're looking for doesn't exist or may have been moved.",
 }: NotFoundProps) {
@@ -33,3 +33,5 @@ export default function NotFound({
     </div>
   );
 }
+
+export default NotFound;

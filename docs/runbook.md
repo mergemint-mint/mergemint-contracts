@@ -10,12 +10,7 @@ constructed or edited by clients.
 
 What to do when a critical bug or key compromise is found in a deployed MergeMint contract: who does what, in what order, and which commands to run.
 
-> **Implementation status.** The circuit-breaker entrypoints this runbook relies on are **not yet in `src/`**. `init`, `pause` and `unpause` are specified in [pause-upgrade-strategy.md](pause-upgrade-strategy.md) (follow-up ticket #1). `is_paused` and the two-step admin transfer (`transfer_admin`, `accept_admin`, `get_admin`) are the companions this runbook proposes to meet that doc's requirement that *changing the admin must require the current admin's signature*. Until they ship:
->
-> - Follow [§ 3b — Containment without a pause flag](#3b-containment-without-a-pause-flag-current-contract) instead of § 3a.
-> - Steps 1, 2, 4, 5, 6 and 7 apply unchanged.
->
-> When the entrypoints land, check the signatures below against `src/contract/mutations.rs` and update this doc in the same PR.
+> **Implementation status.** `pause`, `unpause`, `is_paused` and the two-step admin transfer (`transfer_admin`, `accept_admin`, `get_admin`) are live in `src/contract/`. The contract admin is set once with `init_admin`. § 3b only applies to deployments built before the pause switch shipped.
 
 ---
 
@@ -95,13 +90,13 @@ Decision: **SEV-1 → pause now (§ 3).** SEV-2 → pause unless the Investigato
 
 ## 3a. Contain — pause the contract
 
-Pausing blocks every state-mutating entrypoint (`create_bounty`, `claim_bounty`, `complete_milestone`, `complete_bounty`, `approve_completion`, `raise_dispute`, `resolve_dispute`, `update_contributor_metadata`, `cancel_bounty`, `expire_bounty`). Each one panics with `"contract is paused"` via the `assert_not_paused` guard. Read-only queries keep working, so users and indexers can still see state.
+Pausing blocks every state-mutating entrypoint. Each one fails with `"contract is paused"` (`ContractError::ContractPaused`) right after its auth check. The only exceptions are `pause`, `unpause`, and the admin-key path (`init_admin`, `transfer_admin`, `accept_admin`) so a compromised key can still be rotated while paused; the list lives in `PAUSE_EXEMPT_ENTRYPOINTS` in `src/contract/mutations.rs`. Read-only queries keep working, so users and indexers can still see state. The test `pause_blocks_every_mutation` in `src/test.rs` calls every mutation while paused and fails if a new one is added without a case.
 
-**Entrypoint (planned, per pause-upgrade-strategy.md):**
+**Entrypoints:**
 
 ```rust
-pub fn pause(env: Env, admin: Address)    // admin.require_auth(); emits contract_paused
-pub fn unpause(env: Env, admin: Address)  // admin.require_auth(); emits contract_unpaused
+pub fn pause(env: Env, admin: Address)    // admin only; emits contract_paused
+pub fn unpause(env: Env, admin: Address)  // admin only; emits contract_unpaused
 pub fn is_paused(env: Env) -> bool         // read-only
 ```
 
@@ -126,7 +121,7 @@ For a multi-sig admin, build the transaction with `--build-only`, collect signat
 
 ## 3b. Containment without a pause flag (current contract)
 
-Until `pause` ships, there's no on-chain circuit breaker. Do as much of the following as applies:
+For deployments built before `pause` shipped, there's no on-chain circuit breaker. Do as much of the following as applies:
 
 1. **Stop the off-chain entry points.** Put the frontend into maintenance mode and have the backend reject write routes (`create`, `claim`, `complete`, `resolve`). This stops most users, but **it doesn't stop direct contract calls**.
 2. **Drain exposure where the contract allows it.** Bounty creators can call `cancel_bounty` on open bounties to recover escrow. Comms should ask creators to do this if the bug affects open escrow.

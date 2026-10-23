@@ -3604,7 +3604,9 @@ fn test_min_reward_per_token_enforced() {
     let client = MergeMintContractClient::new(&env, &contract_id);
     client.init_admin(&admin);
 
-    let token_addr = env.register_stellar_asset_contract_v2(creator.clone()).address();
+    let token_addr = env
+        .register_stellar_asset_contract_v2(creator.clone())
+        .address();
     client.set_min_reward(&admin, &token_addr, &5000);
     assert_invocation_emits(&env, &contract_id, &["config_changed"]);
     assert_eq!(client.get_min_reward(&token_addr), 5000);
@@ -3623,7 +3625,10 @@ fn test_min_reward_per_token_enforced() {
         &1,
         &Vec::new(&env),
     );
-    assert!(below.is_err(), "reward below the per-token minimum must be rejected");
+    assert!(
+        below.is_err(),
+        "reward below the per-token minimum must be rejected"
+    );
 
     // Other tokens are unaffected.
     make_bounty(&client, &env, &creator, "other_token", None);
@@ -3637,7 +3642,9 @@ fn test_set_min_reward_rejects_non_admin() {
     let client = MergeMintContractClient::new(&env, &contract_id);
     client.init_admin(&admin);
 
-    let token_addr = env.register_stellar_asset_contract_v2(creator.clone()).address();
+    let token_addr = env
+        .register_stellar_asset_contract_v2(creator.clone())
+        .address();
     client.set_min_reward(&outsider, &token_addr, &5000);
 }
 
@@ -3707,7 +3714,10 @@ fn test_bounty_ownership_transfer_moves_creator_index() {
 
     client.transfer_bounty_ownership(&creator, &bounty_id, &new_owner);
     assert_invocation_emits(&env, &contract_id, &["ownership_transfer_started"]);
-    assert_eq!(client.get_pending_owner(&bounty_id), Some(new_owner.clone()));
+    assert_eq!(
+        client.get_pending_owner(&bounty_id),
+        Some(new_owner.clone())
+    );
     assert_eq!(client.get_bounty(&bounty_id).unwrap().creator, creator);
 
     client.accept_bounty_ownership(&new_owner, &bounty_id);
@@ -3756,4 +3766,415 @@ fn test_bounty_ownership_transfer_rejects_non_creator() {
     let bounty_id = make_bounty(&client, &env, &creator, "transfer", None);
 
     client.transfer_bounty_ownership(&outsider, &bounty_id, &new_owner);
+}
+
+// ── Pause blocks every mutation (#1122) ───────────────────────────────────
+
+/// Fixture shared by the pause tests: an admin plus one live bounty created
+/// before the pause, so queries have real data to read back.
+struct PauseCtx<'a> {
+    env: Env,
+    client: MergeMintContractClient<'a>,
+    admin: Address,
+    creator: Address,
+    other: Address,
+    token: Address,
+    bounty_id: BountyId,
+}
+
+fn pause_ctx<'a>() -> PauseCtx<'a> {
+    let (env, creator, other, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+    let (bounty_id, token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "bug",
+        1000,
+        Some(1_000),
+    );
+    PauseCtx {
+        env,
+        client,
+        admin,
+        creator,
+        other,
+        token,
+        bounty_id,
+    }
+}
+
+/// Run `f` and return the panic message it raised, or `None` if it returned.
+fn panic_message<F: FnOnce()>(f: F) -> Option<std::string::String> {
+    use std::string::ToString;
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).err()?;
+    Some(if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<std::string::String>() {
+        s.clone()
+    } else {
+        "<non-string panic>".to_string()
+    })
+}
+
+/// Names of the `pub fn` entrypoints declared in a contract source file.
+fn entrypoints_in(source: &str) -> std::vec::Vec<&str> {
+    source
+        .lines()
+        .filter_map(|l| l.strip_prefix("    pub fn "))
+        .map(|rest| rest.split('(').next().unwrap().trim())
+        .collect()
+}
+
+type PauseCase = (&'static str, fn(&PauseCtx));
+
+/// One case per state-mutating entrypoint, called with otherwise-valid-looking
+/// arguments. Each must fail with `ContractPaused` before touching state.
+/// This is the single source of truth checked against `mutations.rs` by
+/// `pause_cases_cover_every_mutation`.
+fn pause_cases() -> std::vec::Vec<PauseCase> {
+    std::vec![
+        ("create_bounty", |c| {
+            c.client.create_bounty(
+                &c.creator,
+                &Symbol::new(&c.env, "bug"),
+                &String::from_str(&c.env, "desc"),
+                &1000,
+                &c.token,
+                &0,
+                &None,
+                &Vec::new(&c.env),
+                &1,
+                &None,
+                &1,
+                &Vec::new(&c.env),
+            );
+        }),
+        ("claim_bounty", |c| c
+            .client
+            .claim_bounty(&c.other, &c.bounty_id)),
+        ("unclaim_bounty", |c| c
+            .client
+            .unclaim_bounty(&c.other, &c.bounty_id)),
+        ("complete_milestone", |c| {
+            c.client.complete_milestone(&c.creator, &c.bounty_id, &0)
+        }),
+        ("complete_bounty", |c| c
+            .client
+            .complete_bounty(&c.creator, &c.bounty_id)),
+        ("approve_completion", |c| {
+            c.client.approve_completion(&c.creator, &c.bounty_id)
+        }),
+        ("raise_dispute", |c| c
+            .client
+            .raise_dispute(&c.creator, &c.bounty_id)),
+        ("resolve_dispute", |c| {
+            c.client
+                .resolve_dispute(&c.admin, &c.bounty_id, &Symbol::new(&c.env, "cancel"))
+        }),
+        ("finalize_dispute", |c| c
+            .client
+            .finalize_dispute(&c.creator, &c.bounty_id)),
+        ("appeal_dispute", |c| c
+            .client
+            .appeal_dispute(&c.creator, &c.bounty_id)),
+        ("set_appeal_window", |c| c
+            .client
+            .set_appeal_window(&c.admin, &10)),
+        ("add_dispute_evidence", |c| {
+            c.client.add_dispute_evidence(
+                &c.creator,
+                &c.bounty_id,
+                &BytesN::from_array(&c.env, &[7u8; 32]),
+            )
+        }),
+        ("update_contributor_metadata", |c| {
+            c.client
+                .update_contributor_metadata(&c.other, &Symbol::new(&c.env, "bio"))
+        }),
+        ("cancel_bounty", |c| c
+            .client
+            .cancel_bounty(&c.creator, &c.bounty_id)),
+        ("expire_bounty", |c| c
+            .client
+            .expire_bounty(&c.creator, &c.bounty_id)),
+        ("submit_work", |c| {
+            c.client.submit_work(
+                &c.other,
+                &c.bounty_id,
+                &BytesN::from_array(&c.env, &[1u8; 32]),
+            )
+        }),
+        ("sponsor_bounty", |c| c.client.sponsor_bounty(
+            &c.other,
+            &c.bounty_id,
+            &500
+        )),
+        ("reassign_bounty", |c| {
+            c.client.reassign_bounty(&c.creator, &c.bounty_id, &c.other)
+        }),
+        ("extend_deadline", |c| {
+            c.client.extend_deadline(&c.creator, &c.bounty_id, &5_000)
+        }),
+        ("release_stale_claim", |c| {
+            c.client.release_stale_claim(&c.other, &c.bounty_id)
+        }),
+        ("set_claim_window", |c| c
+            .client
+            .set_claim_window(&c.admin, &10)),
+        ("set_reputation_penalty", |c| c
+            .client
+            .set_reputation_penalty(&c.admin, &5)),
+        ("add_reward_token", |c| c
+            .client
+            .add_reward_token(&c.admin, &c.token)),
+        ("remove_reward_token", |c| c
+            .client
+            .remove_reward_token(&c.admin, &c.token)),
+        ("set_creator_open_limit", |c| c
+            .client
+            .set_creator_open_limit(&c.admin, &3)),
+        ("set_claim_cooldown", |c| c
+            .client
+            .set_claim_cooldown(&c.admin, &10)),
+        ("set_min_reward", |c| c
+            .client
+            .set_min_reward(&c.admin, &c.token, &200)),
+        ("transfer_bounty_ownership", |c| {
+            c.client
+                .transfer_bounty_ownership(&c.creator, &c.bounty_id, &c.other)
+        }),
+        ("accept_bounty_ownership", |c| {
+            c.client.accept_bounty_ownership(&c.other, &c.bounty_id)
+        }),
+        ("reopen_bounty", |c| c.client.reopen_bounty(
+            &c.creator,
+            &c.bounty_id,
+            &5_000
+        )),
+        ("update_tags", |c| {
+            c.client.update_tags(
+                &c.creator,
+                &c.bounty_id,
+                &vec![&c.env, Symbol::new(&c.env, "docs")],
+            )
+        }),
+        ("archive_bounty", |c| c.client.archive_bounty(&c.bounty_id)),
+    ]
+}
+
+/// Call every read-only entrypoint. Returns the names called so the coverage
+/// check can compare them against `queries.rs`.
+fn call_every_query(c: &PauseCtx) -> std::vec::Vec<&'static str> {
+    let env = &c.env;
+    let id = &c.bounty_id;
+    let ids = vec![env, id.clone()];
+    let open = Symbol::new(env, "open");
+    let cl = &c.client;
+
+    assert_eq!(cl.get_bounty(id).unwrap().creator, c.creator);
+    assert!(cl.get_bounty_summary(id).is_none()); // only set once archived
+    assert_eq!(cl.get_bounty_metas(&ids).len(), 1);
+    assert_eq!(cl.get_bounties_by_ids(&ids).len(), 1);
+    assert_eq!(cl.get_bounties(&ids).len(), 1);
+    assert_eq!(cl.get_bounty_count(), 1);
+    assert_eq!(cl.get_bounties_by_status(&open, &None, &10).0.len(), 1);
+    assert_eq!(cl.get_status_count(&open), 1);
+    assert_eq!(cl.get_open_bounties(&None, &10).0.len(), 1);
+    assert_eq!(cl.get_open_bounties_count(), 1);
+    assert_eq!(cl.get_open_bounties_paged(&0, &10).len(), 1);
+    assert_eq!(cl.get_bounties_by_tag(&Symbol::new(env, "bug")).len(), 0);
+    assert_eq!(
+        cl.get_bounties_by_creator(&c.creator, &None, &10).0.len(),
+        1
+    );
+    assert_eq!(cl.get_bounties_by_token(&c.token, &None, &10).0.len(), 1);
+    assert!(cl.get_contributor(&c.other).is_none());
+    assert!(cl.get_contributor_active_bounty(&c.other).is_none());
+    assert_eq!(
+        cl.get_contributor_bounty_history(&c.other, &0, &10).len(),
+        0
+    );
+    assert!(cl.get_submission(id).is_none());
+    assert_eq!(cl.get_bounty_sponsors(id).len(), 0);
+    assert_eq!(cl.get_milestones(id).len(), 0);
+    assert!(cl.is_paused());
+    assert_eq!(cl.get_admin(), Some(c.admin.clone()));
+    assert!(cl.is_reward_token_allowed(&c.token));
+    let _ = cl.get_claim_window();
+    let _ = cl.get_creator_open_limit();
+    assert_eq!(cl.get_creator_open_count(&c.creator), 1);
+    let _ = cl.get_claim_cooldown();
+    assert_eq!(cl.get_config().admin, Some(c.admin.clone()));
+    assert_eq!(cl.get_min_reward(&c.token), 0);
+    assert!(cl.get_pending_owner(id).is_none());
+    assert_eq!(cl.get_dispute_evidence(id).len(), 0);
+    let _ = cl.get_appeal_window();
+    assert!(cl.get_pending_resolution(id).is_none());
+    assert!(!cl.get_dispute_appealed(id));
+    assert_eq!(cl.version(), String::from_str(env, "1.0.0"));
+
+    std::vec![
+        "get_bounty",
+        "get_bounty_summary",
+        "get_bounty_metas",
+        "get_bounties_by_ids",
+        "get_bounties",
+        "get_bounty_count",
+        "get_bounties_by_status",
+        "get_status_count",
+        "get_open_bounties",
+        "get_open_bounties_count",
+        "get_open_bounties_paged",
+        "get_bounties_by_tag",
+        "get_bounties_by_creator",
+        "get_bounties_by_token",
+        "get_contributor",
+        "get_contributor_active_bounty",
+        "get_contributor_bounty_history",
+        "get_submission",
+        "get_bounty_sponsors",
+        "get_milestones",
+        "is_paused",
+        "get_admin",
+        "is_reward_token_allowed",
+        "get_claim_window",
+        "get_creator_open_limit",
+        "get_creator_open_count",
+        "get_claim_cooldown",
+        "get_config",
+        "get_min_reward",
+        "get_pending_owner",
+        "get_dispute_evidence",
+        "get_appeal_window",
+        "get_pending_resolution",
+        "get_dispute_appealed",
+        "version",
+    ]
+}
+
+/// Fails when a mutating entrypoint is added to `mutations.rs` without a
+/// matching `pause_cases` entry (or a deliberate `PAUSE_EXEMPT_ENTRYPOINTS`
+/// listing), so new mutations can't silently bypass the pause switch.
+#[test]
+fn pause_cases_cover_every_mutation() {
+    use crate::contract::PAUSE_EXEMPT_ENTRYPOINTS;
+    use std::collections::BTreeSet;
+
+    let declared: BTreeSet<&str> = entrypoints_in(include_str!("contract/mutations.rs"))
+        .into_iter()
+        .collect();
+    let cases = pause_cases();
+    let covered: BTreeSet<&str> = cases.iter().map(|(name, _)| *name).collect();
+    assert_eq!(covered.len(), cases.len(), "duplicate pause case");
+    let exempt: BTreeSet<&str> = PAUSE_EXEMPT_ENTRYPOINTS.iter().copied().collect();
+
+    let missing: std::vec::Vec<_> = declared
+        .difference(&covered)
+        .filter(|n| !exempt.contains(*n))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "mutating entrypoints with no pause case: {missing:?} \
+         (add a case to pause_cases, or list it in PAUSE_EXEMPT_ENTRYPOINTS)"
+    );
+    let stale: std::vec::Vec<_> = covered
+        .union(&exempt)
+        .filter(|n| !declared.contains(*n))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "pause cases for unknown entrypoints: {stale:?}"
+    );
+}
+
+#[test]
+fn queries_cover_every_query_entrypoint() {
+    use std::collections::BTreeSet;
+    let c = pause_ctx();
+    c.client.pause(&c.admin);
+    let called: BTreeSet<&str> = call_every_query(&c).into_iter().collect();
+    let declared: BTreeSet<&str> = entrypoints_in(include_str!("contract/queries.rs"))
+        .into_iter()
+        .collect();
+    assert_eq!(
+        called, declared,
+        "call_every_query is out of sync with queries.rs"
+    );
+}
+
+#[test]
+fn pause_blocks_every_mutation() {
+    let mut failures = std::vec::Vec::new();
+    for (name, call) in pause_cases() {
+        // Fresh contract per case so one call can't affect the next.
+        let c = pause_ctx();
+        c.client.pause(&c.admin);
+        match panic_message(|| call(&c)) {
+            Some(msg) if msg.contains("contract is paused") => {}
+            Some(msg) => failures.push(std::format!("{name}: wrong error: {msg}")),
+            None => failures.push(std::format!("{name}: succeeded while paused")),
+        }
+        // Nothing changed: the bounty is still open and untouched.
+        let bounty = c.client.get_bounty(&c.bounty_id).unwrap();
+        if bounty.status != Symbol::new(&c.env, "open") || bounty.creator != c.creator {
+            failures.push(std::format!("{name}: mutated state while paused"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "pause guard failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn queries_work_while_paused() {
+    let c = pause_ctx();
+    c.client.pause(&c.admin);
+    call_every_query(&c);
+}
+
+#[test]
+fn unpause_restores_mutations() {
+    let c = pause_ctx();
+    c.client.pause(&c.admin);
+    assert!(c.client.is_paused());
+    c.client.unpause(&c.admin);
+    assert!(!c.client.is_paused());
+    c.client.claim_bounty(&c.other, &c.bounty_id);
+    assert_eq!(
+        c.client.get_bounty(&c.bounty_id).unwrap().status,
+        Symbol::new(&c.env, "in_progress")
+    );
+}
+
+#[test]
+fn admin_rotation_still_works_while_paused() {
+    let c = pause_ctx();
+    c.client.pause(&c.admin);
+    let new_admin = Address::generate(&c.env);
+    c.client.transfer_admin(&c.admin, &new_admin);
+    c.client.accept_admin(&new_admin);
+    c.client.unpause(&new_admin);
+    assert!(!c.client.is_paused());
+}
+
+#[test]
+#[should_panic(expected = "caller is not the contract admin")]
+fn non_admin_cannot_pause() {
+    let c = pause_ctx();
+    c.client.pause(&c.other);
+}
+
+#[test]
+#[should_panic(expected = "caller is not the contract admin")]
+fn non_admin_cannot_unpause() {
+    let c = pause_ctx();
+    c.client.pause(&c.admin);
+    c.client.unpause(&c.other);
 }

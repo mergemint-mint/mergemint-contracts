@@ -72,7 +72,7 @@ export function BountyTimeline({ bountyId }: BountyTimelineProps) {
         if (!cancelled) setLoading(false);
       });
 
-    const unsubscribe = api.subscribeBountyEvents(bountyId, (event) => {
+    const stream = api.streamBountyEvents(bountyId, (event) => {
       if (seenIds.current.has(event.id)) return;
       seenIds.current.add(event.id);
       setEvents((prev) => sortEvents([...prev, event]));
@@ -80,7 +80,7 @@ export function BountyTimeline({ bountyId }: BountyTimelineProps) {
 
     return () => {
       cancelled = true;
-      unsubscribe();
+      stream.close();
     };
   }, [bountyId]);
 

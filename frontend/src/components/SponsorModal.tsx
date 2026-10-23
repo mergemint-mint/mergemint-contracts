@@ -21,7 +21,7 @@ const shortenAddress = (address: string) =>
     ? `${address.slice(0, 6)}...${address.slice(-4)}`
     : address;
 
-export default function SponsorModal({
+export function SponsorModal({
   isOpen,
   onClose,
   bountyId,
@@ -191,3 +191,5 @@ export default function SponsorModal({
     </div>
   );
 }
+
+export default SponsorModal;

@@ -39,7 +39,7 @@ export function BountyCard({ bounty, loading, highlighted, currentUser, onReopen
   const canReopen = isExpired && isCreator && onReopen != null;
 
   return (
-    <div className={className}>
+    <div className={className} data-testid="bounty-card">
       <span className="bounty-card__id" title={bounty.id}>
         {shortenAddress(bounty.id)}
         <CopyButton value={bounty.id} />

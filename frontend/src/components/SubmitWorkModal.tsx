@@ -32,7 +32,7 @@ export async function hashPrUrl(prUrl: string): Promise<string> {
     .join("");
 }
 
-export default function SubmitWorkModal({
+export function SubmitWorkModal({
   open,
   onClose,
   network,
@@ -169,3 +169,5 @@ export default function SubmitWorkModal({
     </div>
   );
 }
+
+export default SubmitWorkModal;

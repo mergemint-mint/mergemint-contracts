@@ -11,7 +11,7 @@ interface TxResultBannerProps {
 export function TxResultBanner({ result, error, onRetry, retrying }: TxResultBannerProps) {
   if (error) {
     return (
-      <div className="tx-result-banner tx-result-banner--error">
+      <div className="tx-result-banner tx-result-banner--error" role="alert">
         {error}
         {onRetry && (
           <button

@@ -15,7 +15,7 @@ function renderMarkdown(markdown: string): string {
   });
 }
 
-export default function CreateBountyWizard({ onSubmit }: CreateBountyWizardProps) {
+export function CreateBountyWizard({ onSubmit }: CreateBountyWizardProps) {
   const [step, setStep] = useState(0);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -128,3 +128,5 @@ export default function CreateBountyWizard({ onSubmit }: CreateBountyWizardProps
     </div>
   );
 }
+
+export default CreateBountyWizard;
