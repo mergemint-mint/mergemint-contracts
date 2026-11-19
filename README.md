@@ -164,3 +164,6 @@ contract, read [docs/security.md](docs/security.md) first.
 
 <!-- handsoff-issue-1058 -->
 - #1058: [Frontend] Sync bounty filters with URL query params
+
+<!-- handsoff-issue-1266 -->
+- #1266: Add jittered exponential backoff, circuit breaking, and dead-letter tracking in `webhooks.rs`
