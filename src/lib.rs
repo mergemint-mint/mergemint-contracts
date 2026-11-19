@@ -34,5 +34,8 @@ mod auth_matrix_tests;
 #[cfg(test)]
 mod appeal_window_tests;
 
+#[cfg(test)]
+mod upgrade_compat_tests;
+
 #[cfg(all(test, feature = "fuzz"))]
 mod fuzz_tests;
