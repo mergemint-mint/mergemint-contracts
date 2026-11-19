@@ -1,6 +1,13 @@
-import { nativeToScVal } from "@stellar/stellar-sdk";
-import { MergeMintSDK, symbolToScVal, TESTNET } from "./index";
-import { MergeMintSdkError } from "./types";
+import { nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
+import {
+  MergeMintSDK,
+  milestoneToScVal,
+  milestonesToScVal,
+  parseBounty,
+  symbolToScVal,
+  TESTNET,
+} from "./index";
+import { MergeMintSdkError, Milestone } from "./types";
 
 describe("symbolToScVal", () => {
   it("throws for a 33-character input", () => {
@@ -13,6 +20,84 @@ describe("symbolToScVal", () => {
   it("passes for exactly 32 characters", () => {
     const value = "a".repeat(32);
     expect(() => symbolToScVal(value)).not.toThrow();
+  });
+});
+
+describe("milestoneToScVal", () => {
+  const base: Milestone = {
+    description: "ship it",
+    reward: 100n,
+    completed: false,
+    deadline: 1700000000,
+  };
+
+  function keysOf(scVal: xdr.ScVal): string[] {
+    return scVal
+      .map()!
+      .map((entry) => scValToNative(entry.key()) as string);
+  }
+
+  it("emits ScMap keys in strict lexicographical order", () => {
+    const scVal = milestoneToScVal(base);
+    expect(keysOf(scVal)).toEqual([
+      "completed",
+      "deadline",
+      "description",
+      "reward",
+    ]);
+  });
+
+  it("encodes a present deadline as scvU32", () => {
+    const scVal = milestoneToScVal(base);
+    const deadlineEntry = scVal
+      .map()!
+      .find((e) => (scValToNative(e.key()) as string) === "deadline")!;
+    expect(deadlineEntry.val().switch().name).toBe("scvU32");
+    expect(deadlineEntry.val().u32()).toBe(1700000000);
+  });
+
+  it("encodes a null deadline as scvVoid", () => {
+    const scVal = milestoneToScVal({ ...base, deadline: null });
+    const deadlineEntry = scVal
+      .map()!
+      .find((e) => (scValToNative(e.key()) as string) === "deadline")!;
+    expect(deadlineEntry.val().switch().name).toBe("scvVoid");
+  });
+
+  it("encodes an undefined deadline as scvVoid", () => {
+    const scVal = milestoneToScVal({ ...base, deadline: undefined });
+    const deadlineEntry = scVal
+      .map()!
+      .find((e) => (scValToNative(e.key()) as string) === "deadline")!;
+    expect(deadlineEntry.val().switch().name).toBe("scvVoid");
+  });
+
+  it("round-trips deadline through parseBounty", () => {
+    const scVal = milestoneToScVal(base);
+    const native = scValToNative(scVal) as Record<string, unknown>;
+    const bounty = parseBounty({ milestones: [native] });
+    expect(bounty.milestones[0].deadline).toBe(1700000000);
+  });
+
+  it("round-trips a null deadline through parseBounty", () => {
+    const scVal = milestoneToScVal({ ...base, deadline: null });
+    const native = scValToNative(scVal) as Record<string, unknown>;
+    const bounty = parseBounty({ milestones: [native] });
+    expect(bounty.milestones[0].deadline).toBeNull();
+  });
+
+  it("milestonesToScVal preserves sorted keys per milestone", () => {
+    const scVal = milestonesToScVal([base, { ...base, deadline: null }]);
+    const vec = scVal.vec()!;
+    expect(vec).toHaveLength(2);
+    for (const entry of vec) {
+      expect(keysOf(entry)).toEqual([
+        "completed",
+        "deadline",
+        "description",
+        "reward",
+      ]);
+    }
   });
 });
 
