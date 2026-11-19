@@ -23,6 +23,9 @@ pub use crate::errors::*;
 pub use contract::MergeMintContractClient;
 
 #[cfg(test)]
+mod mutation_guard_tests;
+
+#[cfg(test)]
 mod test;
 
 #[cfg(all(test, feature = "fuzz"))]
