@@ -167,3 +167,6 @@ contract, read [docs/security.md](docs/security.md) first.
 
 <!-- handsoff-issue-1266 -->
 - #1266: Add jittered exponential backoff, circuit breaking, and dead-letter tracking in `webhooks.rs`
+
+<!-- handsoff-issue-1267 -->
+- #1267: Enforce webhook secret entropy, HTTPS-only production URLs, and per-owner subscription quotas
