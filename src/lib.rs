@@ -26,6 +26,9 @@ pub use contract::MergeMintContractClient;
 mod mutation_guard_tests;
 
 #[cfg(test)]
+mod verification_proofs;
+
+#[cfg(test)]
 mod test;
 
 #[cfg(all(test, feature = "fuzz"))]
