@@ -20,6 +20,8 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     error BatchAlreadyProcessing();
     error BatchAlreadyCompleted();
     error BatchNotProcessing();
+    error InvalidChunk();
+    error BatchNotFullyProcessed();
 
     // Constants
     uint256 public constant MAX_BATCH_SIZE = 100;
@@ -55,6 +57,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         uint256 failureCount;
         bool isProcessing;
         bool isCompleted;
+        uint256 nextIndex;
     }
 
     // Events
@@ -63,6 +66,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     event BatchProcessingCompleted(uint256 indexed batchId, uint256 successCount, uint256 failureCount);
     event TaskCompleted(uint256 indexed taskId, address indexed contributor, uint256 indexed bountyId, bool success);
     event TaskFailed(uint256 indexed taskId, address indexed contributor, string reason);
+    event BatchChunkProcessed(uint256 indexed batchId, uint256 startIndex, uint256 endIndex);
     event ParallelRefreshStarted(uint256 indexed batchId, uint256 parallelCount);
     /// @notice Emitted each time a failed task is retried.
     /// @param attempt The retry attempt number, starting at 1 for the first retry.
@@ -135,18 +139,43 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
 
         emit ParallelRefreshStarted(batchId, parallelCount);
 
-        address[] memory contributors = batch.contributors;
-        uint256[] memory bountyIds = batch.bountyIds;
+        // Only the first chunk runs here; continue with processBatchChunk.
+        _processChunk(batchId, 0, MAX_PARALLEL_TASKS);
+    }
 
-        // Process in parallel chunks
-        for (uint256 i = 0; i < batchLength; ++i) {
-            _processRefreshTask(
-                batchId,
-                contributors[i],
-                bountyIds[i],
-                i
-            );
+    /**
+     * @dev Process the next chunk of a batch that is already processing.
+     * @param batchId The batch ID
+     * @param startIndex Must equal the batch cursor (`nextIndex`)
+     * @param count Number of items, 1..MAX_PARALLEL_TASKS
+     */
+    function processBatchChunk(uint256 batchId, uint256 startIndex, uint256 count)
+        external
+        onlyOwner
+        nonReentrant
+        whenNotPaused
+        batchExists(batchId)
+    {
+        RefreshBatch storage batch = batches[batchId];
+        if (batch.isCompleted) revert BatchAlreadyCompleted();
+        if (!batch.isProcessing) revert BatchNotProcessing();
+        _processChunk(batchId, startIndex, count);
+    }
+
+    function _processChunk(uint256 batchId, uint256 startIndex, uint256 count) internal {
+        RefreshBatch storage batch = batches[batchId];
+        if (startIndex != batch.nextIndex || count == 0 || count > MAX_PARALLEL_TASKS) {
+            revert InvalidChunk();
         }
+        uint256 batchLength = batch.contributors.length;
+        uint256 end = startIndex + count;
+        if (end > batchLength) end = batchLength;
+
+        for (uint256 i = startIndex; i < end; ++i) {
+            _processRefreshTask(batchId, batch.contributors[i], batch.bountyIds[i], i);
+        }
+        batch.nextIndex = end;
+        emit BatchChunkProcessed(batchId, startIndex, end);
     }
 
     /**
@@ -238,6 +267,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         RefreshBatch storage batch = batches[batchId];
         if (!batch.isProcessing) revert BatchNotProcessing();
         if (batch.isCompleted) revert BatchAlreadyCompleted();
+        if (batch.nextIndex < batch.contributors.length) revert BatchNotFullyProcessed();
 
         batch.isProcessing = false;
         batch.isCompleted = true;
