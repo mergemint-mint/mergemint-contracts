@@ -170,3 +170,6 @@ contract, read [docs/security.md](docs/security.md) first.
 
 <!-- handsoff-issue-1267 -->
 - #1267: Enforce webhook secret entropy, HTTPS-only production URLs, and per-owner subscription quotas
+
+<!-- handsoff-issue-1268 -->
+- #1268: Harden `webhooks/ssrf.rs` with destination-port allowlisting, IPv6 NAT64/6to4 fuzzing, and DNS timeout bounds
