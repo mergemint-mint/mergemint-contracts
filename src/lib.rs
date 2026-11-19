@@ -29,6 +29,9 @@ mod mutation_guard_tests;
 mod verification_proofs;
 
 #[cfg(test)]
+mod bounty_meta_fuzz_tests;
+
+#[cfg(test)]
 mod test;
 
 #[cfg(all(test, feature = "fuzz"))]
