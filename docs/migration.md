@@ -493,3 +493,69 @@ Soroban persistent storage entries have a TTL. Migrated entries written back dur
 - [Architecture overview](architecture.md)
 - [Event schema](event-schema.md)
 - [CHANGELOG](https://github.com/mergemint-mint/mergemint-contracts/blob/main/CHANGELOG.md)
+
+---
+
+## Part 3 — SQL migration renumbering (#1260)
+
+### Background
+
+The `mergemint-backend/migrations/` directory previously contained three pairs
+of files with colliding numeric version prefixes:
+
+| Old prefix | File A | File B |
+|---|---|---|
+| `0002_` | `0002_create_audit_logs_table.sql` | `0002_create_webhook_subscriptions.sql` |
+| `0004_` | `0004_add_bounty_full_text_search.sql` | `0004_email_notifications_and_deadline_reminders.sql` |
+| `0005_` | `0005_create_reputation_history.sql` | `0005_create_webhook_deliveries.sql` |
+
+`sqlx::migrate!` resolves migrations by their leading `NNNN_` number. A
+collision causes a non-deterministic apply order or a hard failure depending on
+which file the filesystem returns first.
+
+### Renumbered files
+
+The duplicates have been renumbered so every prefix is unique and monotonically
+increasing:
+
+| Old filename | New filename |
+|---|---|
+| `0001_add_bounties_indexes.sql` | `0001_add_bounties_indexes.sql` (unchanged) |
+| `0002_create_audit_logs_table.sql` | `0002_create_audit_logs_table.sql` (unchanged) |
+| `0002_create_webhook_subscriptions.sql` | `0003_create_webhook_subscriptions.sql` |
+| `0003_add_audit_log_pagination_index.sql` | `0004_add_audit_log_pagination_index.sql` |
+| `0004_add_bounty_full_text_search.sql` | `0005_add_bounty_full_text_search.sql` |
+| `0004_email_notifications_and_deadline_reminders.sql` | `0006_email_notifications_and_deadline_reminders.sql` |
+| `0005_create_reputation_history.sql` | `0007_create_reputation_history.sql` |
+| `0005_create_webhook_deliveries.sql` | `0008_create_webhook_deliveries.sql` |
+| `0006_create_indexer_state.sql` | `0009_create_indexer_state.sql` |
+
+### Upgrading an existing database
+
+All migrations use `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`
+/ `ADD COLUMN IF NOT EXISTS` semantics, so re-running them against a database
+that already applied the old versions is idempotent — no data is lost and no
+errors are raised.
+
+**If your database tracks applied migrations via `sqlx::migrate!`'s
+`_sqlx_migrations` table**, the old entries (with the old filenames as
+checksums) remain marked as applied. The renumbered files have new checksums.
+To handle this:
+
+1. **Option A — Fresh database (recommended for testnet/dev):** drop and
+   recreate the database, then run `sqlx migrate run`. All migrations apply
+   cleanly in the new order.
+
+2. **Option B — Existing database (production):** manually insert rows into
+   `_sqlx_migrations` for the new version numbers, copying the `checksum`
+   from the old entry that had the same content. The migration SQL itself is
+   unchanged — only the filename and version number differ. Alternatively,
+   run `sqlx migrate run` and let the `IF NOT EXISTS` guards prevent
+   duplicate object creation; sqlx will record the new versions as applied.
+
+### CI verification
+
+A unit test (`migration_version_prefixes_are_unique` in `db.rs`) reads the
+`migrations/` directory at test time and fails if any two `.sql` files share
+the same leading numeric prefix. This prevents future collisions from being
+introduced.
