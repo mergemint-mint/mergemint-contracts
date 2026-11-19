@@ -1,4 +1,4 @@
-import { nativeToScVal } from "@stellar/stellar-sdk";
+import { nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { MergeMintSDK, symbolToScVal, TESTNET } from "./index";
 import { MergeMintSdkError } from "./types";
 
@@ -131,4 +131,66 @@ describe("MergeMintSDK constructor typed errors", () => {
       expect((err as MergeMintSdkError).code).toBe("INVALID_RPC_URL");
     }
   });
+});
+
+/**
+ * Canonical base64 XDR golden fixtures generated from the Rust contract
+ * (`src/scval.rs` / `src/test.rs`). Each entry pairs the Rust-produced XDR with
+ * the native value the TypeScript `ScVal` encoders must reproduce byte-for-byte
+ * and the decoders must round-trip back to.
+ */
+const GOLDEN_XDR: Array<{ name: string; native: unknown; xdr: string }> = [
+  {
+    name: "Bounty.id (u64)",
+    native: 1n,
+    xdr: "AAAABQAAAAAAAAAB",
+  },
+  {
+    name: "BountyMeta.title (Symbol)",
+    native: "bounty",
+    xdr: "AAAADwAAAAZib3VudHk=",
+  },
+  {
+    name: "Contributor.address (Address)",
+    native: SOURCE_ACCOUNT,
+    xdr: "AAAAEgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABYQw==",
+  },
+  {
+    name: "Milestone.amount (i128)",
+    native: 1000n,
+    xdr: "AAAACgAAAAAAAAAAAAAAAAPo",
+  },
+  {
+    name: "CreateBountyParams.reward (i128)",
+    native: 500n,
+    xdr: "AAAACgAAAAAAAAAAAAAAAAH0",
+  },
+  {
+    name: "Option<u64>::Some(1)",
+    native: 1n,
+    xdr: "AAAAEQAAAAEAAAABAAAABQAAAAAAAAAB",
+  },
+  {
+    name: "Option<u64>::None",
+    native: null,
+    xdr: "AAAAEQAAAAEAAAABAAAAAA==",
+  },
+];
+
+describe("Soroban XDR golden fixture parity", () => {
+  it.each(GOLDEN_XDR)(
+    "encodes $name to the Rust golden XDR",
+    ({ native, xdr: golden }) => {
+      const encoded = nativeToScVal(native).toXDR("base64");
+      expect(encoded).toBe(golden);
+    },
+  );
+
+  it.each(GOLDEN_XDR)(
+    "decodes $name from the Rust golden XDR",
+    ({ native, xdr: golden }) => {
+      const decoded = scValToNative(xdr.ScVal.fromXDR(golden, "base64"));
+      expect(decoded).toEqual(native);
+    },
+  );
 });
