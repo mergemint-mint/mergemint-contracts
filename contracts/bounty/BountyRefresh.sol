@@ -15,6 +15,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     error UnauthorizedCaller();
     error InvalidContributor();
     error InvalidBountyId();
+    error DuplicateRefreshPair();
     error ContributorsAndBountyIdsMismatch();
     error EmptyBatch();
     error BatchAlreadyProcessing();
@@ -96,6 +97,18 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     ) external onlyOwner validBatchSize(contributors.length) returns (uint256) {
         if (contributors.length != bountyIds.length) revert ContributorsAndBountyIdsMismatch();
         if (contributors.length == 0) revert EmptyBatch();
+
+        // Reject malformed entries up front so they cannot revert the whole
+        // processBatchParallel call after batch creation gas has been spent.
+        for (uint256 i = 0; i < contributors.length; ++i) {
+            if (contributors[i] == address(0)) revert InvalidContributor();
+            if (bountyIds[i] == 0) revert InvalidBountyId();
+            for (uint256 j = i + 1; j < contributors.length; ++j) {
+                if (contributors[i] == contributors[j] && bountyIds[i] == bountyIds[j]) {
+                    revert DuplicateRefreshPair();
+                }
+            }
+        }
 
         uint256 batchId = batchCounter++;
         RefreshBatch storage batch = batches[batchId];
