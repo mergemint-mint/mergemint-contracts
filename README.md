@@ -173,3 +173,6 @@ contract, read [docs/security.md](docs/security.md) first.
 
 <!-- handsoff-issue-1268 -->
 - #1268: Harden `webhooks/ssrf.rs` with destination-port allowlisting, IPv6 NAT64/6to4 fuzzing, and DNS timeout bounds
+
+<!-- handsoff-issue-1269 -->
+- #1269: Add authentication and authorization middleware to webhook management and privileged API routes
