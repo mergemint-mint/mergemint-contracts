@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 
@@ -9,7 +9,7 @@ import "@openzeppelin/contracts/security/Pausable.sol";
  * @title BountyRefresh
  * @dev Handles batch and parallel refresh of contributor bounties
  */
-contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
+contract BountyRefresh is Ownable2Step, ReentrancyGuard, Pausable {
     error InvalidBatchSize();
     error BatchDoesNotExist();
     error UnauthorizedCaller();
@@ -98,7 +98,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     function createBatch(
         address[] calldata contributors,
         uint256[] calldata bountyIds
-    ) external onlyOwner validBatchSize(contributors.length) returns (uint256) {
+    ) external onlyOwner whenNotPaused validBatchSize(contributors.length) returns (uint256) {
         if (contributors.length != bountyIds.length) revert ContributorsAndBountyIdsMismatch();
         if (contributors.length == 0) revert EmptyBatch();
 
@@ -304,6 +304,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     function finalizeBatch(uint256 batchId)
         external
         onlyOwner
+        whenNotPaused
         batchExists(batchId)
     {
         RefreshBatch storage batch = batches[batchId];
