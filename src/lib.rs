@@ -28,5 +28,8 @@ mod test;
 #[cfg(test)]
 mod ledger_ttl_tests;
 
+#[cfg(test)]
+mod auth_matrix_tests;
+
 #[cfg(all(test, feature = "fuzz"))]
 mod fuzz_tests;
