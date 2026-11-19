@@ -26,6 +26,18 @@ export interface NetworkConfig {
   skipVersionCheck?: boolean;
 }
 
+/**
+ * A single milestone attached to a bounty.  Mirrors the on-chain
+ * `Milestone` struct in `src/types.rs`.
+ */
+export interface Milestone {
+  description: string;
+  reward: bigint;
+  completed: boolean;
+  /** Optional Unix timestamp (seconds) deadline; `null`/omitted means none. */
+  deadline?: number | null;
+}
+
 export interface Bounty {
   creator: string;
   rewardAmount: bigint;
@@ -38,7 +50,7 @@ export interface Bounty {
   tags: string[];
   requiredVerifiers?: string[];
   approvalThreshold: number;
-  milestones: Array<{ description: string; reward: bigint; completed: boolean }>;
+  milestones: Milestone[];
 }
 
 export interface BountyMeta {
@@ -67,7 +79,7 @@ export interface CreateBountyParams {
   maxAssignees: number;
   requiredVerifiers?: string[];
   approvalThreshold?: number;
-  milestones?: Array<{ description: string; reward: bigint; completed: boolean }>;
+  milestones?: Milestone[];
 }
 
 /** Parameters for topping up a bounty's reward pool. */
