@@ -21,6 +21,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     error BatchAlreadyCompleted();
     error BatchNotProcessing();
     error InvalidChunk();
+    error TaskDoesNotExist();
     error BatchNotFullyProcessed();
 
     // Constants
@@ -345,6 +346,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         view
         returns (BountyRefreshTask memory)
     {
+        if (taskId >= taskCounter) revert TaskDoesNotExist();
         return refreshTasks[taskId];
     }
 
@@ -359,6 +361,30 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         returns (uint256[] memory)
     {
         return contributorTasks[contributor];
+    }
+
+    /// @dev Number of tasks recorded for a contributor.
+    function getContributorTaskCount(address contributor) external view returns (uint256) {
+        return contributorTasks[contributor].length;
+    }
+
+    /**
+     * @dev Paginated task IDs for a contributor. Out-of-range offsets return an empty array.
+     */
+    function getContributorTasks(address contributor, uint256 offset, uint256 limit)
+        external
+        view
+        returns (uint256[] memory page)
+    {
+        uint256[] storage ids = contributorTasks[contributor];
+        uint256 total = ids.length;
+        if (offset >= total || limit == 0) return new uint256[](0);
+        uint256 end = offset + limit;
+        if (end > total || end < offset) end = total;
+        page = new uint256[](end - offset);
+        for (uint256 i = offset; i < end; ++i) {
+            page[i - offset] = ids[i];
+        }
     }
 
     /**
