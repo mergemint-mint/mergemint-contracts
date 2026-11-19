@@ -224,9 +224,11 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
                 emit TaskCompleted(taskId, contributor, bountyId, true);
                 return;
             } catch Error(string memory err) {
-                reason = err;
-            } catch {
-                reason = "Unknown error";
+                reason = bytes(err).length > MAX_ERROR_LENGTH ? string(abi.encodePacked(_slice(bytes(err)))) : err;
+            } catch Panic(uint256 code) {
+                reason = string.concat("Panic(", _toString(code), ")");
+            } catch (bytes memory data) {
+                reason = _describeRevert(data);
             }
         }
 
@@ -234,6 +236,45 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         task.errorMessage = reason;
         batches[batchId].failureCount++;
         emit TaskFailed(taskId, contributor, reason);
+    }
+
+    uint256 public constant MAX_ERROR_LENGTH = 100;
+
+    /// @dev Decode custom-error revert data into a bounded reason string.
+    function _describeRevert(bytes memory data) internal pure returns (string memory) {
+        if (data.length < 4) return "Unknown error";
+        bytes4 selector;
+        assembly {
+            selector := mload(add(data, 32))
+        }
+        return string.concat("CustomError(0x", _toHex(selector), ")");
+    }
+
+    function _slice(bytes memory b) private pure returns (bytes memory out) {
+        out = new bytes(MAX_ERROR_LENGTH);
+        for (uint256 i = 0; i < MAX_ERROR_LENGTH; ++i) out[i] = b[i];
+    }
+
+    function _toHex(bytes4 v) private pure returns (string memory) {
+        bytes memory h = "0123456789abcdef";
+        bytes memory out = new bytes(8);
+        for (uint256 i = 0; i < 4; ++i) {
+            out[2 * i] = h[uint8(v[i]) >> 4];
+            out[2 * i + 1] = h[uint8(v[i]) & 0x0f];
+        }
+        return string(out);
+    }
+
+    function _toString(uint256 v) private pure returns (string memory) {
+        if (v == 0) return "0";
+        uint256 len;
+        for (uint256 t = v; t != 0; t /= 10) ++len;
+        bytes memory out = new bytes(len);
+        while (v != 0) {
+            out[--len] = bytes1(uint8(48 + (v % 10)));
+            v /= 10;
+        }
+        return string(out);
     }
 
     /**
