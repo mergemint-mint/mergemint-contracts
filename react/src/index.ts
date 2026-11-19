@@ -99,8 +99,12 @@ export interface UseBountiesOptions extends BountyListOptions {
 export interface UseBountiesResult {
   bounties: Bounty[];
   loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
+  nextCursor: string | null;
   error: Error | null;
   refresh: () => Promise<void>;
+  loadMore: () => Promise<void>;
 }
 
 export function useBounties(
@@ -109,6 +113,8 @@ export function useBounties(
 ): UseBountiesResult {
   const [bounties, setBounties] = useState<Bounty[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [loadingMore, setLoadingMore] = useState<boolean>(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [error, setError] = useState<Error | null>(null);
 
   const mountedRef = useRef(true);
@@ -119,28 +125,86 @@ export function useBounties(
     };
   }, []);
 
+  // Monotonic request token: any in-flight request whose token no longer
+  // matches the latest one is considered stale and its result is discarded.
+  const requestIdRef = useRef(0);
+  const nextCursorRef = useRef<string | null>(null);
+
+  const limit = options?.limit;
+  const creator = options?.creator;
+
   const refresh = useCallback(async () => {
-    if (mountedRef.current) setLoading(true);
-    try {
-      const next = await client.listBounties(options);
-      if (mountedRef.current) {
-        setBounties(next);
-        setError(null);
-      }
-    } catch (err) {
-      if (mountedRef.current) {
-        setError(err instanceof Error ? err : new Error(String(err)));
-      }
-    } finally {
-      if (mountedRef.current) setLoading(false);
+    const requestId = ++requestIdRef.current;
+    if (mountedRef.current) {
+      setLoading(true);
+      setLoadingMore(false);
     }
-  }, [client, options]);
+    try {
+      const page = await client.getBountiesByCreator(creator, null, limit);
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      nextCursorRef.current = page.nextCursor;
+      setBounties(page.items);
+      setNextCursor(page.nextCursor);
+      setError(null);
+    } catch (err) {
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      if (mountedRef.current && requestId === requestIdRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [client, creator, limit]);
+
+  const loadMore = useCallback(async () => {
+    const cursor = nextCursorRef.current;
+    if (cursor === null) return;
+    const requestId = ++requestIdRef.current;
+    if (mountedRef.current) setLoadingMore(true);
+    try {
+      const page = await client.getBountiesByCreator(creator, cursor, limit);
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      nextCursorRef.current = page.nextCursor;
+      setNextCursor(page.nextCursor);
+      setBounties((prev) => {
+        const seen = new Set(prev.map((b) => b.id));
+        const appended = page.items.filter((b) => !seen.has(b.id));
+        return appended.length === 0 ? prev : [...prev, ...appended];
+      });
+      setError(null);
+    } catch (err) {
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      if (mountedRef.current && requestId === requestIdRef.current) {
+        setLoadingMore(false);
+      }
+    }
+  }, [client, creator, limit]);
 
   useEffect(() => {
+    // Reset pagination state when the creator changes so stale cursors from a
+    // previous creator are never reused.
+    nextCursorRef.current = null;
+    setNextCursor(null);
+    setBounties([]);
     void refresh();
+    return () => {
+      // Invalidate any in-flight request on unmount / creator change.
+      requestIdRef.current += 1;
+    };
   }, [refresh]);
 
-  return { bounties, loading, error, refresh };
+  return {
+    bounties,
+    loading,
+    loadingMore,
+    hasMore: nextCursor !== null,
+    nextCursor,
+    error,
+    refresh,
+    loadMore,
+  };
 }
 
 export interface UseMergeMintTxResult {
