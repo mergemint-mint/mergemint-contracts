@@ -428,11 +428,11 @@ async fn main() {
     if let Some(pool) = postgres.as_ref() {
         for (migration, what) in [
             (
-                include_str!("../migrations/0005_create_webhook_deliveries.sql"),
+                include_str!("../migrations/0008_create_webhook_deliveries.sql"),
                 "webhook delivery storage",
             ),
             (
-                include_str!("../migrations/0002_create_webhook_subscriptions.sql"),
+                include_str!("../migrations/0003_create_webhook_subscriptions.sql"),
                 "webhook subscription storage",
             ),
             (
@@ -818,8 +818,8 @@ async fn connect_postgres() -> anyhow::Result<Option<sqlx::PgPool>> {
         .connect(&database_url)
         .await?;
     for migration in [
-        include_str!("../migrations/0005_create_reputation_history.sql"),
-        include_str!("../migrations/0006_create_indexer_state.sql"),
+        include_str!("../migrations/0007_create_reputation_history.sql"),
+        include_str!("../migrations/0009_create_indexer_state.sql"),
     ] {
         for statement in migration
             .split(';')
