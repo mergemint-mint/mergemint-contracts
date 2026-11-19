@@ -4,6 +4,7 @@ pragma solidity ^0.8.0;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
+import "./IBountyManager.sol";
 
 /**
  * @title BountyRefresh
@@ -232,11 +233,30 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         virtual
         onlySelf
     {
-        // This is a placeholder for the actual refresh logic
-        // In production, this would call the actual bounty refresh mechanism
         require(contributor != address(0), "Invalid contributor");
         require(bountyId > 0, "Invalid bounty ID");
-        // Actual refresh implementation goes here
+        // When no manager is configured the refresh is a no-op. A reverting
+        // manager is caught and retried by _processRefreshTask.
+        if (address(bountyManager) != address(0)) {
+            bountyManager.updateContributorMetrics(contributor, bountyId);
+        }
+    }
+
+    /// @notice Configured bounty manager that receives metric updates.
+    IBountyManager public bountyManager;
+
+    error InvalidBountyManager();
+
+    event BountyManagerUpdated(address indexed previousManager, address indexed newManager);
+
+    /**
+     * @dev Set the bounty manager used by _executeRefresh.
+     * @param newManager Non-zero address of an IBountyManager implementation
+     */
+    function setBountyManager(address newManager) external onlyOwner {
+        if (newManager == address(0)) revert InvalidBountyManager();
+        emit BountyManagerUpdated(address(bountyManager), newManager);
+        bountyManager = IBountyManager(newManager);
     }
 
     /**
