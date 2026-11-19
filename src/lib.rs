@@ -32,6 +32,9 @@ mod verification_proofs;
 mod bounty_meta_fuzz_tests;
 
 #[cfg(test)]
+mod archive_lifecycle_tests;
+
+#[cfg(test)]
 mod test;
 
 #[cfg(all(test, feature = "fuzz"))]
