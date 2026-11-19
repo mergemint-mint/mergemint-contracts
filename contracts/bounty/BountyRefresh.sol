@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
@@ -34,6 +34,10 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     uint256 public batchCounter;
 
     // Structs
+    // NOTE: the struct layouts below are returned verbatim by getTask/getBatch
+    // and the public getters, so narrowing/reordering fields (e.g. uint64
+    // timestamps, packed bools) would change the external ABI. Packing is
+    // intentionally deferred to a versioned ABI change.
     struct BountyRefreshTask {
         uint256 id;
         address contributor;
@@ -143,8 +147,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
             _processRefreshTask(
                 batchId,
                 contributors[i],
-                bountyIds[i],
-                i
+                bountyIds[i]
             );
         }
     }
@@ -155,7 +158,6 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
      * @param batchId The batch ID
      * @param contributor The contributor address
      * @param bountyId The bounty ID
-     * @param index The index in the batch
      */
     // The only external call here is `this._executeRefresh`, a self-call to an
     // onlySelf function reached from the nonReentrant processBatchParallel, so
@@ -164,8 +166,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     function _processRefreshTask(
         uint256 batchId,
         address contributor,
-        uint256 bountyId,
-        uint256 index
+        uint256 bountyId
     ) internal {
         if (contributor == address(0)) revert InvalidContributor();
         if (bountyId == 0) revert InvalidBountyId();
