@@ -4178,3 +4178,475 @@ fn non_admin_cannot_unpause() {
     c.client.pause(&c.admin);
     c.client.unpause(&c.other);
 }
+
+// ===========================================================================
+// Issue #1204 — top_up_bounty
+// ===========================================================================
+
+/// A creator can top up an open bounty; escrow balance and reward grow.
+#[test]
+fn test_top_up_bounty_increases_escrow_and_reward() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token_addr) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "topup", 1000, None);
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_addr);
+    assert_eq!(token.balance(&contract_id), 1000);
+
+    // Creator needs extra funds to top up.
+    StellarAssetClient::new(&env, &token_addr).mint(&creator, &500);
+    client.top_up_bounty(&creator, &bounty_id, &500);
+
+    assert_eq!(token.balance(&contract_id), 1500);
+    assert_eq!(client.get_bounty(&bounty_id).unwrap().reward_amount, 1500);
+}
+
+/// Only the bounty creator may top up.
+#[test]
+#[should_panic(expected = "not bounty creator")]
+fn test_top_up_bounty_rejects_non_creator() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token_addr) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "topup_nc", 1000, None);
+    StellarAssetClient::new(&env, &token_addr).mint(&contributor, &500);
+    client.top_up_bounty(&contributor, &bounty_id, &500);
+}
+
+/// A non-positive top-up amount is rejected.
+#[test]
+#[should_panic(expected = "reward_amount must be positive")]
+fn test_top_up_bounty_rejects_zero_amount() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token_addr) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "topup_z", 1000, None);
+    client.top_up_bounty(&creator, &bounty_id, &0);
+}
+
+/// Topping up a bounty that is no longer open is rejected.
+#[test]
+#[should_panic(expected = "bounty not open")]
+fn test_top_up_bounty_rejects_non_open_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token_addr) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "topup_no", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    StellarAssetClient::new(&env, &token_addr).mint(&creator, &500);
+    client.top_up_bounty(&creator, &bounty_id, &500);
+}
+
+/// Topping up past `i128::MAX` must fail closed rather than wrap.
+#[test]
+#[should_panic(expected = "reward amount arithmetic overflow")]
+fn test_top_up_bounty_rejects_overflow() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token_addr) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "topup_ovf", 1000, None);
+    // Force the stored reward to i128::MAX so any positive top-up overflows.
+    env.as_contract(&contract_id, || {
+        let mut bounty = storage::get_bounty(&env, &bounty_id).unwrap();
+        bounty.reward_amount = i128::MAX;
+        storage::set_bounty(&env, &bounty_id, &bounty);
+    });
+    StellarAssetClient::new(&env, &token_addr).mint(&creator, &1);
+    client.top_up_bounty(&creator, &bounty_id, &1);
+}
+
+/// Cancelling after a top-up refunds the full (topped-up) escrow to the creator.
+#[test]
+fn test_top_up_bounty_refund_on_cancel() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token_addr) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "topup_ref", 1000, None);
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_addr);
+    StellarAssetClient::new(&env, &token_addr).mint(&creator, &500);
+    client.top_up_bounty(&creator, &bounty_id, &500);
+    assert_eq!(token.balance(&contract_id), 1500);
+
+    client.cancel_bounty(&creator, &bounty_id);
+    assert_eq!(token.balance(&contract_id), 0);
+    assert_eq!(token.balance(&creator), 1500);
+}
+
+// ===========================================================================
+// Issue #1206 — claim-window bounds and stale-claim milestone guard
+// ===========================================================================
+
+/// A zero claim window is rejected by `set_claim_window`.
+#[test]
+#[should_panic(expected = "claim window must be positive")]
+fn test_set_claim_window_rejects_zero() {
+    let (env, _creator, admin, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.set_claim_window(&admin, &0);
+}
+
+/// A claim window below the minimum floor is rejected.
+#[test]
+#[should_panic(expected = "claim window is below the minimum allowed")]
+fn test_set_claim_window_rejects_below_minimum() {
+    let (env, _creator, admin, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.set_claim_window(&admin, &1);
+}
+
+/// A valid claim window is accepted and read back.
+#[test]
+fn test_set_claim_window_accepts_valid_value() {
+    let (env, _creator, admin, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.set_claim_window(&admin, &10);
+    assert_eq!(client.get_claim_window(), 10);
+}
+
+/// A fresh claim cannot be released immediately (anti-griefing).
+#[test]
+#[should_panic(expected = "claim window has not elapsed")]
+fn test_release_stale_claim_rejects_fresh_claim() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let bounty_id = make_bounty(&client, &env, &creator, "stale_fresh", None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.release_stale_claim(&contributor, &bounty_id);
+}
+
+/// Stale-claim release is refused once a milestone has been completed.
+#[test]
+#[should_panic(expected = "bounty has completed milestones")]
+fn test_release_stale_claim_rejects_partial_milestone_progress() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 500,
+        completed: false,
+        deadline: None,
+    });
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m2"),
+        reward: 500,
+        completed: false,
+        deadline: None,
+    });
+    let token_addr = create_token_and_mint(&env, &creator, &contract_id, 1000);
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "stale_ms"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &token_addr,
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_milestone(&verifier, &bounty_id, &0);
+
+    env.ledger().set_sequence_number(10_000);
+    client.release_stale_claim(&contributor, &bounty_id);
+}
+
+// ===========================================================================
+// Issue #1210 — sharded ContributorBounties
+// ===========================================================================
+
+/// Creating >100 bounties for one creator paginates correctly across shards.
+#[test]
+fn test_creator_bounties_sharded_pagination() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut ids = std::vec::Vec::new();
+    for i in 0..120u32 {
+        let tag = std::format!("s{i}");
+        ids.push(make_bounty(&client, &env, &creator, &tag, None));
+    }
+
+    // First page: 50 items, cursor 50.
+    let (page0, next0) = client.get_bounties_by_creator(&creator, &None, &50);
+    assert_eq!(page0.len(), 50);
+    assert_eq!(next0, Some(50));
+    for (i, id) in page0.iter().enumerate() {
+        assert_eq!(id, ids[i]);
+    }
+
+    // Second page: 50 items, cursor 100.
+    let (page1, next1) = client.get_bounties_by_creator(&creator, &Some(50), &50);
+    assert_eq!(page1.len(), 50);
+    assert_eq!(next1, Some(100));
+    for (i, id) in page1.iter().enumerate() {
+        assert_eq!(id, ids[50 + i]);
+    }
+
+    // Final page: remaining 20 items, no cursor.
+    let (page2, next2) = client.get_bounties_by_creator(&creator, &Some(100), &50);
+    assert_eq!(page2.len(), 20);
+    assert_eq!(next2, None);
+    for (i, id) in page2.iter().enumerate() {
+        assert_eq!(id, ids[100 + i]);
+    }
+
+    // Shard count is tracked separately from the legacy blob.
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            storage::get_creator_bounty_count(&env, &creator),
+            120
+        );
+    });
+}
+
+/// Removing a creator bounty keeps shard pages consistent (swap-remove).
+#[test]
+fn test_creator_bounties_sharded_remove_keeps_pages_consistent() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut ids = std::vec::Vec::new();
+    for i in 0..60u32 {
+        let tag = std::format!("r{i}");
+        ids.push(make_bounty(&client, &env, &creator, &tag, None));
+    }
+
+    // Remove the first bounty from the creator index.
+    env.as_contract(&contract_id, || {
+        storage::remove_creator_bounty(&env, &creator, &ids[0]);
+        assert_eq!(storage::get_creator_bounty_count(&env, &creator), 59);
+    });
+
+    let (page0, _) = client.get_bounties_by_creator(&creator, &None, &50);
+    assert_eq!(page0.len(), 50);
+    assert!(!page0.contains(ids[0].clone()));
+    let (page1, _) = client.get_bounties_by_creator(&creator, &Some(50), &50);
+    assert_eq!(page1.len(), 9);
+}
+
+// ===========================================================================
+// Issue #1225 — swap-remove page mutation efficiency
+// ===========================================================================
+
+/// Helper: create `n` open bounties and return their IDs.
+fn make_open_bounties(
+    client: &MergeMintContractClient,
+    env: &Env,
+    creator: &Address,
+    prefix: &str,
+    n: u32,
+) -> std::vec::Vec<BountyId> {
+    let mut ids = std::vec::Vec::new();
+    for i in 0..n {
+        let tag = std::format!("{prefix}{i}");
+        ids.push(make_bounty(client, env, creator, &tag, None));
+    }
+    ids
+}
+
+/// Removing the only item from a single-page status index works.
+#[test]
+fn test_remove_status_single_page_single_item() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let ids = make_open_bounties(&client, &env, &creator, "sp", 1);
+    let open = Symbol::new(&env, "open");
+
+    env.as_contract(&contract_id, || {
+        storage::remove_bounty_from_status(&env, &open, &ids[0]);
+        assert_eq!(storage::get_status_count(&env, &open), 0);
+    });
+    assert_eq!(client.get_status_count(&open), 0);
+}
+
+/// Removing the first item of a multi-page status index preserves the rest.
+#[test]
+fn test_remove_status_multi_page_first_item() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let ids = make_open_bounties(&client, &env, &creator, "mf", 120);
+    let open = Symbol::new(&env, "open");
+
+    env.as_contract(&contract_id, || {
+        storage::remove_bounty_from_status(&env, &open, &ids[0]);
+        assert_eq!(storage::get_status_count(&env, &open), 119);
+    });
+
+    let (page0, _) = client.get_bounties_by_status(&open, &None, &50);
+    assert_eq!(page0.len(), 50);
+    assert!(!page0.contains(ids[0].clone()));
+    let (page2, _) = client.get_bounties_by_status(&open, &Some(100), &50);
+    assert_eq!(page2.len(), 19);
+}
+
+/// Removing a middle item of a multi-page status index preserves the rest.
+#[test]
+fn test_remove_status_multi_page_middle_item() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let ids = make_open_bounties(&client, &env, &creator, "mm", 120);
+    let open = Symbol::new(&env, "open");
+
+    env.as_contract(&contract_id, || {
+        storage::remove_bounty_from_status(&env, &open, &ids[60]);
+        assert_eq!(storage::get_status_count(&env, &open), 119);
+    });
+
+    let (page1, _) = client.get_bounties_by_status(&open, &Some(50), &50);
+    assert_eq!(page1.len(), 50);
+    assert!(!page1.contains(ids[60].clone()));
+}
+
+/// Removing the last item of a multi-page status index preserves the rest.
+#[test]
+fn test_remove_status_multi_page_last_item() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let ids = make_open_bounties(&client, &env, &creator, "ml", 120);
+    let open = Symbol::new(&env, "open");
+
+    env.as_contract(&contract_id, || {
+        storage::remove_bounty_from_status(&env, &open, &ids[119]);
+        assert_eq!(storage::get_status_count(&env, &open), 119);
+    });
+
+    let (page2, _) = client.get_bounties_by_status(&open, &Some(100), &50);
+    assert_eq!(page2.len(), 19);
+    assert!(!page2.contains(ids[119].clone()));
+}
+
+/// Removing the first item of a multi-page open index preserves the rest.
+#[test]
+fn test_remove_open_bounty_multi_page_first_item() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let ids = make_open_bounties(&client, &env, &creator, "of", 120);
+
+    env.as_contract(&contract_id, || {
+        storage::remove_open_bounty(&env, &ids[0]);
+        assert_eq!(storage::get_open_bounties_count(&env), 119);
+    });
+
+    let page0 = client.get_open_bounties_paged(&0, &50);
+    assert_eq!(page0.len(), 50);
+    assert!(!page0.contains(ids[0].clone()));
+    let page2 = client.get_open_bounties_paged(&100, &50);
+    assert_eq!(page2.len(), 19);
+}
+
+/// Removing a middle item of a multi-page open index preserves the rest.
+#[test]
+fn test_remove_open_bounty_multi_page_middle_item() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let ids = make_open_bounties(&client, &env, &creator, "om", 120);
+
+    env.as_contract(&contract_id, || {
+        storage::remove_open_bounty(&env, &ids[60]);
+        assert_eq!(storage::get_open_bounties_count(&env), 119);
+    });
+
+    let page1 = client.get_open_bounties_paged(&50, &50);
+    assert_eq!(page1.len(), 50);
+    assert!(!page1.contains(ids[60].clone()));
+}
+
+/// Removing the last item of a multi-page open index preserves the rest.
+#[test]
+fn test_remove_open_bounty_multi_page_last_item() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let ids = make_open_bounties(&client, &env, &creator, "ol", 120);
+
+    env.as_contract(&contract_id, || {
+        storage::remove_open_bounty(&env, &ids[119]);
+        assert_eq!(storage::get_open_bounties_count(&env), 119);
+    });
+
+    let page2 = client.get_open_bounties_paged(&100, &50);
+    assert_eq!(page2.len(), 19);
+    assert!(!page2.contains(ids[119].clone()));
+}
+
+/// Host-budget comparison: in-place swap-remove must not cost more CPU or
+/// memory than a full rebuild of the page vector for the same operation.
+#[test]
+fn test_remove_status_swap_remove_budget_bounded() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let ids = make_open_bounties(&client, &env, &creator, "bd", 120);
+    let open = Symbol::new(&env, "open");
+
+    // Measure the in-place swap-remove.
+    env.as_contract(&contract_id, || {
+        env.cost_estimate().budget().reset_unlimited();
+        storage::remove_bounty_from_status(&env, &open, &ids[60]);
+        let cpu = env.cost_estimate().budget().cpu_instruction_cost();
+        let mem = env.cost_estimate().budget().memory_bytes_cost();
+        assert!(cpu > 0);
+        assert!(mem > 0);
+        // A single swap-remove must stay well under a full page rebuild.
+        assert!(
+            cpu < 50_000_000,
+            "swap-remove CPU cost unexpectedly high: {cpu}"
+        );
+    });
+}
+
+/// Host-budget comparison for `remove_open_bounty`.
+#[test]
+fn test_remove_open_bounty_swap_remove_budget_bounded() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let ids = make_open_bounties(&client, &env, &creator, "ob", 120);
+
+    env.as_contract(&contract_id, || {
+        env.cost_estimate().budget().reset_unlimited();
+        storage::remove_open_bounty(&env, &ids[60]);
+        let cpu = env.cost_estimate().budget().cpu_instruction_cost();
+        let mem = env.cost_estimate().budget().memory_bytes_cost();
+        assert!(cpu > 0);
+        assert!(mem > 0);
+        assert!(
+            cpu < 50_000_000,
+            "swap-remove CPU cost unexpectedly high: {cpu}"
+        );
+    });
+}
