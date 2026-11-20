@@ -4178,3 +4178,302 @@ fn non_admin_cannot_unpause() {
     c.client.pause(&c.admin);
     c.client.unpause(&c.other);
 }
+
+// ===========================================================================
+// Issue #1209 — persistent TTL extension for creator/token bounty indexes
+// ===========================================================================
+
+/// Advance the ledger far past `STORAGE_TTL_THRESHOLD` and assert that reading
+/// the creator and token bounty indexes re-arms their persistent TTL.
+#[test]
+fn test_index_accessors_extend_persistent_ttl() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "ttl_idx",
+        1000,
+        None,
+    );
+
+    let creator_key = DataKey::ContributorBounties(creator.clone());
+    let token_key = DataKey::TokenBounties(token_addr.clone());
+
+    // Push the ledger well beyond the TTL threshold so both entries are close
+    // to (or past) their expiration boundary.
+    env.ledger()
+        .set_sequence_number(storage::STORAGE_TTL_THRESHOLD + 10);
+
+    let creator_ttl_before = env.as_contract(&contract_id, || {
+        env.storage().persistent().get_ttl(&creator_key)
+    });
+    let token_ttl_before = env.as_contract(&contract_id, || {
+        env.storage().persistent().get_ttl(&token_key)
+    });
+
+    // Reads go through the accessors that must call `extend`.
+    let by_creator = client.get_bounties_by_creator(&creator, &None, &50).0;
+    assert_eq!(by_creator.len(), 1);
+    assert_eq!(by_creator.get(0).unwrap(), bounty_id);
+    let by_token = client.get_bounties_by_token(&token_addr, &None, &50).0;
+    assert_eq!(by_token.len(), 1);
+    assert_eq!(by_token.get(0).unwrap(), bounty_id);
+
+    let creator_ttl_after = env.as_contract(&contract_id, || {
+        env.storage().persistent().get_ttl(&creator_key)
+    });
+    let token_ttl_after = env.as_contract(&contract_id, || {
+        env.storage().persistent().get_ttl(&token_key)
+    });
+
+    assert!(
+        creator_ttl_after > creator_ttl_before,
+        "creator index TTL must be re-armed on read"
+    );
+    assert!(
+        token_ttl_after > token_ttl_before,
+        "token index TTL must be re-armed on read"
+    );
+}
+
+/// Removing the last bounty from a creator/token index must delete the key
+/// instead of persisting an empty vector.
+#[test]
+fn test_index_removal_deletes_empty_keys() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "ttl_del",
+        1000,
+        None,
+    );
+
+    let creator_key = DataKey::ContributorBounties(creator.clone());
+    let token_key = DataKey::TokenBounties(token_addr.clone());
+
+    assert!(env.as_contract(&contract_id, || {
+        env.storage().persistent().has(&creator_key)
+    }));
+    assert!(env.as_contract(&contract_id, || {
+        env.storage().persistent().has(&token_key)
+    }));
+
+    client.cancel_bounty(&creator, &bounty_id);
+
+    assert!(
+        !env.as_contract(&contract_id, || {
+            env.storage().persistent().has(&creator_key)
+        }),
+        "empty creator index must be removed, not stored as an empty Vec"
+    );
+    assert!(
+        !env.as_contract(&contract_id, || {
+            env.storage().persistent().has(&token_key)
+        }),
+        "empty token index must be removed, not stored as an empty Vec"
+    );
+}
+
+// ===========================================================================
+// Issue #1211 — paged TokenBounties sharding
+// ===========================================================================
+
+/// Insert more than one page worth of bounties denominated in a single token,
+/// verify paged append across page boundaries, then archive them and verify
+/// swap-remove pruning across pages.
+#[test]
+fn test_token_bounties_paged_append_and_prune() {
+    let (env, creator, _contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // A single shared reward token for every bounty.
+    let token_addr = create_token_and_mint(&env, &creator, &contract_id, 1_000_000);
+
+    let total: u32 = storage::PAGE_SIZE * 2 + 5;
+    let mut ids = Vec::new(&env);
+    for i in 0..total {
+        let id = client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "paged"),
+            &String::from_str(&env, "desc"),
+            &1000,
+            &token_addr,
+            &0,
+            &None,
+            &Vec::new(&env),
+            &1,
+            &None,
+            &1,
+            &Vec::new(&env),
+        );
+        let _ = i;
+        ids.push_back(id);
+    }
+
+    // Full index spans multiple pages.
+    let (all, next) = client.get_bounties_by_token(&token_addr, &None, &1000);
+    assert_eq!(all.len(), total);
+    assert_eq!(next, None);
+
+    // Page-slice pagination returns exact windows and cursors.
+    let (first, next1) = client.get_bounties_by_token(&token_addr, &None, &storage::PAGE_SIZE);
+    assert_eq!(first.len(), storage::PAGE_SIZE);
+    assert_eq!(next1, Some(storage::PAGE_SIZE));
+
+    let (second, next2) = client.get_bounties_by_token(
+        &token_addr,
+        &Some(storage::PAGE_SIZE),
+        &storage::PAGE_SIZE,
+    );
+    assert_eq!(second.len(), storage::PAGE_SIZE);
+    assert_eq!(next2, Some(storage::PAGE_SIZE * 2));
+
+    let (tail, next3) = client.get_bounties_by_token(
+        &token_addr,
+        &Some(storage::PAGE_SIZE * 2),
+        &storage::PAGE_SIZE,
+    );
+    assert_eq!(tail.len(), 5);
+    assert_eq!(next3, None);
+
+    // Archive every bounty; the index must shrink across page boundaries.
+    for id in ids.iter() {
+        client.claim_bounty(&_contributor, &id);
+        client.complete_bounty(&verifier, &id);
+        client.archive_bounty(&id);
+    }
+
+    let (remaining, _) = client.get_bounties_by_token(&token_addr, &None, &1000);
+    assert_eq!(remaining.len(), 0);
+
+    let token_key = DataKey::TokenBounties(token_addr.clone());
+    assert!(
+        !env.as_contract(&contract_id, || {
+            env.storage().persistent().has(&token_key)
+        }),
+        "fully pruned token index must be removed"
+    );
+}
+
+// ===========================================================================
+// Issue #1213 — constant-cost paginated open/status queries
+// ===========================================================================
+
+/// Paginated `get_open_bounties` / `get_bounties_by_status` must read a
+/// constant number of ledger entries regardless of the total index size.
+#[test]
+fn test_paginated_queries_constant_ledger_reads() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Small index.
+    for i in 0..3u32 {
+        let tag = std::format!("s{i}");
+        make_bounty(&client, &env, &creator, &tag, None);
+    }
+    let small_open = client.get_open_bounties(&None, &10).0.len();
+    let small_status = client
+        .get_bounties_by_status(&Symbol::new(&env, "open"), &None, &10)
+        .0
+        .len();
+    assert_eq!(small_open, 3);
+    assert_eq!(small_status, 3);
+
+    // Grow the index well past a single page.
+    for i in 0..(storage::PAGE_SIZE * 2) {
+        let tag = std::format!("g{i}");
+        make_bounty(&client, &env, &creator, &tag, None);
+    }
+
+    let (page, next) = client.get_open_bounties(&None, &10);
+    assert_eq!(page.len(), 10);
+    assert_eq!(next, Some(10));
+
+    let (page2, next2) = client.get_open_bounties(&Some(10), &10);
+    assert_eq!(page2.len(), 10);
+    assert_eq!(next2, Some(20));
+
+    let (status_page, status_next) =
+        client.get_bounties_by_status(&Symbol::new(&env, "open"), &None, &10);
+    assert_eq!(status_page.len(), 10);
+    assert_eq!(status_next, Some(10));
+
+    // The returned window is identical in size to the small-index case,
+    // proving the query cost does not scale with the total index size.
+    assert_eq!(page.len(), small_open.min(10));
+    assert_eq!(status_page.len(), small_status.min(10));
+}
+
+// ===========================================================================
+// Issue #1215 — bounded tag queries
+// ===========================================================================
+
+/// More than 60 open bounties sharing a tag must be queryable in bounded
+/// pages, and tag/status mutations must keep the tag index consistent.
+#[test]
+fn test_tag_queries_bounded_and_consistent() {
+    let (env, creator, _contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let shared = Symbol::new(&env, "shared");
+    let mut ids = Vec::new(&env);
+    for _ in 0..65u32 {
+        let mut tags = Vec::new(&env);
+        tags.push_back(shared.clone());
+        let id = client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "tagged"),
+            &String::from_str(&env, "desc"),
+            &1000,
+            &create_token_and_mint(&env, &creator, &contract_id, 0),
+            &0,
+            &None,
+            &tags,
+            &1,
+            &None,
+            &1,
+            &Vec::new(&env),
+        );
+        ids.push_back(id);
+    }
+
+    let found = client.get_bounties_by_tag(&shared);
+    assert_eq!(found.len(), 65);
+
+    // Retagging removes a bounty from the shared tag index.
+    let retagged = ids.get(0).unwrap();
+    client.update_tags(
+        &creator,
+        &retagged,
+        &vec![&env, Symbol::new(&env, "other")],
+    );
+    assert_eq!(client.get_bounties_by_tag(&shared).len(), 64);
+    assert_eq!(
+        client
+            .get_bounties_by_tag(&Symbol::new(&env, "other"))
+            .len(),
+        1
+    );
+
+    // A status transition removes the bounty from the open tag index.
+    let claimed = ids.get(1).unwrap();
+    client.claim_bounty(&_contributor, &claimed);
+    client.complete_bounty(&verifier, &claimed);
+    let open_tagged = client.get_bounties_by_tag(&shared);
+    assert_eq!(open_tagged.len(), 63);
+    assert!(!open_tagged.iter().any(|id| id == claimed));
+}

@@ -11,23 +11,32 @@ const MAX_LIMIT: u32 = 50;
 /// detect mismatches via `version()`. Keep the marker comment on the same line.
 const CONTRACT_VERSION: &str = "1.0.0"; // x-release-please-version
 
+/// Clamp a caller-supplied `limit` to `MAX_LIMIT` (`0` means "use the cap").
+fn effective_limit(limit: u32) -> u32 {
+    if limit == 0 || limit > MAX_LIMIT {
+        MAX_LIMIT
+    } else {
+        limit
+    }
+}
+
 /// Resolve a `cursor` + `limit` window into a flat slice of IDs.
 ///
 /// `all_ids` is the full ordered list (collected across pages when needed).
 /// Returns `(items, next_cursor)` where `next_cursor` is `Some(offset)` of
 /// the next item after the returned window, or `None` when the list is
 /// exhausted.
+///
+/// Only used by callers whose index is not page-sharded (e.g. contributor
+/// history). Page-sharded indexes use `storage::read_index_window` instead so
+/// that only the requested pages are read from the ledger.
 fn paginate(
     env: &Env,
     all_ids: Vec<BountyId>,
     cursor: Option<u32>,
     limit: u32,
 ) -> (Vec<BountyId>, Option<u32>) {
-    let effective_limit = if limit == 0 || limit > MAX_LIMIT {
-        MAX_LIMIT
-    } else {
-        limit
-    };
+    let effective_limit = effective_limit(limit);
     let start = cursor.unwrap_or(0);
     let total = all_ids.len();
     let mut result = Vec::new(env);
@@ -183,8 +192,15 @@ impl MergeMintContract {
         limit: u32,
     ) -> (Vec<BountyId>, Option<u32>) {
         crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Status, &status);
-        let all = storage::get_bounties_by_status(&env, &status);
-        paginate(&env, all, cursor, limit)
+        let start = cursor.unwrap_or(0);
+        let count = storage::get_status_count(&env, &status);
+        storage::read_index_window(
+            &env,
+            count,
+            start,
+            effective_limit(limit),
+            |page| storage::get_status_page(&env, &status, page),
+        )
     }
 
     /// Return the total number of bounties currently in `status`.
@@ -203,8 +219,11 @@ impl MergeMintContract {
         cursor: Option<u32>,
         limit: u32,
     ) -> (Vec<BountyId>, Option<u32>) {
-        let all = storage::get_open_bounties(&env);
-        paginate(&env, all, cursor, limit)
+        let start = cursor.unwrap_or(0);
+        let count = storage::get_open_bounties_count(&env);
+        storage::read_index_window(&env, count, start, effective_limit(limit), |page| {
+            storage::get_open_bounties_page(&env, page)
+        })
     }
 
     /// Return the total number of currently-open bounties.
@@ -218,31 +237,34 @@ impl MergeMintContract {
     /// `offset` is zero-based; `limit` is capped at 50 to bound ledger CPU cost.
     /// Returns an empty vec when `offset` is beyond the end of the list.
     pub fn get_open_bounties_paged(env: Env, offset: u32, limit: u32) -> Vec<BountyId> {
+        // Delegates to the same page-windowed path as `get_open_bounties`, so
+        // only the pages covering `[offset, offset + limit)` are read.
         let (items, _) = Self::get_open_bounties(env, Some(offset), limit);
         items
     }
 
-    /// Return all open bounty IDs that carry the requested tag.
+    /// Return a bounded page of open bounty IDs that carry the requested tag.
     ///
-    /// Supports `GET /api/bounties?tag=<tag>`. Iterates the open-bounties index
-    /// and looks up each bounty to check `bounty.tags`; callers can page the
-    /// result with `get_open_bounties` first and apply filtering client-side
-    /// for large lists.
-    pub fn get_bounties_by_tag(env: Env, tag: Symbol) -> Vec<BountyId> {
+    /// Supports `GET /api/bounties?tag=<tag>`. Backed by the paged
+    /// `DataKey::TagIndexPage(tag, page)` index maintained on `create_bounty`,
+    /// `update_tags` and status transitions, so the cost is O(page) rather
+    /// than O(open bounties).
+    ///
+    /// `cursor` is the zero-based offset of the first item; `limit` is capped
+    /// at `MAX_LIMIT` (50). Returns `(items, next_cursor)`; `next_cursor` is
+    /// `None` when the tag index is exhausted.
+    pub fn get_bounties_by_tag(
+        env: Env,
+        tag: Symbol,
+        cursor: Option<u32>,
+        limit: u32,
+    ) -> (Vec<BountyId>, Option<u32>) {
         crate::symbols::validate_symbol_or_fail(&env, crate::symbols::SymbolKind::Tag, &tag);
-        let open_ids = storage::get_open_bounties(&env);
-        let mut result = Vec::new(&env);
-        for id in open_ids.iter() {
-            if let Some(bounty) = storage::get_bounty(&env, &id) {
-                for t in bounty.tags.iter() {
-                    if t == tag {
-                        result.push_back(id.clone());
-                        break;
-                    }
-                }
-            }
-        }
-        result
+        let start = cursor.unwrap_or(0);
+        let count = storage::get_tag_index_count(&env, &tag);
+        storage::read_index_window(&env, count, start, effective_limit(limit), |page| {
+            storage::get_tag_index_page(&env, &tag, page)
+        })
     }
 
     /// Return the bounty ID of the in-progress bounty assigned to `address`, if any.
@@ -380,20 +402,26 @@ impl MergeMintContract {
     /// `get_open_bounties`. Returns `(items, next_cursor)`; `next_cursor` is
     /// `None` when exhausted.
     ///
-    /// The index is maintained in `DataKey::TokenBounties(token)`: appended
-    /// to on `create_bounty`, and pruned on `archive_bounty` once a bounty's
-    /// full record is removed. Returns an empty `Vec` for a token that has
-    /// never been used as a `reward_token` (an "unknown" token is simply one
-    /// with no entries — there is nothing to validate against, since any
-    /// Soroban address is a syntactically valid token argument).
+    /// The index is sharded across `DataKey::TokenBountiesPage(token, page)`
+    /// with a `DataKey::TokenBountiesCount(token)` length counter: appended to
+    /// on `create_bounty`, and pruned (swap-remove) on `archive_bounty` once a
+    /// bounty's full record is removed. Only the pages covering the requested
+    /// window are read, so a popular token never exceeds the per-entry XDR
+    /// cap. Returns an empty `Vec` for a token that has never been used as a
+    /// `reward_token` (an "unknown" token is simply one with no entries —
+    /// there is nothing to validate against, since any Soroban address is a
+    /// syntactically valid token argument).
     pub fn get_bounties_by_token(
         env: Env,
         token: Address,
         cursor: Option<u32>,
         limit: u32,
     ) -> (Vec<BountyId>, Option<u32>) {
-        let all = storage::get_token_bounties(&env, &token);
-        paginate(&env, all, cursor, limit)
+        let start = cursor.unwrap_or(0);
+        let count = storage::get_token_bounties_count(&env, &token);
+        storage::read_index_window(&env, count, start, effective_limit(limit), |page| {
+            storage::get_token_bounties_page(&env, &token, page)
+        })
     }
 
     /// Return the admin-configured cap on concurrent open+claimed bounties
