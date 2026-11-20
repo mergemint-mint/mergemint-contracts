@@ -4178,3 +4178,92 @@ fn non_admin_cannot_unpause() {
     c.client.pause(&c.admin);
     c.client.unpause(&c.other);
 }
+
+// ── #1237: multi-page PAGE_SIZE boundary / swap-remove corruption tests ──
+
+fn page_test_id(env: &Env, n: u32) -> BountyId {
+    let mut b = [0u8; 32];
+    b[..4].copy_from_slice(&n.to_be_bytes());
+    BountyId(soroban_sdk::BytesN::from_array(env, &b))
+}
+
+/// Removal orders: forward, reverse, middle-out, and a deterministic LCG shuffle.
+fn page_test_orders(total: u32) -> std::vec::Vec<std::vec::Vec<u32>> {
+    let fwd: std::vec::Vec<u32> = (0..total).collect();
+    let rev: std::vec::Vec<u32> = (0..total).rev().collect();
+    let mut mid = fwd.clone();
+    mid.sort_by_key(|i| (*i as i64 - (total / 2) as i64).abs());
+    let mut rnd = fwd.clone();
+    let mut seed: u64 = 0x9E37_79B9 ^ total as u64;
+    for i in (1..rnd.len()).rev() {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        rnd.swap(i, (seed >> 33) as usize % (i + 1));
+    }
+    std::vec![fwd, rev, mid, rnd]
+}
+
+fn assert_unique_set(actual: &Vec<BountyId>, expected: &std::collections::BTreeSet<u32>) {
+    let mut seen = std::collections::BTreeSet::new();
+    for id in actual.iter() {
+        let n = u32::from_be_bytes(id.0.to_array()[..4].try_into().unwrap());
+        assert!(seen.insert(n), "duplicate id {n}");
+    }
+    assert_eq!(&seen, expected);
+}
+
+#[test]
+fn test_status_index_page_boundaries_all_orders() {
+    let env = Env::default();
+    let cid = env.register(MergeMintContract, ());
+    let status = Symbol::new(&env, "open");
+    for total in [49u32, 50, 51, 99, 100, 101, 151] {
+        for order in page_test_orders(total) {
+            env.as_contract(&cid, || {
+                for n in 0..total {
+                    storage::add_bounty_to_status(&env, &page_test_id(&env, n), &status);
+                }
+                let mut live: std::collections::BTreeSet<u32> = (0..total).collect();
+                for n in order {
+                    storage::remove_bounty_from_status(&env, &page_test_id(&env, n), &status);
+                    live.remove(&n);
+                    assert_eq!(storage::get_status_count(&env, &status), live.len() as u32);
+                    assert_unique_set(&storage::get_bounties_by_status(&env, &status), &live);
+                    let pages = (live.len() as u32).div_ceil(storage::PAGE_SIZE);
+                    assert!(!env
+                        .storage()
+                        .persistent()
+                        .has(&DataKey::StatusIndexPage(status.clone(), pages)));
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn test_open_bounties_page_boundaries_all_orders() {
+    let env = Env::default();
+    let cid = env.register(MergeMintContract, ());
+    for total in [49u32, 50, 51, 99, 100, 101, 151] {
+        for order in page_test_orders(total) {
+            env.as_contract(&cid, || {
+                for n in 0..total {
+                    storage::add_open_bounty(&env, &page_test_id(&env, n));
+                }
+                let mut live: std::collections::BTreeSet<u32> = (0..total).collect();
+                for n in order {
+                    storage::remove_open_bounty(&env, &page_test_id(&env, n));
+                    live.remove(&n);
+                    assert_eq!(storage::get_open_bounties_count(&env), live.len() as u32);
+                    assert_unique_set(&storage::get_open_bounties(&env), &live);
+                    let pages = (live.len() as u32).div_ceil(storage::PAGE_SIZE);
+                    assert!(!env
+                        .storage()
+                        .persistent()
+                        .has(&DataKey::OpenBountiesPage(pages)));
+                }
+            });
+        }
+    }
+}
