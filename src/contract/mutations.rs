@@ -220,6 +220,7 @@ fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
         storage::store_bounty(&env, &bounty_id, &bounty);
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
         storage::decrement_creator_open_count(&env, &bounty.creator);
+        storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
         events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
         return;
     }
@@ -230,6 +231,7 @@ fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
     storage::store_bounty(&env, &bounty_id, &bounty);
     storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
     storage::decrement_creator_open_count(&env, &bounty.creator);
+    storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
 
     let token = TokenClient::new(&env, &bounty.reward_token);
     distribute_payout(
@@ -273,6 +275,7 @@ fn apply_dispute_resolution(
             bounty.status = Symbol::new(&env, STATUS_COMPLETED);
             storage::store_bounty(&env, &bounty_id, &bounty);
             storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
         } else {
             let token = TokenClient::new(&env, &bounty.reward_token);
 
@@ -296,6 +299,7 @@ fn apply_dispute_resolution(
             bounty.status = Symbol::new(&env, STATUS_COMPLETED);
             storage::store_bounty(&env, &bounty_id, &bounty);
             storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
         }
     } else {
         // validate_symbol (at decision time) already guarantees resolution is
@@ -308,6 +312,7 @@ fn apply_dispute_resolution(
         bounty.status = Symbol::new(&env, STATUS_CANCELLED);
         storage::store_bounty(&env, &bounty_id, &bounty);
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
     }
 
     events::emit_dispute_resolved(&env, &bounty_id, &arbitrator, &resolution);
@@ -844,6 +849,22 @@ impl MergeMintContract {
             return;
         }
 
+        // #1179: the multi-sig branch must apply the same status guards as
+        // the single-verifier path. A disputed bounty must go through
+        // resolve_dispute, and open, completed or cancelled bounties must
+        // never accumulate approvals.
+        if bounty.status == Symbol::new(&env, STATUS_DISPUTED) {
+            fail(ContractError::BountyIsDisputed);
+        }
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+                Symbol::new(&env, STATUS_SUBMITTED),
+            ],
+            ContractError::BountyNotInProgress,
+        );
+
         // When verifiers are configured, a work submission must exist first —
         // approval without a recorded submission leaves verifiers with
         // nothing concrete to review.
@@ -890,10 +911,23 @@ impl MergeMintContract {
                 storage::store_bounty(&env, &bounty_id, &bounty);
                 storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
                 storage::decrement_creator_open_count(&env, &bounty.creator);
+                storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
                 let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
                 events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
                 return;
             }
+
+            // #1179: checks-effects-interactions. Persist the terminal status,
+            // the status index move and the creator count *before* any
+            // external SEP-41 transfer, so a re-entrant call observes a
+            // completed bounty and cannot trigger a second payout.
+            let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
+            let previous_status = bounty.status.clone();
+            bounty.status = Symbol::new(&env, STATUS_COMPLETED);
+            storage::store_bounty(&env, &bounty_id, &bounty);
+            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            storage::decrement_creator_open_count(&env, &bounty.creator);
+            storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
 
             let token = TokenClient::new(&env, &bounty.reward_token);
             distribute_payout(
@@ -905,12 +939,6 @@ impl MergeMintContract {
                 bounty.reward_amount,
             );
 
-            let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
-            let previous_status = bounty.status.clone();
-            bounty.status = Symbol::new(&env, STATUS_COMPLETED);
-            storage::store_bounty(&env, &bounty_id, &bounty);
-            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
-            storage::decrement_creator_open_count(&env, &bounty.creator);
             events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
         }
     }
@@ -1260,6 +1288,7 @@ impl MergeMintContract {
         storage::store_bounty(&env, &bounty_id, &bounty);
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
         storage::decrement_creator_open_count(&env, &bounty.creator);
+        storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
 
         events::emit_bounty_cancelled(&env, &bounty_id, &caller);
     }
@@ -1314,6 +1343,7 @@ impl MergeMintContract {
         storage::store_bounty(&env, &bounty_id, &bounty);
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
         storage::decrement_creator_open_count(&env, &bounty.creator);
+        storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
 
         events::emit_bounty_expired(&env, &bounty_id, &bounty.creator);
     }
@@ -1536,6 +1566,9 @@ impl MergeMintContract {
     /// * If the bounty has no deadline (`ContractError::BountyNoDeadline`).
     /// * If the current deadline has already passed (`ContractError::BountyDeadlinePassed`).
     /// * If `new_deadline` is not strictly later than the current deadline (`ContractError::BountyDeadlinePassed`).
+    /// * If the bounty is disputed (`ContractError::BountyIsDisputed`).
+    /// * If the bounty is not `open`, `in_progress` or `submitted` (`ContractError::InvalidStatus`).
+    /// * If a milestone deadline would exceed `new_deadline` (`ContractError::MilestoneDeadlineInvalid`).
     ///
     /// # Authorization
     /// Requires auth from `creator`.
@@ -1552,6 +1585,22 @@ impl MergeMintContract {
             fail(ContractError::NotBountyCreator);
         }
 
+        // #1191: only active bounties may have their deadline moved. A
+        // disputed bounty is frozen until resolve_dispute, and completed or
+        // cancelled bounties are terminal.
+        if bounty.status == Symbol::new(&env, STATUS_DISPUTED) {
+            fail(ContractError::BountyIsDisputed);
+        }
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_OPEN),
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+                Symbol::new(&env, STATUS_SUBMITTED),
+            ],
+            ContractError::InvalidStatus,
+        );
+
         let current_deadline = match bounty.deadline {
             Some(d) => d,
             None => fail(ContractError::BountyNoDeadline),
@@ -1561,8 +1610,20 @@ impl MergeMintContract {
             fail(ContractError::BountyDeadlinePassed);
         }
 
+        // Strict comparison: also rejects any further extension once the
+        // deadline is `u32::MAX`, with no arithmetic that could overflow.
         if new_deadline <= current_deadline {
             fail(ContractError::BountyDeadlinePassed);
+        }
+
+        // #1191: keep the milestone invariant established by create_bounty —
+        // no milestone deadline may exceed the bounty's own deadline.
+        for milestone in bounty.milestones.iter() {
+            if let Some(milestone_deadline) = milestone.deadline {
+                if milestone_deadline > new_deadline {
+                    fail(ContractError::MilestoneDeadlineInvalid);
+                }
+            }
         }
 
         bounty.deadline = Some(new_deadline);
@@ -2000,6 +2061,11 @@ impl MergeMintContract {
     /// * If `tags.len() > MAX_TAGS` (`ContractError::TooManyTags`).
     /// * If `tags` contains a duplicate (`ContractError::DuplicateTag`).
     /// * If any tag is not on the allow-list (`ContractError::InvalidTag`).
+    /// * If the bounty is not `open`, `in_progress` or `submitted`
+    ///   (`ContractError::InvalidStatus`).
+    ///
+    /// # Events
+    /// Emits `bounty_tags_updated` with `(bounty_id, old_tags, new_tags)`.
     ///
     /// # Authorization
     /// Requires auth from `creator`.
@@ -2016,10 +2082,27 @@ impl MergeMintContract {
             fail(ContractError::NotBountyCreator);
         }
 
+        // #1192: tags may only change while the bounty is active. Terminal
+        // bounties (completed/cancelled, which also covers archived bounties
+        // served from their summary) must not be rewritten — doing so would
+        // also resurrect the full record that archive_bounty removed.
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_OPEN),
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+                Symbol::new(&env, STATUS_SUBMITTED),
+            ],
+            ContractError::InvalidStatus,
+        );
+
         validate_tags(&env, &tags);
 
+        let old_tags = bounty.tags.clone();
         bounty.tags = tags;
         storage::store_bounty(&env, &bounty_id, &bounty);
+
+        events::emit_bounty_tags_updated(&env, &bounty_id, &creator, &old_tags, &bounty.tags);
     }
 
     /// Archive a finished bounty, compacting it into a `BountySummary` and
@@ -2083,6 +2166,7 @@ impl MergeMintContract {
         storage::remove_bounty_body(&env, &bounty_id);
         storage::remove_archive_eligible_at(&env, &bounty_id);
         storage::remove_token_bounty(&env, &bounty.reward_token, &bounty_id);
+        storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
 
         events::emit_bounty_archived(&env, &bounty_id);
     }

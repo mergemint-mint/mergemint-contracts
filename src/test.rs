@@ -4178,3 +4178,477 @@ fn non_admin_cannot_unpause() {
     c.client.pause(&c.admin);
     c.client.unpause(&c.other);
 }
+
+// ===========================================================================
+// Issue #1179 — approve_completion status guards + checks-effects-interactions
+// ===========================================================================
+
+/// A multi-sig bounty that was never claimed (still `open`) must not accept
+/// approvals, even with a stray submission.
+#[test]
+#[should_panic(expected = "bounty is not in progress")]
+fn test_1179_approve_completion_rejects_open_multisig_bounty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token, v1, _v2, _v3) =
+        make_multisig_bounty(&client, &env, &creator, &contract_id, 1000, 2);
+
+    // Open bounties have no assignee; give it one directly via storage so the
+    // only remaining guard that can reject the vote is the status guard.
+    env.as_contract(&contract_id, || {
+        let mut bounty = storage::get_bounty(&env, &bounty_id).unwrap();
+        bounty.assignees.push_back((Address::generate(&env), 10_000));
+        storage::store_bounty(&env, &bounty_id, &bounty);
+        storage::set_submission(&env, &bounty_id, &BytesN::from_array(&env, &[1u8; 32]));
+    });
+
+    client.approve_completion(&v1, &bounty_id);
+}
+
+/// A disputed multi-sig bounty must be resolved via `resolve_dispute`; it
+/// cannot keep accumulating approvals.
+#[test]
+#[should_panic(expected = "bounty is disputed")]
+fn test_1179_approve_completion_rejects_disputed_multisig_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token, v1, _v2, _v3) =
+        make_multisig_bounty(&client, &env, &creator, &contract_id, 1000, 2);
+
+    client.claim_bounty(&contributor, &bounty_id);
+    // A submission exists before the dispute is raised.
+    env.as_contract(&contract_id, || {
+        storage::set_submission(&env, &bounty_id, &BytesN::from_array(&env, &[2u8; 32]));
+    });
+    client.raise_dispute(&creator, &bounty_id);
+
+    client.approve_completion(&v1, &bounty_id);
+}
+
+/// Once a multi-sig bounty is completed, a late verifier cannot add an
+/// approval (and so cannot trigger a second payout).
+#[test]
+#[should_panic(expected = "bounty is not in progress")]
+fn test_1179_approve_completion_rejects_completed_multisig_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token, v1, v2, v3) =
+        make_multisig_bounty(&client, &env, &creator, &contract_id, 1000, 2);
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.submit_work(&contributor, &bounty_id, &BytesN::from_array(&env, &[7u8; 32]));
+    client.approve_completion(&v1, &bounty_id);
+    client.approve_completion(&v2, &bounty_id);
+    assert_eq!(
+        client.get_bounty(&bounty_id).unwrap().status,
+        Symbol::new(&env, "completed")
+    );
+
+    client.approve_completion(&v3, &bounty_id);
+}
+
+/// A cancelled multi-sig bounty must not accept approvals.
+#[test]
+#[should_panic(expected = "bounty is not in progress")]
+fn test_1179_approve_completion_rejects_cancelled_multisig_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token, v1, _v2, _v3) =
+        make_multisig_bounty(&client, &env, &creator, &contract_id, 1000, 2);
+
+    client.cancel_bounty(&creator, &bounty_id);
+    env.as_contract(&contract_id, || {
+        let mut bounty = storage::get_bounty(&env, &bounty_id).unwrap();
+        bounty.assignees.push_back((contributor.clone(), 10_000));
+        storage::store_bounty(&env, &bounty_id, &bounty);
+        storage::set_submission(&env, &bounty_id, &BytesN::from_array(&env, &[3u8; 32]));
+    });
+
+    client.approve_completion(&v1, &bounty_id);
+}
+
+/// Reaching the threshold updates status, the status index and the creator
+/// open count atomically with the payout.
+#[test]
+fn test_1179_threshold_completion_updates_state_and_indexes_atomically() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let reward_amount: i128 = 1000;
+    let (bounty_id, token_addr, v1, v2, _v3) =
+        make_multisig_bounty(&client, &env, &creator, &contract_id, reward_amount, 2);
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.submit_work(&contributor, &bounty_id, &BytesN::from_array(&env, &[7u8; 32]));
+    client.approve_completion(&v1, &bounty_id);
+    client.approve_completion(&v2, &bounty_id);
+
+    let completed = Symbol::new(&env, "completed");
+    let submitted = Symbol::new(&env, "submitted");
+    assert_eq!(client.get_bounty(&bounty_id).unwrap().status, completed);
+    env.as_contract(&contract_id, || {
+        assert!(storage::get_bounties_by_status(&env, &completed).contains(&bounty_id));
+        assert!(!storage::get_bounties_by_status(&env, &submitted).contains(&bounty_id));
+        assert_eq!(storage::get_creator_open_count(&env, &creator), 0);
+    });
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_addr);
+    assert_eq!(token.balance(&contributor), reward_amount);
+    assert_eq!(token.balance(&contract_id), 0);
+}
+
+// ===========================================================================
+// Issue #1190 — reclaim auxiliary per-bounty keys on terminal transitions
+// ===========================================================================
+
+fn aux_keys(bounty_id: &BountyId) -> std::vec::Vec<DataKey> {
+    std::vec![
+        DataKey::ClaimedAtLedger(bounty_id.clone()),
+        DataKey::Submission(bounty_id.clone()),
+        DataKey::Approvals(bounty_id.clone()),
+        DataKey::PendingOwner(bounty_id.clone()),
+        DataKey::PendingResolution(bounty_id.clone()),
+        DataKey::DisputeEvidence(bounty_id.clone()),
+        DataKey::DisputeAppealed(bounty_id.clone()),
+    ]
+}
+
+fn assert_no_aux_keys(env: &Env, contract_id: &Address, bounty_id: &BountyId) {
+    env.as_contract(contract_id, || {
+        for key in aux_keys(bounty_id) {
+            assert!(
+                !env.storage().persistent().has(&key),
+                "auxiliary key {:?} must be removed after a terminal transition",
+                key
+            );
+        }
+    });
+}
+
+/// Seed every auxiliary key directly so each cleanup path is exercised
+/// against the full set, not just the keys its own flow happens to write.
+fn seed_aux_keys(env: &Env, contract_id: &Address, bounty_id: &BountyId) {
+    env.as_contract(contract_id, || {
+        let other = Address::generate(env);
+        storage::set_claimed_at_ledger(env, bounty_id, 1);
+        storage::set_submission(env, bounty_id, &BytesN::from_array(env, &[9u8; 32]));
+        let mut approvals = Vec::new(env);
+        approvals.push_back(other.clone());
+        storage::set_approvals(env, bounty_id, &approvals);
+        storage::set_pending_owner(env, bounty_id, &other);
+        storage::set_pending_resolution(
+            env,
+            bounty_id,
+            &crate::types::PendingResolution {
+                arbitrator: other.clone(),
+                resolution: Symbol::new(env, "cancel"),
+                decided_at: 1,
+            },
+        );
+        storage::append_dispute_evidence(env, bounty_id, &BytesN::from_array(env, &[8u8; 32]));
+        storage::set_dispute_appealed(env, bounty_id);
+    });
+}
+
+#[test]
+fn test_1190_complete_bounty_reclaims_aux_keys() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "aux_done", 1000, None);
+
+    client.claim_bounty(&contributor, &bounty_id);
+    seed_aux_keys(&env, &contract_id, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+
+    assert_no_aux_keys(&env, &contract_id, &bounty_id);
+}
+
+#[test]
+fn test_1190_multisig_completion_reclaims_aux_keys() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token, v1, v2, _v3) =
+        make_multisig_bounty(&client, &env, &creator, &contract_id, 1000, 2);
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.submit_work(&contributor, &bounty_id, &BytesN::from_array(&env, &[7u8; 32]));
+    client.approve_completion(&v1, &bounty_id);
+    client.approve_completion(&v2, &bounty_id);
+
+    assert_no_aux_keys(&env, &contract_id, &bounty_id);
+}
+
+#[test]
+fn test_1190_cancel_bounty_reclaims_aux_keys() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "aux_cancel", 1000, None);
+
+    seed_aux_keys(&env, &contract_id, &bounty_id);
+    client.cancel_bounty(&creator, &bounty_id);
+
+    assert_no_aux_keys(&env, &contract_id, &bounty_id);
+}
+
+#[test]
+fn test_1190_expire_bounty_reclaims_aux_keys() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "aux_expire",
+        1000,
+        Some(10),
+    );
+
+    seed_aux_keys(&env, &contract_id, &bounty_id);
+    env.ledger().set_sequence_number(100);
+    client.expire_bounty(&creator, &bounty_id);
+
+    assert_no_aux_keys(&env, &contract_id, &bounty_id);
+}
+
+#[test]
+fn test_1190_dispute_resolution_reclaims_aux_keys() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "aux_dispute", 1000, None);
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+    client.add_dispute_evidence(&creator, &bounty_id, &BytesN::from_array(&env, &[4u8; 32]));
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+
+    assert_no_aux_keys(&env, &contract_id, &bounty_id);
+}
+
+#[test]
+fn test_1190_archive_bounty_reclaims_aux_keys() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "aux_archive", 1000, None);
+
+    client.cancel_bounty(&creator, &bounty_id);
+    // Simulate stale entries written after the terminal transition, then
+    // archive: archival must sweep them too.
+    seed_aux_keys(&env, &contract_id, &bounty_id);
+    env.as_contract(&contract_id, || {
+        storage::set_archive_eligible_at(&env, &bounty_id, env.ledger().sequence());
+    });
+    client.archive_bounty(&bounty_id);
+
+    assert_no_aux_keys(&env, &contract_id, &bounty_id);
+}
+
+// ===========================================================================
+// Issue #1191 — extend_deadline active-status guard + milestone invariants
+// ===========================================================================
+
+#[test]
+#[should_panic(expected = "invalid bounty status")]
+fn test_1191_extend_deadline_rejects_completed_bounty() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    env.ledger().set_sequence_number(50);
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "ext_done",
+        1000,
+        Some(100),
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+
+    client.extend_deadline(&creator, &bounty_id, &200);
+}
+
+#[test]
+#[should_panic(expected = "invalid bounty status")]
+fn test_1191_extend_deadline_rejects_cancelled_bounty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    env.ledger().set_sequence_number(50);
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "ext_cancel",
+        1000,
+        Some(100),
+    );
+    client.cancel_bounty(&creator, &bounty_id);
+
+    client.extend_deadline(&creator, &bounty_id, &200);
+}
+
+#[test]
+#[should_panic(expected = "bounty is disputed")]
+fn test_1191_extend_deadline_rejects_disputed_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "ext_dispute", Some(100));
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+
+    client.extend_deadline(&creator, &bounty_id, &200);
+}
+
+#[test]
+fn test_1191_extend_deadline_allows_submitted_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "ext_submit", Some(100));
+    client.claim_bounty(&contributor, &bounty_id);
+    client.submit_work(&contributor, &bounty_id, &BytesN::from_array(&env, &[5u8; 32]));
+
+    client.extend_deadline(&creator, &bounty_id, &300);
+    assert_eq!(client.get_bounty(&bounty_id).unwrap().deadline, Some(300));
+}
+
+/// `u32::MAX` is a valid (maximal) deadline, and no further extension past it
+/// is possible — without any arithmetic overflow.
+#[test]
+#[should_panic(expected = "bounty deadline passed")]
+fn test_1191_extend_deadline_u32_max_edge() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "ext_max", Some(100));
+
+    client.extend_deadline(&creator, &bounty_id, &u32::MAX);
+    assert_eq!(client.get_bounty(&bounty_id).unwrap().deadline, Some(u32::MAX));
+
+    client.extend_deadline(&creator, &bounty_id, &u32::MAX);
+}
+
+/// A milestone deadline beyond the requested bounty deadline violates the
+/// create_bounty invariant and must be rejected.
+#[test]
+#[should_panic(expected = "milestone deadlines must be non-decreasing and not exceed the bounty deadline")]
+fn test_1191_extend_deadline_enforces_milestone_invariant() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    env.ledger().set_sequence_number(50);
+    let bounty_id = make_bounty(&client, &env, &creator, "ext_ms", Some(100));
+
+    // Corrupt the invariant directly to exercise the defensive check.
+    env.as_contract(&contract_id, || {
+        let mut bounty = storage::get_bounty(&env, &bounty_id).unwrap();
+        bounty.milestones.push_back(Milestone {
+            description: Symbol::new(&env, "m1"),
+            reward: 1000,
+            completed: false,
+            deadline: Some(500),
+        });
+        storage::store_bounty(&env, &bounty_id, &bounty);
+    });
+
+    client.extend_deadline(&creator, &bounty_id, &200);
+}
+
+// ===========================================================================
+// Issue #1192 — update_tags active-status guard + bounty_tags_updated event
+// ===========================================================================
+
+#[test]
+fn test_1192_update_tags_emits_bounty_tags_updated() {
+    use soroban_sdk::xdr::ContractEventBody;
+
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let bounty_id = make_bounty(&client, &env, &creator, "tags_evt", None);
+
+    let new_tags = vec![&env, Symbol::new(&env, "bug"), Symbol::new(&env, "docs")];
+    client.update_tags(&creator, &bounty_id, &new_tags);
+
+    assert_invocation_emits(&env, &contract_id, &["bounty_tags_updated"]);
+    assert_eq!(client.get_bounty(&bounty_id).unwrap().tags, new_tags);
+
+    let events = env.events().all().filter_by_contract(&contract_id);
+    let ev = events.events().last().expect("event").clone();
+    let ContractEventBody::V0(body) = &ev.body;
+
+    let topic0 = Val::try_from_val(&env, &body.topics[0]).unwrap();
+    let topic1 = Val::try_from_val(&env, &body.topics[1]).unwrap();
+    assert_eq!(
+        Symbol::try_from_val(&env, &topic0).unwrap(),
+        Symbol::new(&env, "bounty_tags_updated")
+    );
+    assert_eq!(Address::try_from_val(&env, &topic1).unwrap(), creator);
+
+    let data = Val::try_from_val(&env, &body.data).unwrap();
+    let (evt_id, old_tags, evt_new_tags): (BountyId, Vec<Symbol>, Vec<Symbol>) =
+        TryFromVal::try_from_val(&env, &data).unwrap();
+    assert_eq!(evt_id, bounty_id);
+    assert_eq!(old_tags, Vec::<Symbol>::new(&env));
+    assert_eq!(evt_new_tags, new_tags);
+}
+
+#[test]
+#[should_panic(expected = "invalid bounty status")]
+fn test_1192_update_tags_rejects_completed_bounty() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "tags_done", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+
+    client.update_tags(&creator, &bounty_id, &vec![&env, Symbol::new(&env, "bug")]);
+}
+
+#[test]
+#[should_panic(expected = "invalid bounty status")]
+fn test_1192_update_tags_rejects_cancelled_bounty() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "tags_cancel", 1000, None);
+    client.cancel_bounty(&creator, &bounty_id);
+
+    client.update_tags(&creator, &bounty_id, &vec![&env, Symbol::new(&env, "bug")]);
+}
+
+#[test]
+fn test_1192_update_tags_allowed_on_in_progress_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let bounty_id = make_bounty(&client, &env, &creator, "tags_live", None);
+    client.claim_bounty(&contributor, &bounty_id);
+
+    let tags = vec![&env, Symbol::new(&env, "feature")];
+    client.update_tags(&creator, &bounty_id, &tags);
+    assert_eq!(client.get_bounty(&bounty_id).unwrap().tags, tags);
+}
