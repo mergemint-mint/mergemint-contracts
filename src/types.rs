@@ -268,3 +268,17 @@ impl Contributor {
         }
     }
 }
+
+/// Splits `reward` evenly across `count` assignees.
+///
+/// Returns `(share, dust)`; `dust` is the remainder kept explicit so escrow
+/// stays balanced. With `count == 0` the whole reward is returned as dust.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn split_reward(reward: i128, count: u32) -> (i128, i128) {
+    if count == 0 {
+        return (0, reward);
+    }
+    let n = count as i128;
+    let share = reward / n;
+    (share, reward - share * n)
+}
