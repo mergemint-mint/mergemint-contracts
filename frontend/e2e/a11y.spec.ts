@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Locator, Page } from "@playwright/test";
-import { CREATOR, expect, test } from "./fixtures";
+import { CREATOR, expect, makeBounty, test } from "./fixtures";
 
 /**
  * Automated accessibility checks (#1123). Runs axe-core against each main
@@ -88,5 +88,42 @@ for (const colorScheme of ["light", "dark"] as const) {
         expect(blocking, "serious/critical axe violations").toEqual([]);
       });
     }
+
+    test("submitted, archived, and paused bounty states have no serious or critical axe violations", async ({
+      page,
+      api,
+      wallet,
+    }, testInfo) => {
+      api.seed(
+        makeBounty({ id: "1", status: "submitted", title: "Submitted bounty item" }),
+        makeBounty({ id: "2", status: "archived", title: "Archived bounty item" }),
+        makeBounty({ id: "3", status: "paused", paused: true, title: "Paused bounty item" }),
+      );
+
+      await page.goto("/bounties/3");
+      await wallet.connect();
+      await expect(page.getByRole("heading", { level: 1, name: "Paused bounty item" })).toBeVisible();
+      await expect(page.getByTestId("contract-paused-notice")).toBeVisible();
+
+      const results = await new AxeBuilder({ page })
+        .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+        .analyze();
+
+      await testInfo.attach("axe-results-states.json", {
+        body: JSON.stringify(results.violations, null, 2),
+        contentType: "application/json",
+      });
+
+      const blocking = results.violations
+        .filter((v) => BLOCKING_IMPACTS.has(v.impact ?? ""))
+        .map((v) => ({
+          rule: v.id,
+          impact: v.impact,
+          help: v.help,
+          targets: v.nodes.map((n) => n.target.join(" ")),
+        }));
+
+      expect(blocking, "serious/critical axe violations for submitted/archived/paused states").toEqual([]);
+    });
   });
 }
