@@ -91,12 +91,10 @@ impl MergeMintContract {
             Bounty {
                 creator: summary.creator,
                 reward_amount: summary.reward,
-                // The original reward_token is not retained in the summary;
-                // this placeholder (the contract's own address) is never a
-                // real payout destination and must not be used for
-                // transfers. Callers that need the real token should use
-                // off-chain indexer history instead.
-                reward_token: env.current_contract_address(),
+                // The original reward_token is retained in the summary, so
+                // archived bounties report the true payout token rather than
+                // a placeholder.
+                reward_token: summary.reward_token,
                 assignees,
                 max_assignees: 1,
                 status: summary.status,

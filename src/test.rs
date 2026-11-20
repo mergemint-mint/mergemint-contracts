@@ -1432,6 +1432,48 @@ fn test_update_contributor_metadata_overwrites() {
     assert_eq!(data.metadata.unwrap(), Symbol::new(&env, "new_uri"));
 }
 
+/// Issue #1221 — `update_contributor_metadata` must emit a
+/// `contributor_metadata_updated` event carrying the contributor address and
+/// the new metadata `Symbol` as its data payload.
+#[test]
+fn test_update_contributor_metadata_emits_event() {
+    use soroban_sdk::xdr::ContractEventBody;
+
+    let (env, _creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let uri = Symbol::new(&env, "ipfs_hash_evt");
+    client.update_contributor_metadata(&contributor, &uri);
+
+    let all = env.events().all();
+    let events = all.filter_by_contract(&contract_id).events();
+    assert_eq!(events.len(), 1, "exactly one event must be emitted");
+
+    let ContractEventBody::V0(body) = &events.get(0).unwrap().body;
+    // Topic 0 is the event name.
+    let topic0 = Val::try_from_val(&env, body.topics.first().unwrap()).unwrap();
+    assert_eq!(
+        Symbol::try_from_val(&env, &topic0).unwrap(),
+        Symbol::new(&env, "contributor_metadata_updated"),
+        "event topic must be contributor_metadata_updated"
+    );
+    // Topic 1 is the contributor address.
+    let topic1 = Val::try_from_val(&env, body.topics.get(1).unwrap()).unwrap();
+    assert_eq!(
+        Address::try_from_val(&env, &topic1).unwrap(),
+        contributor,
+        "event must carry the contributor address"
+    );
+    // Data payload is the new metadata Symbol.
+    let data = Val::try_from_val(&env, &body.data).unwrap();
+    assert_eq!(
+        Symbol::try_from_val(&env, &data).unwrap(),
+        uri,
+        "event data must be the stored metadata symbol"
+    );
+}
+
 /// An empty metadata Symbol must be rejected before writing to storage.
 #[test]
 #[should_panic(expected = "metadata must not be empty")]
@@ -1441,6 +1483,172 @@ fn test_update_contributor_metadata_rejects_empty_symbol() {
     let client = MergeMintContractClient::new(&env, &contract_id);
 
     client.update_contributor_metadata(&contributor, &Symbol::new(&env, ""));
+}
+
+// ===========================================================================
+// Issue #1220 — BountySummary retains reward_token after archive
+// ===========================================================================
+
+/// `get_bounty` and `get_bounty_summary` must preserve the original
+/// `reward_token` after `archive_bounty` instead of substituting the contract
+/// address as a placeholder.
+#[test]
+fn test_archived_bounty_preserves_reward_token() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "arch_token",
+        1000,
+        None,
+    );
+
+    client.archive_bounty(&bounty_id);
+
+    let summary = client
+        .get_bounty_summary(&bounty_id)
+        .expect("archived bounty must have a summary");
+    assert_eq!(
+        summary.reward_token, token_addr,
+        "summary must retain the original reward token"
+    );
+    assert_ne!(
+        summary.reward_token, contract_id,
+        "summary must not substitute the contract address"
+    );
+
+    let archived = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(
+        archived.reward_token, token_addr,
+        "get_bounty must retain the original reward token after archive"
+    );
+}
+
+// ===========================================================================
+// Issue #1219 — migrate_legacy_indexes
+// ===========================================================================
+
+/// Seed legacy `DataKey::StatusIndex` and `DataKey::OpenBounties` blobs
+/// directly into contract storage, then verify `migrate_legacy_indexes`
+/// moves them losslessly into the paged shards, deletes the legacy keys and
+/// is idempotent on a second invocation.
+#[test]
+fn test_migrate_legacy_indexes_lossless_and_idempotent() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let open = Symbol::new(&env, "open");
+    let id1 = fake_bounty_id(&env, 1);
+    let id2 = fake_bounty_id(&env, 2);
+    let id3 = fake_bounty_id(&env, 3);
+
+    // Seed legacy blobs directly via env.as_contract.
+    env.as_contract(&contract_id, || {
+        let mut legacy_status: Vec<BountyId> = Vec::new(&env);
+        legacy_status.push_back(id1.clone());
+        legacy_status.push_back(id2.clone());
+        legacy_status.push_back(id3.clone());
+        env.storage().persistent().set(
+            &DataKey::StatusIndex(open.clone()),
+            &legacy_status,
+        );
+
+        let mut legacy_open: Vec<BountyId> = Vec::new(&env);
+        legacy_open.push_back(id1.clone());
+        legacy_open.push_back(id2.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::OpenBounties, &legacy_open);
+    });
+
+    client.migrate_legacy_indexes(&admin);
+
+    // Paged reads return the migrated entries in order.
+    let (status_page, _) = client.get_bounties_by_status(&open, &None, &50);
+    assert_eq!(status_page.len(), 3);
+    assert_eq!(status_page.get(0).unwrap(), id1);
+    assert_eq!(status_page.get(1).unwrap(), id2);
+    assert_eq!(status_page.get(2).unwrap(), id3);
+    assert_eq!(client.get_status_count(&open), 3);
+
+    let open_page = client.get_open_bounties_paged(&0, &50);
+    assert_eq!(open_page.len(), 2);
+    assert_eq!(open_page.get(0).unwrap(), id1);
+    assert_eq!(open_page.get(1).unwrap(), id2);
+    assert_eq!(client.get_open_bounties_count(), 2);
+
+    // Legacy keys are gone.
+    env.as_contract(&contract_id, || {
+        assert!(
+            !env.storage()
+                .persistent()
+                .has(&DataKey::StatusIndex(open.clone())),
+            "legacy StatusIndex key must be deleted"
+        );
+        assert!(
+            !env.storage().persistent().has(&DataKey::OpenBounties),
+            "legacy OpenBounties key must be deleted"
+        );
+    });
+
+    // Idempotent: a second run is a no-op and does not duplicate entries.
+    client.migrate_legacy_indexes(&admin);
+    let (status_page2, _) = client.get_bounties_by_status(&open, &None, &50);
+    assert_eq!(status_page2.len(), 3, "no duplicate entries after re-run");
+    assert_eq!(client.get_open_bounties_count(), 2);
+}
+
+// ===========================================================================
+// Issue #1222 — event wire compatibility with docs/event-schema.md
+// ===========================================================================
+
+/// Assert exact topic/data wire format for the migrated `#[contractevent]`
+/// emitters: topic 0 is the event name, topic 1 is the primary subject and
+/// the data payload matches the documented schema.
+#[test]
+fn test_event_wire_compatibility() {
+    use soroban_sdk::xdr::ContractEventBody;
+
+    fn last_event(env: &Env, contract_id: &Address) -> (Symbol, Val) {
+        let all = env.events().all();
+        let events = all.filter_by_contract(contract_id).events();
+        let ev = events.last().expect("expected at least one event");
+        let ContractEventBody::V0(body) = &ev.body;
+        let topic0 = Val::try_from_val(env, body.topics.first().unwrap()).unwrap();
+        let name = Symbol::try_from_val(env, &topic0).unwrap();
+        let data = Val::try_from_val(env, &body.data).unwrap();
+        (name, data)
+    }
+
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // bounty_created: topic 0 = "bounty_created", data = bounty id.
+    let bounty_id = make_bounty(&client, &env, &creator, "wire_evt", None);
+    let (name, data) = last_event(&env, &contract_id);
+    assert_eq!(name, Symbol::new(&env, "bounty_created"));
+    assert_eq!(
+        BountyId::try_from_val(&env, &data).unwrap(),
+        bounty_id,
+        "bounty_created data must be the bounty id"
+    );
+
+    // contributor_metadata_updated: topic 0 = name, data = metadata symbol.
+    let contributor = Address::generate(&env);
+    let uri = Symbol::new(&env, "wire_meta");
+    client.update_contributor_metadata(&contributor, &uri);
+    let (name, data) = last_event(&env, &contract_id);
+    assert_eq!(name, Symbol::new(&env, "contributor_metadata_updated"));
+    assert_eq!(Symbol::try_from_val(&env, &data).unwrap(), uri);
 }
 
 // ===========================================================================
