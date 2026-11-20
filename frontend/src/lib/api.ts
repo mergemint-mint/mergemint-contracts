@@ -13,31 +13,145 @@ import { signTransaction } from './wallet';
 // If no env var is set we default to the versioned prefix served by the same origin.
 export const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '/api/v1';
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, init);
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(body || `Request failed with status ${res.status}`);
-  }
-  return res.json() as Promise<T>;
+export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+
+export interface RequestOptions extends RequestInit {
+  timeoutMs?: number;
+  idempotencyKey?: string;
 }
 
-async function buildSignAndSubmit(
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly details?: unknown;
+
+  constructor(message: string, status: number, code?: string, details?: unknown) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export function parseApiErrorBody(rawBody: string, status: number): ApiError {
+  const trimmed = rawBody.trim();
+  if (trimmed) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      const message =
+        typeof parsed.message === 'string' && parsed.message.trim()
+          ? parsed.message.trim()
+          : typeof parsed.error === 'string' && parsed.error.trim()
+            ? parsed.error.trim()
+            : trimmed;
+      const code = typeof parsed.code === 'string' ? parsed.code : undefined;
+      return new ApiError(message, status, code, parsed.details);
+    } catch {
+      return new ApiError(trimmed, status);
+    }
+  }
+  return new ApiError(`Request failed with status ${status}`, status);
+}
+
+export function generateIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `mm-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
+async function request<T>(path: string, init?: RequestOptions): Promise<T> {
+  const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, idempotencyKey, signal, headers, ...rest } =
+    init ?? {};
+  const controller = new AbortController();
+  let timedOut = false;
+
+  const onCallerAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      signal.addEventListener('abort', onCallerAbort, { once: true });
+    }
+  }
+
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs)
+      : null;
+
+  const mergedHeaders: Record<string, string> = {
+    ...(headers as Record<string, string> | undefined),
+  };
+  if (idempotencyKey) {
+    mergedHeaders['Idempotency-Key'] = idempotencyKey;
+  }
+
+  const fetchInit: RequestInit = {
+    ...rest,
+    ...(Object.keys(mergedHeaders).length > 0 ? { headers: mergedHeaders } : {}),
+    signal: controller.signal,
+  };
+
+  try {
+    const res = await fetch(`${API_BASE}${path}`, fetchInit);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw parseApiErrorBody(body, res.status);
+    }
+    return (await res.json()) as T;
+  } catch (err) {
+    if (timedOut) {
+      throw new ApiError(`Request timed out after ${timeoutMs}ms`, 408, 'REQUEST_TIMEOUT');
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onCallerAbort);
+  }
+}
+
+const inFlightSubmissions = new Set<string>();
+
+export async function buildSignAndSubmit(
   path: string,
   body: Record<string, string | number>,
-  source: string
+  source: string,
+  options?: { idempotencyKey?: string; signal?: AbortSignal; timeoutMs?: number }
 ): Promise<{ hash: string }> {
-  const built = await request<{ xdr: string }>(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const xdr = await signTransaction(built.xdr);
-  return request<{ hash: string }>('/tx/submit', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ source, xdr }),
-  });
+  const dedupeKey = `${path}:${source}:${JSON.stringify(body)}`;
+  if (inFlightSubmissions.has(dedupeKey)) {
+    throw new Error('Transaction submission already in progress');
+  }
+
+  const idempotencyKey = options?.idempotencyKey ?? generateIdempotencyKey();
+  inFlightSubmissions.add(dedupeKey);
+
+  try {
+    const built = await request<{ xdr: string }>(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+    const xdr = await signTransaction(built.xdr);
+    return await request<{ hash: string }>('/tx/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source, xdr }),
+      idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  } finally {
+    inFlightSubmissions.delete(dedupeKey);
+  }
 }
 
 export type BountySortField = 'reward' | 'deadline' | 'created';

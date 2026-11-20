@@ -3,6 +3,8 @@ vulnerability = "deny"
 unmaintained = "warn"
 unsound = "warn"
 yanked = "warn"
+# Keep in sync with audit.toml: paste is a transitive dependency of soroban-sdk.
+ignore = ["RUSTSEC-2024-0436"]
 
 [licenses]
 allow = [
@@ -44,7 +46,7 @@ skip = []
 skip-tree = []
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []

@@ -27,13 +27,22 @@ export interface MockBounty {
   description: string;
   reward: string;
   rewardToken?: string;
-  status: "open" | "claimed" | "disputed" | "completed" | "cancelled";
+  status:
+    | "open"
+    | "claimed"
+    | "submitted"
+    | "disputed"
+    | "completed"
+    | "cancelled"
+    | "archived"
+    | "paused";
   creator: string;
   assignee?: string;
   createdAt: string;
   maxAssignees: number;
   tags: string[];
   deadline?: number;
+  paused?: boolean;
   milestones: Array<{ description: string; reward: string; completed: boolean }>;
 }
 

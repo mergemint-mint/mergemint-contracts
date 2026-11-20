@@ -30,7 +30,7 @@ export interface CspEnv {
 /** Default Soroban RPC and Horizon origins per network. */
 export const DEFAULT_RPC_ORIGINS: Record<string, string[]> = {
   testnet: ['https://soroban-testnet.stellar.org', 'https://horizon-testnet.stellar.org'],
-  mainnet: ['https://horizon.stellar.org'],
+  mainnet: ['https://soroban-mainnet.stellar.org', 'https://horizon.stellar.org'],
 };
 
 /**
@@ -75,6 +75,32 @@ export function connectOrigins(env: CspEnv): string[] {
   return [...new Set(all)];
 }
 
+/**
+ * Sanitizes `VITE_CSP_REPORT_URI` to prevent CSP directive injection via
+ * semicolons, commas, whitespace, control characters, or non-HTTP(S) schemes.
+ */
+export function sanitizeReportUri(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  // Reject any characters that could terminate or split a CSP directive or header.
+  if (/[;,\s\r\n'"<>]/.test(trimmed)) return null;
+
+  if (trimmed.startsWith('/')) {
+    // Disallow protocol-relative URLs (`//evil.example`)
+    if (trimmed.startsWith('//')) return null;
+    return trimmed;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 export function buildCsp(env: CspEnv): string {
   const directives: Record<string, string[]> = {
     'default-src': ["'self'"],
@@ -94,7 +120,7 @@ export function buildCsp(env: CspEnv): string {
     'form-action': ["'self'"],
     'frame-ancestors': ["'none'"],
   };
-  const reportUri = env.VITE_CSP_REPORT_URI?.trim();
+  const reportUri = sanitizeReportUri(env.VITE_CSP_REPORT_URI);
   if (reportUri) directives['report-uri'] = [reportUri];
 
   return Object.entries(directives)
