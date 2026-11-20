@@ -827,6 +827,21 @@ pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
 }
 
+// ── Dispute arbitrator (#1195) ────────────────────────────────────────────────
+
+/// The admin-designated independent dispute arbitrator, if any.
+pub fn get_arbitrator(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::Arbitrator)
+}
+
+/// Set (`Some`) or clear (`None`) the designated dispute arbitrator.
+pub fn set_arbitrator(env: &Env, arbitrator: &Option<Address>) {
+    match arbitrator {
+        Some(a) => env.storage().instance().set(&DataKey::Arbitrator, a),
+        None => env.storage().instance().remove(&DataKey::Arbitrator),
+    }
+}
+
 /// Whether the admin has paused the contract. Defaults to `false`.
 pub fn is_paused(env: &Env) -> bool {
     env.storage()

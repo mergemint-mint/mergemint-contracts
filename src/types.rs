@@ -121,6 +121,10 @@ pub enum DataKey {
     /// Emergency circuit breaker set by `pause` / cleared by `unpause`.
     /// Absent means not paused.
     Paused,
+    /// Admin-designated independent dispute arbitrator (#1195). When set,
+    /// only this address may `resolve_dispute`; when absent, the bounty
+    /// creator keeps that role.
+    Arbitrator,
 }
 
 /// Snapshot of contract-wide admin settings, returned by `get_config`.
