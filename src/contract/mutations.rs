@@ -6,12 +6,6 @@ use crate::symbols::{
 /// Minimum reward amount enforced at bounty creation.
 const MIN_REWARD_AMOUNT: i128 = 100;
 
-/// Minimum number of ledgers a bounty must sit in a terminal status
-/// (`"completed"` or `"cancelled"`) before anyone can archive it. Chosen to
-/// give indexers/UIs a grace window to read the full record before it is
-/// compacted. At ~5s/ledger this is roughly 1 day.
-const ARCHIVE_GRACE_PERIOD_LEDGERS: u32 = 17_280;
-
 /// Maximum number of tags a bounty may carry. Documented in
 /// `docs/contract-reference.md`. Enforced by `validate_tags`, used from both
 /// `create_bounty` and `update_tags` so a bounty can never accumulate more
@@ -202,9 +196,16 @@ fn decrement_active_claims(contrib: &mut Contributor) {
 /// Takes the already-loaded `bounty` rather than re-reading it from storage —
 /// the caller has already fetched it (avoids a redundant read).
 fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
-    if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
-        fail(ContractError::BountyNotInProgress);
-    }
+    // #1180: `submit_work` moves a bounty to `submitted`; it must still be
+    // completable from there, or it is wedged forever.
+    ensure_status(
+        &bounty,
+        &[
+            Symbol::new(&env, STATUS_IN_PROGRESS),
+            Symbol::new(&env, STATUS_SUBMITTED),
+        ],
+        ContractError::BountyNotInProgress,
+    );
 
     if bounty.assignees.is_empty() {
         fail(ContractError::BountyHasNoAssignee);
@@ -684,9 +685,15 @@ impl MergeMintContract {
             None => fail(ContractError::BountyNotFound),
         };
 
-        if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
-            fail(ContractError::BountyNotInProgress);
-        }
+        // #1180: milestones may still be signed off after work is submitted.
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+                Symbol::new(&env, STATUS_SUBMITTED),
+            ],
+            ContractError::BountyNotInProgress,
+        );
 
         if bounty.assignees.is_empty() {
             fail(ContractError::BountyHasNoAssignee);
@@ -787,11 +794,15 @@ impl MergeMintContract {
         // GUARD 2 — double-completion prevention.
         // Reject the call if the bounty is not currently in progress. This blocks
         // repeat calls on already-completed bounties and any other terminal state.
-        // Depends on claim_bounty having written STATUS_IN_PROGRESS and
+        // Depends on claim_bounty having written STATUS_IN_PROGRESS (or
+        // submit_work having written STATUS_SUBMITTED, #1180) and
         // complete_bounty writing STATUS_COMPLETED below (checks-effects-interactions).
         ensure_status(
             &bounty,
-            &[Symbol::new(&env, STATUS_IN_PROGRESS)],
+            &[
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+                Symbol::new(&env, STATUS_SUBMITTED),
+            ],
             ContractError::BountyNotInProgress,
         );
 
@@ -837,6 +848,20 @@ impl MergeMintContract {
                 fail(ContractError::VerifierCannotBeAssignee);
             }
         }
+
+        // #1180: approvals are only meaningful on a claimed bounty, before or
+        // after `submit_work`. Disputed bounties go through resolve_dispute.
+        if bounty.status == Symbol::new(&env, STATUS_DISPUTED) {
+            fail(ContractError::BountyIsDisputed);
+        }
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+                Symbol::new(&env, STATUS_SUBMITTED),
+            ],
+            ContractError::BountyNotInProgress,
+        );
 
         // If no required_verifiers list is set, fall back to immediate single-verifier completion.
         if bounty.required_verifiers.is_none() {
@@ -936,11 +961,16 @@ impl MergeMintContract {
             fail(ContractError::BountyIsDisputed);
         }
 
-        if bounty.status != Symbol::new(&env, STATUS_OPEN)
-            && bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS)
-        {
-            fail(ContractError::BountyNotDisputed);
-        }
+        // #1180: a submitted bounty is still live and must remain disputable.
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_OPEN),
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+                Symbol::new(&env, STATUS_SUBMITTED),
+            ],
+            ContractError::BountyNotDisputed,
+        );
 
         let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == caller);
         if caller != bounty.creator && !is_assignee {
@@ -1419,12 +1449,27 @@ impl MergeMintContract {
             ContractError::BountyNotOpen,
         );
 
+        // #1183: milestone bounties pay out per milestone, and
+        // `sum(milestones.reward) == reward_amount` is an invariant set at
+        // creation. There is no sound way to allocate a top-up across
+        // milestones (some may already be paid), so sponsorship is rejected.
+        if !bounty.milestones.is_empty() {
+            fail(ContractError::MilestoneRewardsMismatch);
+        }
+
+        // #1183: checked addition before any funds move, so an overflow can
+        // never leave tokens escrowed against an unchanged reward.
+        let new_reward = bounty
+            .reward_amount
+            .checked_add(amount)
+            .unwrap_or_else(|| fail(ContractError::RewardAmountOverflow));
+
         let token = TokenClient::new(&env, &bounty.reward_token);
         token.transfer(&sponsor, env.current_contract_address(), &amount);
 
         storage::add_sponsor_contribution(&env, &bounty_id, &sponsor, amount);
 
-        bounty.reward_amount += amount;
+        bounty.reward_amount = new_reward;
         storage::store_bounty(&env, &bounty_id, &bounty);
 
         events::emit_bounty_sponsored(&env, &bounty_id, &sponsor, &amount, &bounty.reward_amount);
@@ -1862,6 +1907,24 @@ impl MergeMintContract {
             fail(ContractError::NotBountyCreator);
         }
 
+        // #1193: transferring to yourself is a no-op that would only leave a
+        // pending entry behind.
+        if new_owner == bounty.creator {
+            fail(ContractError::OwnerCannotBeCreator);
+        }
+
+        // #1193: ownership of a finished bounty is meaningless; only active
+        // bounties may change hands.
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_OPEN),
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+                Symbol::new(&env, STATUS_SUBMITTED),
+            ],
+            ContractError::InvalidStatus,
+        );
+
         if bounty.assignees.iter().any(|(addr, _)| addr == new_owner) {
             fail(ContractError::OwnerCannotBeAssignee);
         }
@@ -1897,6 +1960,14 @@ impl MergeMintContract {
             fail(ContractError::NotPendingOwner);
         }
 
+        // #1193: a transfer started on an active bounty must not complete
+        // once the bounty has reached a terminal status.
+        if bounty.status == Symbol::new(&env, STATUS_COMPLETED)
+            || bounty.status == Symbol::new(&env, STATUS_CANCELLED)
+        {
+            fail(ContractError::InvalidStatus);
+        }
+
         if bounty.assignees.iter().any(|(addr, _)| addr == new_owner) {
             fail(ContractError::OwnerCannotBeAssignee);
         }
@@ -1925,6 +1996,44 @@ impl MergeMintContract {
         }
 
         events::emit_ownership_transferred(&env, &bounty_id, &previous_owner, &new_owner);
+    }
+
+    /// Revoke a pending, not-yet-accepted ownership transfer (#1193).
+    ///
+    /// Lets the creator recover from a transfer to a wrong or unresponsive
+    /// address. After cancellation, `accept_bounty_ownership` by the former
+    /// pending owner fails with `NotPendingOwner`.
+    ///
+    /// # Panics
+    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
+    /// * If `creator` is not the bounty creator (`ContractError::NotBountyCreator`).
+    /// * If no transfer is pending (`ContractError::NoPendingOwner`).
+    ///
+    /// # Events
+    /// Emits `ownership_transfer_cancelled` with `(bounty_id, pending_owner)`.
+    ///
+    /// # Authorization
+    /// Requires auth from `creator`.
+    pub fn cancel_bounty_ownership_transfer(env: Env, creator: Address, bounty_id: BountyId) {
+        creator.require_auth();
+        require_not_paused(&env);
+
+        let bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => fail(ContractError::BountyNotFound),
+        };
+
+        if creator != bounty.creator {
+            fail(ContractError::NotBountyCreator);
+        }
+
+        let pending = match storage::get_pending_owner(&env, &bounty_id) {
+            Some(p) => p,
+            None => fail(ContractError::NoPendingOwner),
+        };
+
+        storage::clear_pending_owner(&env, &bounty_id);
+        events::emit_ownership_transfer_cancelled(&env, &bounty_id, &creator, &pending);
     }
 
     /// Reopen an expired bounty with a new deadline.
@@ -2022,15 +2131,45 @@ impl MergeMintContract {
         storage::store_bounty(&env, &bounty_id, &bounty);
     }
 
+    /// Start the archive grace period for a finished bounty that has no
+    /// grace-period marker yet (#1181), without panicking.
+    ///
+    /// Bounties that reach `completed`/`cancelled` get their marker
+    /// automatically; this exists for bounties that finished before markers
+    /// were recorded at the terminal transition. Idempotent: an existing
+    /// marker is left unchanged. Returns the ledger sequence from which
+    /// `archive_bounty` will succeed.
+    ///
+    /// # Panics
+    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
+    /// * If the bounty is not completed or cancelled (`ContractError::InvalidStatus`).
+    pub fn schedule_archive(env: Env, bounty_id: BountyId) -> u32 {
+        require_not_paused(&env);
+        let bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => fail(ContractError::BountyNotFound),
+        };
+
+        let is_finished = bounty.status == Symbol::new(&env, STATUS_COMPLETED)
+            || bounty.status == Symbol::new(&env, STATUS_CANCELLED);
+        if !is_finished {
+            fail(ContractError::InvalidStatus);
+        }
+
+        storage::ensure_archive_eligible_at(&env, &bounty_id)
+    }
+
     /// Archive a finished bounty, compacting it into a `BountySummary` and
     /// removing the full `Bounty`/`BountyMeta` records to stop extending
     /// their TTL (and so paying rent on data nobody reads anymore).
     ///
     /// Only bounties in a terminal status (`"completed"` or `"cancelled"`)
     /// can be archived. Callable by anyone (not just the creator), subject
-    /// to a grace period: the first call against an eligible bounty sets a
-    /// grace-period marker and fails with `DeadlineNotPassed`; a subsequent
-    /// call made at least `ARCHIVE_GRACE_PERIOD_LEDGERS` later succeeds.
+    /// to a grace period: the bounty becomes archivable
+    /// `storage::ARCHIVE_GRACE_PERIOD_LEDGERS` after it reached its terminal
+    /// status (or after `schedule_archive`, for bounties finished before the
+    /// marker was recorded at the transition). Earlier calls fail with
+    /// `DeadlineNotPassed` and leave the marker unchanged (#1181).
     ///
     /// After archiving, `get_bounty` keeps returning a (summary-only)
     /// `Bounty` for `bounty_id` so existing callers do not start seeing
@@ -2053,16 +2192,14 @@ impl MergeMintContract {
             fail(ContractError::InvalidStatus);
         }
 
+        // #1181: the grace-period marker is written durably when the bounty
+        // reaches a terminal status (`storage::move_bounty_status`), or by
+        // `schedule_archive` for bounties finished before that existed. It is
+        // never written here: a write followed by `fail` is rolled back with
+        // the rest of the invocation, so the marker would never persist.
         let now = env.ledger().sequence();
         match storage::get_archive_eligible_at(&env, &bounty_id) {
-            None => {
-                storage::set_archive_eligible_at(
-                    &env,
-                    &bounty_id,
-                    now + ARCHIVE_GRACE_PERIOD_LEDGERS,
-                );
-                fail(ContractError::DeadlineNotPassed);
-            }
+            None => fail(ContractError::DeadlineNotPassed),
             Some(eligible_at) => {
                 if now < eligible_at {
                     fail(ContractError::DeadlineNotPassed);
