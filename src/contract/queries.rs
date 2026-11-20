@@ -119,9 +119,14 @@ impl MergeMintContract {
 
     /// Return the off-chain-facing metadata (title, description) for each of
     /// `ids`, in the same order. Entries are `None` for IDs with no stored meta.
+    ///
+    /// The number of IDs processed per call is capped at `MAX_LIMIT` (50),
+    /// matching `get_bounties_by_ids`; any IDs beyond the cap are ignored so
+    /// callers cannot construct oversized batch reads that exceed RPC
+    /// simulation budgets.
     pub fn get_bounty_metas(env: Env, ids: Vec<BountyId>) -> Vec<Option<BountyMeta>> {
         let mut result: Vec<Option<BountyMeta>> = Vec::new(&env);
-        for id in ids.iter() {
+        for id in ids.iter().take(MAX_LIMIT as usize) {
             result.push_back(storage::get_bounty_meta(&env, &id));
         }
         result
@@ -160,9 +165,14 @@ impl MergeMintContract {
 
     /// Return each bounty in `ids`, in the same order. Entries are `None`
     /// for IDs that do not exist.
+    ///
+    /// The number of IDs processed per call is capped at `MAX_LIMIT` (50),
+    /// matching `get_bounties_by_ids`; any IDs beyond the cap are ignored so
+    /// callers cannot construct oversized batch reads that exceed RPC
+    /// simulation budgets.
     pub fn get_bounties(env: Env, ids: Vec<BountyId>) -> Vec<Option<Bounty>> {
         let mut result = Vec::new(&env);
-        for id in ids.iter() {
+        for id in ids.iter().take(MAX_LIMIT as usize) {
             result.push_back(storage::get_bounty(&env, &id));
         }
         result
@@ -278,20 +288,51 @@ impl MergeMintContract {
     /// end; `limit` is capped at 50 (`MAX_LIMIT`), and `0` means the cap.
     /// Returns an empty `Vec` if the contributor has no completed or
     /// cancelled bounties, or if `offset` is past the end of the history.
+    ///
+    /// The history is stored in fixed-size pages (see
+    /// `storage::ContributorHistoryPage`), so this walks pages from the tail
+    /// backwards and only reads the pages that overlap the requested window;
+    /// it never materialises the whole history in a temporary `Vec`.
     pub fn get_contributor_bounty_history(
         env: Env,
         address: Address,
         offset: u32,
         limit: u32,
     ) -> Vec<BountyId> {
-        let all = storage::get_contributor_history(&env, &address);
-        let mut newest_first = Vec::new(&env);
-        let mut i = all.len();
-        while i > 0 {
-            i -= 1;
-            newest_first.push_back(all.get(i).unwrap_or_else(|| fail(ContractError::CorruptedIndex)));
+        let effective_limit = if limit == 0 || limit > MAX_LIMIT {
+            MAX_LIMIT
+        } else {
+            limit
+        };
+        let total = storage::get_contributor_history_count(&env, &address);
+        let mut result = Vec::new(&env);
+        if offset >= total || effective_limit == 0 {
+            return result;
         }
-        paginate(&env, newest_first, Some(offset), limit).0
+        // Number of newest-first entries still available after `offset`.
+        let available = total - offset;
+        let take = if effective_limit > available {
+            available
+        } else {
+            effective_limit
+        };
+        let page_size = storage::PAGE_SIZE;
+        // Newest-first index `offset + i` maps to ascending index
+        // `total - 1 - (offset + i)`.
+        let mut i = 0u32;
+        while i < take {
+            let newest_index = offset + i;
+            let ascending_index = total - 1 - newest_index;
+            let page = ascending_index / page_size;
+            let slot = ascending_index % page_size;
+            let ids = storage::get_contributor_history_page(&env, &address, page);
+            match ids.get(slot) {
+                Some(id) => result.push_back(id),
+                None => fail(ContractError::CorruptedIndex),
+            }
+            i += 1;
+        }
+        result
     }
 
     /// Return the submission hash recorded by `submit_work` for `bounty_id`,
