@@ -121,7 +121,22 @@ pub enum DataKey {
     /// Emergency circuit breaker set by `pause` / cleared by `unpause`.
     /// Absent means not paused.
     Paused,
+    /// O(1) index of the bounty a contributor is currently assigned to and
+    /// actively working on. Written on `claim_bounty` / `reassign_bounty`,
+    /// removed on `unclaim_bounty`, `release_stale_claim`, completion,
+    /// cancellation, and dispute resolution. Replaces the O(N) scan over
+    /// in-progress bounties in `get_contributor_active_bounty`.
+    ContributorActiveBounty(Address),
 }
+
+/// Hard cap on the number of distinct sponsors a single bounty may accrue.
+/// Bounds the `refund_sponsors` loop so an attacker cannot grief
+/// `cancel_bounty` / `expire_bounty` by adding hundreds of dust sponsors.
+pub const MAX_SPONSORS_PER_BOUNTY: u32 = 32;
+
+/// Minimum amount a single `sponsor_bounty` call may contribute. Prevents
+/// dust sponsorships that inflate the sponsor list without meaningful funds.
+pub const MIN_SPONSOR_AMOUNT: i128 = 1;
 
 /// Snapshot of contract-wide admin settings, returned by `get_config`.
 #[derive(Clone, Debug, Eq, PartialEq)]

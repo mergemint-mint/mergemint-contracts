@@ -569,6 +569,25 @@ pub fn get_open_bounties(env: &Env) -> Vec<BountyId> {
 
 pub fn add_open_bounty(env: &Env, bounty_id: &BountyId) {
     let total = get_open_bounties_count(env);
+
+    // Deduplicate: a `BountyId` must never appear twice in the paged index,
+    // otherwise `OpenBountiesCount` drifts above the sum of page lengths and
+    // phantom entries survive removal. Mirror `add_bounty_to_status` and scan
+    // every page before appending.
+    if total > 0 {
+        let page_count = total.div_ceil(PAGE_SIZE);
+        let mut p = 0u32;
+        while p < page_count {
+            let page = get_open_bounties_page(env, p);
+            for id in page.iter() {
+                if id == *bounty_id {
+                    return; // already present, nothing to do
+                }
+            }
+            p += 1;
+        }
+    }
+
     let target_page_idx = if total == 0 {
         0
     } else if total.is_multiple_of(PAGE_SIZE) {
@@ -733,25 +752,52 @@ fn set_sponsors(env: &Env, bounty_id: &BountyId, sponsors: &Vec<(Address, i128)>
     }
 }
 
+/// Maximum number of distinct sponsors tracked per bounty.
+///
+/// `cancel_bounty` / `expire_bounty` refund every sponsor in a single
+/// invocation; an unbounded list would let an attacker grief those paths by
+/// adding hundreds of dust sponsors until `refund_sponsors` exceeds Soroban's
+/// host budget. Keep this well below the per-invocation entry limit.
+pub const MAX_SPONSORS_PER_BOUNTY: u32 = 20;
+
+/// Minimum amount a single sponsorship call may contribute. Prevents dust
+/// entries from consuming sponsor slots and bloating refund loops.
+pub const MIN_SPONSOR_AMOUNT: i128 = 1;
+
 /// Records `amount` as contributed by `sponsor`, adding to any prior
 /// contribution from the same address.
+///
+/// Rejects amounts below [`MIN_SPONSOR_AMOUNT`] with
+/// `ContractError::SponsorAmountTooLow`, new sponsors beyond
+/// [`MAX_SPONSORS_PER_BOUNTY`] with `ContractError::TooManySponsors`, and
+/// accumulation overflow with `ContractError::RewardAmountOverflow`.
 pub fn add_sponsor_contribution(env: &Env, bounty_id: &BountyId, sponsor: &Address, amount: i128) {
-    let mut sponsors = get_sponsors(env, bounty_id);
+    if amount < MIN_SPONSOR_AMOUNT {
+        fail(ContractError::SponsorAmountTooLow);
+    }
+
+    let sponsors = get_sponsors(env, bounty_id);
     let mut found = false;
     let mut updated: Vec<(Address, i128)> = Vec::new(env);
     for (addr, existing) in sponsors.iter() {
         if addr == *sponsor {
-            updated.push_back((addr, existing + amount));
+            let total = match existing.checked_add(amount) {
+                Some(total) => total,
+                None => fail(ContractError::RewardAmountOverflow),
+            };
+            updated.push_back((addr, total));
             found = true;
         } else {
             updated.push_back((addr, existing));
         }
     }
     if !found {
+        if sponsors.len() >= MAX_SPONSORS_PER_BOUNTY {
+            fail(ContractError::TooManySponsors);
+        }
         updated.push_back((sponsor.clone(), amount));
     }
-    sponsors = updated;
-    set_sponsors(env, bounty_id, &sponsors);
+    set_sponsors(env, bounty_id, &updated);
 }
 
 /// Removes and returns all sponsor contributions for a bounty (used once
@@ -909,6 +955,36 @@ pub fn remove_token_bounty(env: &Env, token: &Address, bounty_id: &BountyId) {
     env.storage()
         .persistent()
         .set(&DataKey::TokenBounties(token.clone()), &trimmed);
+}
+
+// ── Contributor active bounty ────────────────────────────────────────────────
+//
+// O(1) mapping from a contributor to the bounty they currently hold an active
+// claim on. Maintained on every claim transition (claim/reassign set it;
+// unclaim/release/complete/cancel/dispute-resolution clear it) so
+// `get_contributor_active_bounty` never has to scan the open index.
+
+/// Returns the bounty `contributor` currently has an active claim on, if any.
+pub fn get_contributor_active_bounty(env: &Env, contributor: &Address) -> Option<BountyId> {
+    let key = DataKey::ContributorActiveBounty(contributor.clone());
+    let result: Option<BountyId> = env.storage().persistent().get(&key);
+    if result.is_some() {
+        extend(env, &key);
+    }
+    result
+}
+
+/// Record `bounty_id` as `contributor`'s active claim.
+pub fn set_contributor_active_bounty(env: &Env, contributor: &Address, bounty_id: &BountyId) {
+    let key = DataKey::ContributorActiveBounty(contributor.clone());
+    env.storage().persistent().set(&key, bounty_id);
+    extend(env, &key);
+}
+
+/// Clear `contributor`'s active-claim mapping (no-op when absent).
+pub fn remove_contributor_active_bounty(env: &Env, contributor: &Address) {
+    let key = DataKey::ContributorActiveBounty(contributor.clone());
+    env.storage().persistent().remove(&key);
 }
 
 // ── Contributor bounty history ───────────────────────────────────────────────
