@@ -60,6 +60,14 @@ pub enum ContractError {
     NoActiveClaim,
     MilestoneDeadlineInvalid,
     MilestoneDeadlinePassed,
+    /// An uncompleted milestone's deadline is already in the past relative to
+    /// the current ledger sequence, so the bounty cannot be reopened.
+    MilestoneDeadlineExpired,
+    /// Adding another sponsor would exceed `MAX_SPONSORS_PER_BOUNTY`, which
+    /// would make the refund loop exceed the host budget.
+    TooManySponsors,
+    /// A sponsorship amount is below `MIN_SPONSOR_AMOUNT`.
+    SponsorAmountTooLow,
     AdminAlreadySet,
     RewardTokenNotAllowed,
     /// Internal storage invariant violated (e.g. a status index page that
@@ -147,6 +155,11 @@ pub const fn message(e: ContractError) -> &'static str {
             "milestone deadlines must be non-decreasing and not exceed the bounty deadline"
         }
         ContractError::MilestoneDeadlinePassed => "milestone deadline has passed",
+        ContractError::MilestoneDeadlineExpired => {
+            "an uncompleted milestone deadline has already expired"
+        }
+        ContractError::TooManySponsors => "maximum number of sponsors per bounty reached",
+        ContractError::SponsorAmountTooLow => "sponsor amount is below the minimum allowed",
         ContractError::AdminAlreadySet => "admin has already been initialized",
         ContractError::RewardTokenNotAllowed => "reward_token is not on the admin allowlist",
         ContractError::CorruptedIndex => "internal storage index invariant violated",

@@ -247,22 +247,15 @@ impl MergeMintContract {
 
     /// Return the bounty ID of the in-progress bounty assigned to `address`, if any.
     ///
-    /// Supports `GET /api/contributors/{address}/active-bounty`. Scans open and
-    /// in-progress bounties for an assignee slot matching `address`. Returns `None`
-    /// when the contributor has no active claim.
+    /// Supports `GET /api/contributors/{address}/active-bounty`. Reads the
+    /// `DataKey::ContributorActiveBounty(address)` mapping, which is maintained
+    /// on every claim transition (`claim_bounty`, `reassign_bounty`,
+    /// `unclaim_bounty`, `release_stale_claim`, completion, cancellation and
+    /// dispute resolution), so the lookup is O(1) rather than a scan of the
+    /// `in_progress` status index. Returns `None` when the contributor has no
+    /// active claim.
     pub fn get_contributor_active_bounty(env: Env, address: Address) -> Option<BountyId> {
-        let in_progress_sym = Symbol::new(&env, "in_progress");
-        let in_progress_ids = storage::get_bounties_by_status(&env, &in_progress_sym);
-        for id in in_progress_ids.iter() {
-            if let Some(bounty) = storage::get_bounty(&env, &id) {
-                for (assignee, _weight) in bounty.assignees.iter() {
-                    if assignee == address {
-                        return Some(id);
-                    }
-                }
-            }
-        }
-        None
+        storage::get_contributor_active_bounty(&env, &address)
     }
 
     /// Return a bounded page of bounty IDs `address` was an assignee on that
