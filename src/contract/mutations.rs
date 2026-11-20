@@ -18,6 +18,13 @@ const ARCHIVE_GRACE_PERIOD_LEDGERS: u32 = 17_280;
 /// tags (or duplicates) after creation than it could at creation time.
 const MAX_TAGS: u32 = 5;
 
+/// Minimum non-zero claim window (in ledgers) accepted by
+/// `set_claim_window`. A window of `0` is treated as "disabled" (stale-claim
+/// release is blocked entirely); any other value must be at least this many
+/// ledgers so a misconfigured tiny window cannot let griefers immediately
+/// release fresh claims and slash contributor reputation.
+const MIN_CLAIM_WINDOW: u32 = 100;
+
 /// Validate a tag list: reject more than `MAX_TAGS` entries, reject
 /// duplicates, and reject any tag not on the allow-list (via
 /// `symbols::validate_symbol_or_fail`).
@@ -1430,6 +1437,72 @@ impl MergeMintContract {
         events::emit_bounty_sponsored(&env, &bounty_id, &sponsor, &amount, &bounty.reward_amount);
     }
 
+    /// Top up a bounty's escrowed reward pool with additional creator-funded
+    /// tokens.
+    ///
+    /// Unlike `sponsor_bounty` (which any address may call and whose
+    /// contribution is tracked separately for pro-rata refunds), this
+    /// entrypoint is restricted to the bounty creator and increases the
+    /// creator's own escrow stake: the added amount is folded into
+    /// `reward_amount` and is therefore refunded to the creator on
+    /// cancel/expire.
+    ///
+    /// # Arguments
+    /// * `creator` - The bounty creator. Must match `bounty.creator`.
+    /// * `bounty_id` - The bounty to top up.
+    /// * `amount` - Amount to add to the escrowed reward. Must be positive.
+    ///
+    /// # Panics
+    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
+    /// * If `creator` is not the bounty creator (`ContractError::NotBountyCreator`).
+    /// * If the bounty is not active — `"open"` or `"in_progress"`
+    ///   (`ContractError::BountyNotOpen`).
+    /// * If `amount` is not strictly positive (`ContractError::InvalidAmount`).
+    /// * If `reward_amount + amount` overflows `i128`
+    ///   (`ContractError::RewardOverflow`).
+    ///
+    /// # Authorization
+    /// Requires auth from `creator`.
+    pub fn top_up_bounty(env: Env, creator: Address, bounty_id: BountyId, amount: i128) {
+        require_not_paused(&env);
+        creator.require_auth();
+
+        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => fail(ContractError::BountyNotFound),
+        };
+
+        if bounty.creator != creator {
+            fail(ContractError::NotBountyCreator);
+        }
+
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_OPEN),
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+            ],
+            ContractError::BountyNotOpen,
+        );
+
+        if amount <= 0 {
+            fail(ContractError::InvalidAmount);
+        }
+
+        let new_reward = match bounty.reward_amount.checked_add(amount) {
+            Some(total) => total,
+            None => fail(ContractError::RewardOverflow),
+        };
+
+        let token = TokenClient::new(&env, &bounty.reward_token);
+        token.transfer(&creator, env.current_contract_address(), &amount);
+
+        bounty.reward_amount = new_reward;
+        storage::store_bounty(&env, &bounty_id, &bounty);
+
+        events::emit_bounty_topped_up(&env, &bounty_id, &creator, &amount, &new_reward);
+    }
+
     /// Reassign a `"in_progress"` (claimed) bounty's single assignee to a new
     /// contributor.
     ///
@@ -1618,10 +1691,26 @@ impl MergeMintContract {
             None => fail(ContractError::NoActiveClaim),
         };
 
+        // A zero claim window means stale-claim release is disabled: without
+        // this guard a `claim_window == 0` would make every fresh claim
+        // immediately releasable, letting griefers slash contributor
+        // reputation at will.
         let claim_window = storage::get_claim_window(&env);
+        if claim_window == 0 {
+            fail(ContractError::ClaimWindowNotElapsed);
+        }
+
         let current_ledger = env.ledger().sequence();
         if current_ledger < claimed_at.saturating_add(claim_window) {
             fail(ContractError::ClaimWindowNotElapsed);
+        }
+
+        // Milestone-progress awareness: once any milestone has been completed
+        // the assignee has demonstrably done work, so the claim must not be
+        // treated as stale (and must not be slashed). This check runs before
+        // any reputation penalty or status change.
+        if bounty.milestones.iter().any(|m| m.completed) {
+            fail(ContractError::MilestoneProgressExists);
         }
 
         // Apply the existing reputation penalty for abandoned claims to each
@@ -1692,6 +1781,11 @@ impl MergeMintContract {
     pub fn set_claim_window(env: Env, admin: Address, window: u32) {
         require_admin(&env, &admin);
         require_not_paused(&env);
+        // `0` disables stale-claim release; any other value must meet the
+        // anti-griefing floor so fresh claims cannot be released instantly.
+        if window != 0 && window < MIN_CLAIM_WINDOW {
+            fail(ContractError::ClaimWindowTooShort);
+        }
         let old = storage::get_claim_window(&env);
         storage::set_claim_window(&env, window);
         events::emit_config_changed_u32(&env, "claim_window", old, window);
