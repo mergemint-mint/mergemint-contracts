@@ -4178,3 +4178,264 @@ fn non_admin_cannot_unpause() {
     c.client.pause(&c.admin);
     c.client.unpause(&c.other);
 }
+
+// ===========================================================================
+// Issue #1226 — read-only queries for PendingResolution, DisputeAppealed,
+// and ClaimedAtLedger
+// ===========================================================================
+
+/// Fresh bounties have no pending resolution, no appeal, and no claim ledger.
+#[test]
+fn test_pending_resolution_appeal_claim_ledger_defaults() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "q_defaults", None);
+
+    assert!(client.get_pending_resolution(&bounty_id).is_none());
+    assert!(!client.get_dispute_appealed(&bounty_id));
+    assert!(client.get_claimed_at_ledger(&bounty_id).is_none());
+}
+
+/// `get_claimed_at_ledger` reflects the ledger sequence at claim time.
+#[test]
+fn test_claimed_at_ledger_populated_on_claim() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "q_claim", None);
+    env.ledger().set_sequence_number(42);
+    client.claim_bounty(&contributor, &bounty_id);
+
+    assert_eq!(client.get_claimed_at_ledger(&bounty_id), Some(42));
+}
+
+/// `get_pending_resolution` and `get_dispute_appealed` are populated after a
+/// dispute is resolved and then appealed.
+#[test]
+fn test_pending_resolution_and_appeal_populated() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "q_appeal", None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+    client.resolve_dispute(&admin, &bounty_id, &Symbol::new(&env, "cancel"));
+
+    assert!(client.get_pending_resolution(&bounty_id).is_some());
+    assert!(!client.get_dispute_appealed(&bounty_id));
+
+    client.appeal_dispute(&creator, &bounty_id);
+    assert!(client.get_dispute_appealed(&bounty_id));
+}
+
+// ===========================================================================
+// Issue #1227 — O(1) creator / token index counts
+// ===========================================================================
+
+/// Counters start at zero and track create_bounty.
+#[test]
+fn test_bounties_by_creator_and_token_count_on_create() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let stranger = Address::generate(&env);
+    assert_eq!(client.get_bounties_by_creator_count(&stranger), 0);
+
+    let (id1, token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "cnt_a",
+        1000,
+        None,
+    );
+    let _id2 = make_bounty(&client, &env, &creator, "cnt_b", None);
+
+    assert_eq!(client.get_bounties_by_creator_count(&creator), 2);
+    assert_eq!(client.get_bounties_by_token_count(&token), 1);
+    assert_eq!(client.get_bounties_by_token_count(&stranger), 0);
+    assert_eq!(
+        client.get_bounties_by_creator(&creator, &None, &50).0.len(),
+        2
+    );
+    assert_eq!(client.get_bounties_by_token(&token, &None, &50).0.len(), 1);
+    let _ = id1;
+}
+
+/// Accepting an ownership transfer moves both creator and token counters.
+#[test]
+fn test_bounties_by_creator_and_token_count_after_transfer() {
+    let (env, creator, new_owner, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "cnt_xfer",
+        1000,
+        None,
+    );
+    assert_eq!(client.get_bounties_by_creator_count(&creator), 1);
+    assert_eq!(client.get_bounties_by_token_count(&token), 1);
+
+    client.transfer_bounty_ownership(&creator, &bounty_id, &new_owner);
+    // Pending transfer must not move the counters yet.
+    assert_eq!(client.get_bounties_by_creator_count(&creator), 1);
+    assert_eq!(client.get_bounties_by_creator_count(&new_owner), 0);
+
+    client.accept_bounty_ownership(&new_owner, &bounty_id);
+    assert_eq!(client.get_bounties_by_creator_count(&creator), 0);
+    assert_eq!(client.get_bounties_by_creator_count(&new_owner), 1);
+    assert_eq!(client.get_bounties_by_token_count(&token), 1);
+}
+
+/// Archiving a bounty removes it from the creator and token counters.
+#[test]
+fn test_bounties_by_creator_and_token_count_after_archive() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "cnt_arch",
+        1000,
+        None,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+
+    assert_eq!(client.get_bounties_by_creator_count(&creator), 1);
+    assert_eq!(client.get_bounties_by_token_count(&token), 1);
+
+    client.archive_bounty(&bounty_id);
+    assert_eq!(client.get_bounties_by_creator_count(&creator), 0);
+    assert_eq!(client.get_bounties_by_token_count(&token), 0);
+}
+
+// ===========================================================================
+// Issue #1228 — move_bounty_status contributor history parity
+// ===========================================================================
+
+/// Completing a bounty records the contributor history entry exactly once.
+#[test]
+fn test_contributor_history_after_complete_bounty() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "hist_done",
+        1000,
+        None,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+
+    let history = client.get_contributor_bounty_history(&contributor, &0, &10);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap(), bounty_id);
+    assert!(client.get_contributor_active_bounty(&contributor).is_none());
+}
+
+/// Cancelling a bounty records the contributor history entry exactly once.
+#[test]
+fn test_contributor_history_after_cancel_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "hist_cancel",
+        1000,
+        None,
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    client.cancel_bounty(&creator, &bounty_id);
+
+    let history = client.get_contributor_bounty_history(&contributor, &0, &10);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap(), bounty_id);
+    assert!(client.get_contributor_active_bounty(&contributor).is_none());
+}
+
+// ===========================================================================
+// Issue #1229 — batch queries with active, archived, and unallocated IDs
+// ===========================================================================
+
+/// Batch read entrypoints agree with `get_bounty` for a mix of active,
+/// archived, and never-allocated bounty IDs.
+#[test]
+fn test_batch_queries_mixed_active_archived_unallocated() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let active_id = make_bounty(&client, &env, &creator, "mix_active", None);
+    let (archived_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "mix_arch",
+        1000,
+        None,
+    );
+    client.claim_bounty(&contributor, &archived_id);
+    client.complete_bounty(&verifier, &archived_id);
+    client.archive_bounty(&archived_id);
+
+    let unallocated = fake_bounty_id(&env, 9_999);
+    let ids = vec![
+        &env,
+        active_id.clone(),
+        archived_id.clone(),
+        unallocated.clone(),
+    ];
+
+    // Single reads: active is live, archived falls back, unallocated is None.
+    assert!(client.get_bounty(&active_id).is_some());
+    assert!(client.get_bounty(&archived_id).is_some());
+    assert!(client.get_bounty(&unallocated).is_none());
+
+    // Batch reads must agree with the single-read behavior.
+    let bounties = client.get_bounties(&ids);
+    assert_eq!(bounties.len(), 3);
+    assert!(bounties.get(0).unwrap().is_some());
+    assert!(bounties.get(1).unwrap().is_some());
+    assert!(bounties.get(2).unwrap().is_none());
+
+    let by_ids = client.get_bounties_by_ids(&ids);
+    assert_eq!(by_ids.len(), 3);
+    assert!(by_ids.get(0).unwrap().is_some());
+    assert!(by_ids.get(1).unwrap().is_some());
+    assert!(by_ids.get(2).unwrap().is_none());
+
+    let metas = client.get_bounty_metas(&ids);
+    assert_eq!(metas.len(), 3);
+    assert!(metas.get(0).unwrap().is_some());
+    assert!(metas.get(1).unwrap().is_some());
+    assert!(metas.get(2).unwrap().is_none());
+}

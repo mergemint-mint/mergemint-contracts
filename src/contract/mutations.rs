@@ -218,7 +218,13 @@ fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_COMPLETED);
         storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        storage::move_bounty_status(
+            &env,
+            &bounty_id,
+            &previous_status,
+            &bounty.status,
+            &bounty.assignees,
+        );
         storage::decrement_creator_open_count(&env, &bounty.creator);
         events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
         return;
@@ -228,7 +234,13 @@ fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
     let previous_status = bounty.status.clone();
     bounty.status = Symbol::new(&env, STATUS_COMPLETED);
     storage::store_bounty(&env, &bounty_id, &bounty);
-    storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+    storage::move_bounty_status(
+        &env,
+        &bounty_id,
+        &previous_status,
+        &bounty.status,
+        &bounty.assignees,
+    );
     storage::decrement_creator_open_count(&env, &bounty.creator);
 
     let token = TokenClient::new(&env, &bounty.reward_token);
@@ -272,7 +284,13 @@ fn apply_dispute_resolution(
             let previous_status = bounty.status.clone();
             bounty.status = Symbol::new(&env, STATUS_COMPLETED);
             storage::store_bounty(&env, &bounty_id, &bounty);
-            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            storage::move_bounty_status(
+                &env,
+                &bounty_id,
+                &previous_status,
+                &bounty.status,
+                &bounty.assignees,
+            );
         } else {
             let token = TokenClient::new(&env, &bounty.reward_token);
 
@@ -295,7 +313,13 @@ fn apply_dispute_resolution(
             let previous_status = bounty.status.clone();
             bounty.status = Symbol::new(&env, STATUS_COMPLETED);
             storage::store_bounty(&env, &bounty_id, &bounty);
-            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            storage::move_bounty_status(
+                &env,
+                &bounty_id,
+                &previous_status,
+                &bounty.status,
+                &bounty.assignees,
+            );
         }
     } else {
         // validate_symbol (at decision time) already guarantees resolution is
@@ -307,7 +331,13 @@ fn apply_dispute_resolution(
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_CANCELLED);
         storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        storage::move_bounty_status(
+            &env,
+            &bounty_id,
+            &previous_status,
+            &bounty.status,
+            &bounty.assignees,
+        );
     }
 
     events::emit_dispute_resolved(&env, &bounty_id, &arbitrator, &resolution);
@@ -469,6 +499,8 @@ impl MergeMintContract {
         storage::add_open_bounty(&env, &id);
         storage::append_token_bounty(&env, &bounty.reward_token, &id);
         storage::increment_creator_open_count(&env, &creator);
+        storage::increment_bounties_by_creator_count(&env, &creator);
+        storage::increment_bounties_by_token_count(&env, &bounty.reward_token);
 
         events::emit_bounty_created(&env, &id, &creator, &reward_amount);
         id
@@ -583,7 +615,13 @@ impl MergeMintContract {
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_IN_PROGRESS);
         storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        storage::move_bounty_status(
+            &env,
+            &bounty_id,
+            &previous_status,
+            &bounty.status,
+            &bounty.assignees,
+        );
 
         contrib.active_claims += 1;
         storage::store_contributor(&env, &contributor, &contrib);
@@ -639,7 +677,13 @@ impl MergeMintContract {
             let previous_status = bounty.status.clone();
             bounty.status = Symbol::new(&env, STATUS_OPEN);
             storage::store_bounty(&env, &bounty_id, &bounty);
-            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            storage::move_bounty_status(
+                &env,
+                &bounty_id,
+                &previous_status,
+                &bounty.status,
+                &bounty.assignees,
+            );
             storage::add_open_bounty(&env, &bounty_id);
         } else {
             storage::store_bounty(&env, &bounty_id, &bounty);
@@ -888,7 +932,13 @@ impl MergeMintContract {
                 let previous_status = bounty.status.clone();
                 bounty.status = Symbol::new(&env, STATUS_COMPLETED);
                 storage::store_bounty(&env, &bounty_id, &bounty);
-                storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+                storage::move_bounty_status(
+                    &env,
+                    &bounty_id,
+                    &previous_status,
+                    &bounty.status,
+                    &bounty.assignees,
+                );
                 storage::decrement_creator_open_count(&env, &bounty.creator);
                 let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
                 events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
@@ -909,7 +959,13 @@ impl MergeMintContract {
             let previous_status = bounty.status.clone();
             bounty.status = Symbol::new(&env, STATUS_COMPLETED);
             storage::store_bounty(&env, &bounty_id, &bounty);
-            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            storage::move_bounty_status(
+                &env,
+                &bounty_id,
+                &previous_status,
+                &bounty.status,
+                &bounty.assignees,
+            );
             storage::decrement_creator_open_count(&env, &bounty.creator);
             events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
         }
@@ -950,7 +1006,13 @@ impl MergeMintContract {
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_DISPUTED);
         storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        storage::move_bounty_status(
+            &env,
+            &bounty_id,
+            &previous_status,
+            &bounty.status,
+            &bounty.assignees,
+        );
         storage::decrement_creator_open_count(&env, &bounty.creator);
         events::emit_bounty_disputed(&env, &bounty_id, &caller);
     }
@@ -1258,7 +1320,13 @@ impl MergeMintContract {
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_CANCELLED);
         storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        storage::move_bounty_status(
+            &env,
+            &bounty_id,
+            &previous_status,
+            &bounty.status,
+            &bounty.assignees,
+        );
         storage::decrement_creator_open_count(&env, &bounty.creator);
 
         events::emit_bounty_cancelled(&env, &bounty_id, &caller);
@@ -1312,7 +1380,13 @@ impl MergeMintContract {
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_CANCELLED);
         storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        storage::move_bounty_status(
+            &env,
+            &bounty_id,
+            &previous_status,
+            &bounty.status,
+            &bounty.assignees,
+        );
         storage::decrement_creator_open_count(&env, &bounty.creator);
 
         events::emit_bounty_expired(&env, &bounty_id, &bounty.creator);
@@ -1369,7 +1443,13 @@ impl MergeMintContract {
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_SUBMITTED);
         storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        storage::move_bounty_status(
+            &env,
+            &bounty_id,
+            &previous_status,
+            &bounty.status,
+            &bounty.assignees,
+        );
 
         events::emit_work_submitted(&env, &bounty_id, &assignee, &submission_hash);
     }
@@ -1639,7 +1719,13 @@ impl MergeMintContract {
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_OPEN);
         storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+        storage::move_bounty_status(
+            &env,
+            &bounty_id,
+            &previous_status,
+            &bounty.status,
+            &bounty.assignees,
+        );
         storage::add_open_bounty(&env, &bounty_id);
         storage::clear_claimed_at_ledger(&env, &bounty_id);
 
@@ -1919,6 +2005,8 @@ impl MergeMintContract {
 
         storage::remove_creator_bounty(&env, &previous_owner, &bounty_id);
         storage::append_creator_bounty(&env, &new_owner, &bounty_id);
+        storage::decrement_bounties_by_creator_count(&env, &previous_owner);
+        storage::increment_bounties_by_creator_count(&env, &new_owner);
         if is_active {
             storage::decrement_creator_open_count(&env, &previous_owner);
             storage::increment_creator_open_count(&env, &new_owner);
@@ -2083,6 +2171,8 @@ impl MergeMintContract {
         storage::remove_bounty_body(&env, &bounty_id);
         storage::remove_archive_eligible_at(&env, &bounty_id);
         storage::remove_token_bounty(&env, &bounty.reward_token, &bounty_id);
+        storage::decrement_bounties_by_creator_count(&env, &bounty.creator);
+        storage::decrement_bounties_by_token_count(&env, &bounty.reward_token);
 
         events::emit_bounty_archived(&env, &bounty_id);
     }

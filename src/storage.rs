@@ -478,11 +478,19 @@ pub fn remove_bounty_from_status(env: &Env, bounty_id: &BountyId, status: &Symbo
     decrement_status_count(env, status);
 }
 
+/// Move `bounty_id` from `old_status` to `new_status` in the paged status
+/// index, recording each assignee in their contributor history when the new
+/// status is terminal.
+///
+/// `assignees` is passed in by the caller (which already holds the loaded
+/// `Bounty`) so this function never re-reads `DataKey::Bounty(id)` — saving a
+/// persistent deserialization on every completion and cancellation.
 pub fn move_bounty_status(
     env: &Env,
     bounty_id: &BountyId,
     old_status: &Symbol,
     new_status: &Symbol,
+    assignees: &Vec<(Address, u32)>,
 ) {
     if old_status != new_status {
         remove_bounty_from_status(env, bounty_id, old_status);
@@ -491,10 +499,8 @@ pub fn move_bounty_status(
         if *new_status == Symbol::new(env, STATUS_COMPLETED)
             || *new_status == Symbol::new(env, STATUS_CANCELLED)
         {
-            if let Some(bounty) = get_bounty(env, bounty_id) {
-                for (assignee, _) in bounty.assignees.iter() {
-                    append_contributor_history(env, &assignee, bounty_id);
-                }
+            for (assignee, _) in assignees.iter() {
+                append_contributor_history(env, &assignee, bounty_id);
             }
         }
     }
@@ -811,6 +817,43 @@ pub fn remove_creator_bounty(env: &Env, creator: &Address, bounty_id: &BountyId)
         .set(&DataKey::ContributorBounties(creator.clone()), &kept);
 }
 
+/// Returns the number of bounties currently indexed under `creator`.
+///
+/// Storage key: `DataKey::BountiesByCreatorCount(creator)`
+/// Stored type: `u32`
+/// Default value: `0`
+///
+/// O(1) read backed by a persistent counter, so callers can compute page
+/// counts without scanning every page of the creator index.
+pub fn get_bounties_by_creator_count(env: &Env, creator: &Address) -> u32 {
+    let key = DataKey::BountiesByCreatorCount(creator.clone());
+    let count: Option<u32> = env.storage().persistent().get(&key);
+    if count.is_some() {
+        extend(env, &key);
+    }
+    count.unwrap_or(0)
+}
+
+fn set_bounties_by_creator_count(env: &Env, creator: &Address, count: u32) {
+    let key = DataKey::BountiesByCreatorCount(creator.clone());
+    env.storage().persistent().set(&key, &count);
+    extend(env, &key);
+}
+
+/// Increment `creator`'s bounty index counter by one.
+pub fn increment_bounties_by_creator_count(env: &Env, creator: &Address) {
+    let current = get_bounties_by_creator_count(env, creator);
+    set_bounties_by_creator_count(env, creator, current + 1);
+}
+
+/// Decrement `creator`'s bounty index counter by one, saturating at zero.
+pub fn decrement_bounties_by_creator_count(env: &Env, creator: &Address) {
+    let current = get_bounties_by_creator_count(env, creator);
+    if current > 0 {
+        set_bounties_by_creator_count(env, creator, current - 1);
+    }
+}
+
 // ── Pending admin / bounty owner (two-step transfers) ─────────────────────────
 
 pub fn get_pending_admin(env: &Env) -> Option<Address> {
@@ -909,6 +952,43 @@ pub fn remove_token_bounty(env: &Env, token: &Address, bounty_id: &BountyId) {
     env.storage()
         .persistent()
         .set(&DataKey::TokenBounties(token.clone()), &trimmed);
+}
+
+/// Returns the number of bounties currently indexed under `token`.
+///
+/// Storage key: `DataKey::BountiesByTokenCount(token)`
+/// Stored type: `u32`
+/// Default value: `0`
+///
+/// O(1) read backed by a persistent counter, so callers can compute page
+/// counts without scanning every page of the token index.
+pub fn get_bounties_by_token_count(env: &Env, token: &Address) -> u32 {
+    let key = DataKey::BountiesByTokenCount(token.clone());
+    let count: Option<u32> = env.storage().persistent().get(&key);
+    if count.is_some() {
+        extend(env, &key);
+    }
+    count.unwrap_or(0)
+}
+
+fn set_bounties_by_token_count(env: &Env, token: &Address, count: u32) {
+    let key = DataKey::BountiesByTokenCount(token.clone());
+    env.storage().persistent().set(&key, &count);
+    extend(env, &key);
+}
+
+/// Increment `token`'s bounty index counter by one.
+pub fn increment_bounties_by_token_count(env: &Env, token: &Address) {
+    let current = get_bounties_by_token_count(env, token);
+    set_bounties_by_token_count(env, token, current + 1);
+}
+
+/// Decrement `token`'s bounty index counter by one, saturating at zero.
+pub fn decrement_bounties_by_token_count(env: &Env, token: &Address) {
+    let current = get_bounties_by_token_count(env, token);
+    if current > 0 {
+        set_bounties_by_token_count(env, token, current - 1);
+    }
 }
 
 // ── Contributor bounty history ───────────────────────────────────────────────
