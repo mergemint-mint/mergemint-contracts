@@ -192,6 +192,28 @@ pub fn get_archive_eligible_at(env: &Env, id: &BountyId) -> Option<u32> {
     value
 }
 
+/// Minimum number of ledgers a bounty must sit in a terminal status
+/// (`"completed"` or `"cancelled"`) before anyone can archive it. Chosen to
+/// give indexers/UIs a grace window to read the full record before it is
+/// compacted. At ~5s/ledger this is roughly 1 day.
+pub const ARCHIVE_GRACE_PERIOD_LEDGERS: u32 = 17_280;
+
+/// Record the archive grace-period marker for `id` if it does not have one
+/// yet, and return the marker (#1181). Measured from the current ledger, so
+/// when called at the terminal transition the grace period starts at
+/// completion/cancellation. Saturates at `u32::MAX` rather than overflowing.
+pub fn ensure_archive_eligible_at(env: &Env, id: &BountyId) -> u32 {
+    if let Some(existing) = get_archive_eligible_at(env, id) {
+        return existing;
+    }
+    let eligible_at = env
+        .ledger()
+        .sequence()
+        .saturating_add(ARCHIVE_GRACE_PERIOD_LEDGERS);
+    set_archive_eligible_at(env, id, eligible_at);
+    eligible_at
+}
+
 /// Set the ledger sequence after which `id` becomes archivable.
 pub fn set_archive_eligible_at(env: &Env, id: &BountyId, eligible_at: u32) {
     let key = DataKey::ArchiveEligibleAt(id.clone());
@@ -496,6 +518,9 @@ pub fn move_bounty_status(
                     append_contributor_history(env, &assignee, bounty_id);
                 }
             }
+            // #1181: start the archive grace period durably at the terminal
+            // transition, as part of the same successful invocation.
+            ensure_archive_eligible_at(env, bounty_id);
         }
     }
 }
