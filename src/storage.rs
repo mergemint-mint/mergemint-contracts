@@ -672,6 +672,219 @@ pub fn remove_open_bounty(env: &Env, bounty_id: &BountyId) {
     set_open_bounties_count(env, total - 1);
 }
 
+// ── Legacy index migration ────────────────────────────────────────────────────
+//
+// Pre-pagination deployments stored the full status index and open-bounty list
+// in single blobs (`DataKey::StatusIndex(Symbol)` / `DataKey::OpenBounties`).
+// `migrate_legacy_indexes` drains those blobs into the paged shards in bounded
+// chunks so a single invocation stays within the transaction CPU/write budget.
+//
+// The migration is idempotent: IDs already present in the paged shards are
+// skipped, and the legacy key is deleted only once every entry has been
+// migrated. Re-running after completion is a no-op.
+
+/// Maximum number of legacy IDs migrated per `migrate_legacy_indexes` call.
+///
+/// Each migrated ID costs at most one page read + one page write, so a chunk
+/// of this size keeps the write footprint well below the per-transaction
+/// budget even when both legacy indexes are drained in the same call.
+pub const MIGRATION_CHUNK_SIZE: u32 = 25;
+
+/// Returns the raw legacy `StatusIndex(status)` blob, if present.
+pub fn get_legacy_status_index(env: &Env, status: &Symbol) -> Option<Vec<BountyId>> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::StatusIndex(status.clone()))
+}
+
+/// Returns the raw legacy `OpenBounties` blob, if present.
+pub fn get_legacy_open_bounties(env: &Env) -> Option<Vec<BountyId>> {
+    env.storage().persistent().get(&DataKey::OpenBounties)
+}
+
+/// Returns `true` when `bounty_id` already appears in any status page.
+fn status_index_contains(env: &Env, status: &Symbol, bounty_id: &BountyId) -> bool {
+    let total = get_status_count(env, status);
+    if total == 0 {
+        return false;
+    }
+    let pages = total.div_ceil(PAGE_SIZE);
+    let mut p = 0u32;
+    while p < pages {
+        let page = get_status_page(env, status, p);
+        for id in page.iter() {
+            if id == *bounty_id {
+                return true;
+            }
+        }
+        p += 1;
+    }
+    false
+}
+
+/// Returns `true` when `bounty_id` already appears in any open-bounty page.
+fn open_bounties_contains(env: &Env, bounty_id: &BountyId) -> bool {
+    let total = get_open_bounties_count(env);
+    if total == 0 {
+        return false;
+    }
+    let pages = total.div_ceil(PAGE_SIZE);
+    let mut p = 0u32;
+    while p < pages {
+        let page = get_open_bounties_page(env, p);
+        for id in page.iter() {
+            if id == *bounty_id {
+                return true;
+            }
+        }
+        p += 1;
+    }
+    false
+}
+
+/// Append `bounty_id` to the status shard, skipping duplicates.
+fn append_status_index_unique(env: &Env, status: &Symbol, bounty_id: &BountyId) {
+    if status_index_contains(env, status, bounty_id) {
+        return;
+    }
+    let total = get_status_count(env, status);
+    let target_page_idx = if total == 0 {
+        0
+    } else if total.is_multiple_of(PAGE_SIZE) {
+        total / PAGE_SIZE
+    } else {
+        total.div_ceil(PAGE_SIZE) - 1
+    };
+    let mut page = get_status_page(env, status, target_page_idx);
+    page.push_back(bounty_id.clone());
+    set_status_page(env, status, target_page_idx, &page);
+    increment_status_count(env, status);
+}
+
+/// Append `bounty_id` to the open-bounty shard, skipping duplicates.
+fn append_open_bounty_unique(env: &Env, bounty_id: &BountyId) {
+    if open_bounties_contains(env, bounty_id) {
+        return;
+    }
+    let total = get_open_bounties_count(env);
+    let target_page_idx = if total == 0 {
+        0
+    } else if total.is_multiple_of(PAGE_SIZE) {
+        total / PAGE_SIZE
+    } else {
+        total.div_ceil(PAGE_SIZE) - 1
+    };
+    let mut page = get_open_bounties_page(env, target_page_idx);
+    page.push_back(bounty_id.clone());
+    set_open_bounties_page(env, target_page_idx, &page);
+    set_open_bounties_count(env, total + 1);
+}
+
+/// Migrate up to `chunk_size` entries from the legacy `StatusIndex(status)`
+/// blob into the paged shard. Returns the number of entries drained.
+///
+/// The legacy key is deleted once the blob is fully drained. Entries already
+/// present in the paged shard are skipped (deduplication) but still count as
+/// drained so the migration always makes forward progress.
+pub fn migrate_legacy_status_index(env: &Env, status: &Symbol, chunk_size: u32) -> u32 {
+    let legacy = match get_legacy_status_index(env, status) {
+        Some(list) => list,
+        None => return 0,
+    };
+    let len = legacy.len();
+    if len == 0 {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StatusIndex(status.clone()));
+        return 0;
+    }
+
+    let limit = chunk_size.min(len);
+    let mut i = 0u32;
+    while i < limit {
+        if let Some(id) = legacy.get(i) {
+            append_status_index_unique(env, status, &id);
+        }
+        i += 1;
+    }
+
+    if limit >= len {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StatusIndex(status.clone()));
+    } else {
+        let mut remaining: Vec<BountyId> = Vec::new(env);
+        let mut j = limit;
+        while j < len {
+            if let Some(id) = legacy.get(j) {
+                remaining.push_back(id);
+            }
+            j += 1;
+        }
+        let key = DataKey::StatusIndex(status.clone());
+        env.storage().persistent().set(&key, &remaining);
+        extend(env, &key);
+    }
+    limit
+}
+
+/// Migrate up to `chunk_size` entries from the legacy `OpenBounties` blob into
+/// the paged shard. Returns the number of entries drained.
+pub fn migrate_legacy_open_bounties(env: &Env, chunk_size: u32) -> u32 {
+    let legacy = match get_legacy_open_bounties(env) {
+        Some(list) => list,
+        None => return 0,
+    };
+    let len = legacy.len();
+    if len == 0 {
+        env.storage().persistent().remove(&DataKey::OpenBounties);
+        return 0;
+    }
+
+    let limit = chunk_size.min(len);
+    let mut i = 0u32;
+    while i < limit {
+        if let Some(id) = legacy.get(i) {
+            append_open_bounty_unique(env, &id);
+        }
+        i += 1;
+    }
+
+    if limit >= len {
+        env.storage().persistent().remove(&DataKey::OpenBounties);
+    } else {
+        let mut remaining: Vec<BountyId> = Vec::new(env);
+        let mut j = limit;
+        while j < len {
+            if let Some(id) = legacy.get(j) {
+                remaining.push_back(id);
+            }
+            j += 1;
+        }
+        let key = DataKey::OpenBounties;
+        env.storage().persistent().set(&key, &remaining);
+        extend(env, &key);
+    }
+    limit
+}
+
+/// Drain the legacy `StatusIndex(status)` and `OpenBounties` blobs into the
+/// paged shards, migrating at most `chunk_size` entries from each blob.
+///
+/// Returns the total number of entries drained across both indexes. Safe to
+/// call repeatedly: once a legacy key has been fully drained it is deleted and
+/// subsequent calls are no-ops for that index.
+pub fn migrate_legacy_indexes(env: &Env, status: &Symbol, chunk_size: u32) -> u32 {
+    let chunk = if chunk_size == 0 {
+        MIGRATION_CHUNK_SIZE
+    } else {
+        chunk_size
+    };
+    let mut drained = migrate_legacy_status_index(env, status, chunk);
+    drained += migrate_legacy_open_bounties(env, chunk);
+    drained
+}
+
 // Legacy set_open_bounties kept for any callers that haven't been migrated yet.
 // It rebuilds the paged structure from a flat Vec — use only in tests / migration.
 pub fn set_open_bounties(env: &Env, bounties: &Vec<BountyId>) {
