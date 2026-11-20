@@ -1087,3 +1087,117 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    /// #1197 invariant: after any sequence of lifecycle operations,
+    /// `get_creator_open_count(creator)` equals the exact number of bounties
+    /// currently owned by `creator` whose status is non-terminal (`open`,
+    /// `in_progress`, `submitted` or `disputed`).
+    ///
+    /// Operations: claim, complete, cancel, expire (after advancing the
+    /// ledger), raise_dispute by the creator or the assignee, resolve_dispute
+    /// ("complete"/"cancel") by the current owner, and a two-step ownership
+    /// transfer between creators. Invalid transitions fail via `try_*` and
+    /// must never desync the counter.
+    #[test]
+    fn prop_creator_open_count_matches_active_bounties(
+        ops in prop::collection::vec((0u8..=8, 0usize..6, any::<bool>()), 0..48),
+    ) {
+        let env = Env::new_with_config(EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
+        env.mock_all_auths();
+        let contract_id = env.register(MergeMintContract, ());
+        let client = MergeMintContractClient::new(&env, &contract_id);
+
+        let creators = [Address::generate(&env), Address::generate(&env)];
+        const NUM_BOUNTIES: usize = 6;
+        let mut ids = std::vec::Vec::with_capacity(NUM_BOUNTIES);
+        let mut assignees: std::vec::Vec<Option<Address>> = std::vec![None; NUM_BOUNTIES];
+
+        for i in 0..NUM_BOUNTIES {
+            let creator = creators[i % 2].clone();
+            let sac = env.register_stellar_asset_contract_v2(creator.clone());
+            let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &sac.address());
+            // Escrow for refunds, and creator/owner balances for the
+            // creator-funded "complete" dispute path.
+            token_admin.mint(&contract_id, &1_000_000_000i128);
+            for c in creators.iter() {
+                token_admin.mint(c, &1_000_000_000i128);
+            }
+            let deadline = if i % 3 == 0 { Some(env.ledger().sequence() + 20) } else { None };
+            let id = client.create_bounty(
+                &creator,
+                &Symbol::new(&env, "bug"),
+                &SorobanString::from_str(&env, "desc"),
+                &1000,
+                &sac.address(),
+                &0,
+                &deadline,
+                &SorobanVec::new(&env),
+                &1,
+                &None,
+                &1,
+                &SorobanVec::new(&env),
+            );
+            ids.push(id);
+        }
+
+        let active = ["open", "in_progress", "submitted", "disputed"];
+        let check = |client: &MergeMintContractClient| {
+            for c in creators.iter() {
+                let expected = ids
+                    .iter()
+                    .filter_map(|id| client.get_bounty(id))
+                    .filter(|b| b.creator == *c)
+                    .filter(|b| active.iter().any(|s| b.status == Symbol::new(&env, s)))
+                    .count() as u32;
+                let actual = client.get_creator_open_count(c);
+                prop_assert_eq!(actual, expected, "creator_open_count desync");
+            }
+            Ok::<(), TestCaseError>(())
+        };
+
+        check(&client)?;
+
+        for (op, idx, flag) in ops {
+            let idx = idx % NUM_BOUNTIES;
+            let id = ids[idx].clone();
+            let owner = match client.get_bounty(&id) {
+                Some(b) => b.creator,
+                None => continue,
+            };
+            match op {
+                0 => {
+                    let worker = Address::generate(&env);
+                    if client.try_claim_bounty(&worker, &id).is_ok() {
+                        assignees[idx] = Some(worker);
+                    }
+                }
+                1 => { let _ = client.try_complete_bounty(&owner, &id); }
+                2 => { let _ = client.try_cancel_bounty(&owner, &id); }
+                3 => {
+                    env.ledger().with_mut(|l| l.sequence_number += 25);
+                    let _ = client.try_expire_bounty(&owner, &id);
+                }
+                4 => { let _ = client.try_raise_dispute(&owner, &id); }
+                5 => {
+                    if let Some(worker) = &assignees[idx] {
+                        let _ = client.try_raise_dispute(worker, &id);
+                    }
+                }
+                6 | 7 => {
+                    let resolution = if flag { "complete" } else { "cancel" };
+                    let _ = client.try_resolve_dispute(&owner, &id, &Symbol::new(&env, resolution));
+                }
+                _ => {
+                    let other = if owner == creators[0] { &creators[1] } else { &creators[0] };
+                    if client.try_transfer_bounty_ownership(&owner, &id, other).is_ok() {
+                        let _ = client.try_accept_bounty_ownership(other, &id);
+                    }
+                }
+            }
+            check(&client)?;
+        }
+    }
+}

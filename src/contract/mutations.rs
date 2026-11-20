@@ -275,10 +275,18 @@ fn apply_dispute_resolution(
             storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
         } else {
             let token = TokenClient::new(&env, &bounty.reward_token);
+            // An independent arbitrator (#1195) is not a party to the bounty
+            // and must not fund it: pay from the contract's escrow. The
+            // creator acting as its own arbitrator keeps paying from its wallet.
+            let payer = if arbitrator == bounty.creator {
+                arbitrator.clone()
+            } else {
+                env.current_contract_address()
+            };
 
             for (assignee, share_bp) in bounty.assignees.iter() {
                 let payout = bounty.reward_amount * (share_bp as i128) / 10_000_i128;
-                token.transfer(&arbitrator, &assignee, &payout);
+                token.transfer(&payer, &assignee, &payout);
 
                 let mut contrib = storage::get_contributor(&env, &assignee)
                     .unwrap_or_else(|| Contributor::new(assignee.clone()));
@@ -309,6 +317,10 @@ fn apply_dispute_resolution(
         storage::store_bounty(&env, &bounty_id, &bounty);
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
     }
+
+    // #1197: a disputed bounty stays counted against `creator_open_limit`
+    // until it reaches a terminal status here.
+    storage::decrement_creator_open_count(&env, &bounty.creator);
 
     events::emit_dispute_resolved(&env, &bounty_id, &arbitrator, &resolution);
 }
@@ -951,16 +963,21 @@ impl MergeMintContract {
         bounty.status = Symbol::new(&env, STATUS_DISPUTED);
         storage::store_bounty(&env, &bounty_id, &bounty);
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
-        storage::decrement_creator_open_count(&env, &bounty.creator);
+        // #1197: a disputed bounty is still active, so it keeps its slot in
+        // `creator_open_count` until `apply_dispute_resolution` makes it
+        // terminal. Decrementing here let creators bypass the limit by
+        // disputing their own bounties, then double-decrement on resolution.
         events::emit_bounty_disputed(&env, &bounty_id, &caller);
     }
 
-    /// Resolve a disputed bounty. Only the bounty creator (acting as arbitrator) may call this.
+    /// Resolve a disputed bounty. Only the admin-designated arbitrator may call this when one
+    /// is set via `set_arbitrator` (#1195); otherwise the bounty creator acts as arbitrator.
     /// resolution must be the Symbol "complete" (pay assignees) or "cancel" (refund creator).
     ///
-    /// When resolution is "complete", the arbitrator's wallet funds the payout to each assignee
-    /// (mirroring complete_bounty's verifier-funds-the-payout model), since the contract itself
-    /// holds no escrow.
+    /// When resolution is "complete" and the creator is the arbitrator, the arbitrator's wallet
+    /// funds the payout to each assignee (mirroring complete_bounty's verifier-funds-the-payout
+    /// model); a designated arbitrator is not a party to the bounty, so its decision pays from
+    /// the contract's escrow.
     ///
     /// # Authorization
     /// `arbitrator.require_auth()` is the **first** operation in this function.
@@ -978,9 +995,24 @@ impl MergeMintContract {
             fail(ContractError::BountyNotDisputed);
         }
 
-        // The arbitrator must be the bounty creator; there is no separate admin address.
-        if arbitrator != bounty.creator {
-            fail(ContractError::NotArbitrator);
+        // #1195: an admin-designated independent arbitrator, when configured,
+        // is the only party allowed to resolve, and must not have a stake in
+        // the outcome. Without one, the bounty creator keeps the role.
+        match storage::get_arbitrator(&env) {
+            Some(designated) => {
+                if arbitrator != designated {
+                    fail(ContractError::NotArbitrator);
+                }
+                let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == arbitrator);
+                if arbitrator == bounty.creator || is_assignee {
+                    fail(ContractError::ArbitratorConflict);
+                }
+            }
+            None => {
+                if arbitrator != bounty.creator {
+                    fail(ContractError::NotArbitrator);
+                }
+            }
         }
 
         symbols::validate_symbol_or_fail(&env, SymbolKind::Resolution, &resolution);
@@ -1805,6 +1837,23 @@ impl MergeMintContract {
         events::emit_config_changed_min_reward(&env, &token, old, amount);
     }
 
+    /// Designate (`Some`) or clear (`None`) an independent dispute arbitrator
+    /// (#1195). While set, only this address may call `resolve_dispute`, and
+    /// it is rejected on any bounty where it is the creator or an assignee;
+    /// a "complete" decision then pays assignees from the contract's escrow.
+    /// While unset, the bounty creator acts as arbitrator, as before.
+    /// Emits `config_changed` / `arbitrator`.
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn set_arbitrator(env: Env, admin: Address, arbitrator: Option<Address>) {
+        require_admin(&env, &admin);
+        require_not_paused(&env);
+        let old = storage::get_arbitrator(&env);
+        storage::set_arbitrator(&env, &arbitrator);
+        events::emit_config_changed_arbitrator(&env, old, arbitrator);
+    }
+
     /// Begin a two-step admin transfer by proposing `new_admin`. The
     /// transfer completes only once `new_admin` calls `accept_admin`.
     ///
@@ -1902,9 +1951,11 @@ impl MergeMintContract {
         }
 
         // Statuses counted by the per-creator open-bounty cap.
+        // `disputed` stays active until `apply_dispute_resolution` (#1197).
         let is_active = bounty.status == Symbol::new(&env, STATUS_OPEN)
             || bounty.status == Symbol::new(&env, STATUS_IN_PROGRESS)
-            || bounty.status == Symbol::new(&env, STATUS_SUBMITTED);
+            || bounty.status == Symbol::new(&env, STATUS_SUBMITTED)
+            || bounty.status == Symbol::new(&env, STATUS_DISPUTED);
         if is_active {
             let limit = storage::get_creator_open_limit(&env);
             if limit > 0 && storage::get_creator_open_count(&env, &new_owner) >= limit {

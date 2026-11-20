@@ -74,6 +74,9 @@ pub enum ContractError {
     /// A state-mutating entrypoint was called while the admin has the
     /// contract paused.
     ContractPaused,
+    /// The designated arbitrator is the bounty creator or one of its
+    /// assignees, i.e. an interested party in the dispute (#1195).
+    ArbitratorConflict,
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
@@ -154,5 +157,8 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::NotPendingOwner => "caller is not the pending bounty owner",
         ContractError::OwnerCannotBeAssignee => "new owner cannot be an assignee of the bounty",
         ContractError::ContractPaused => "contract is paused",
+        ContractError::ArbitratorConflict => {
+            "arbitrator cannot be the bounty creator or an assignee"
+        }
     }
 }
