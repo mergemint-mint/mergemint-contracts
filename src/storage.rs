@@ -25,20 +25,24 @@
 //! | Status index page | `StatusIndexPage(Symbol, u32)` | `Vec<BountyId>` | Paged shard (`PAGE_SIZE` IDs) |
 //! | Open-bounty totals | `OpenBountiesCount` | `u32` | Count of claimable bounties |
 //! | Open-bounty page | `OpenBountiesPage(u32)` | `Vec<BountyId>` | Paged open-bounty shard |
+//! | Contributor history totals | `ContributorHistoryCount(Address)` | `u32` | Terminal-bounty count per contributor |
+//! | Contributor history page | `ContributorHistoryPage(Address, u32)` | `Vec<BountyId>` | Paged history shard |
 //! | Multi-sig votes | `Approvals(BountyId)` | `Vec<Address>` | Per-bounty verifier approvals |
 //!
 //! ## Legacy variants (read-only)
 //!
 //! - `StatusIndex(Symbol)` — pre-pagination status blob; do not write.
 //! - `OpenBounties` — pre-pagination open list; do not write.
+//! - `ContributorHistory(Address)` — pre-pagination history blob; do not write.
 //!
 //! ## Paged indexes
 //!
-//! `StatusIndexPage` and `OpenBountiesPage` shard large lists into pages of at
-//! most [`PAGE_SIZE`] entries to stay within Soroban's per-entry size limit.
-//! Each index also maintains a companion count key (`StatusCount` /
-//! `OpenBountiesCount`). See the inline layout comments in this file for
-//! append and swap-remove semantics.
+//! `StatusIndexPage`, `OpenBountiesPage` and `ContributorHistoryPage` shard
+//! large lists into pages of at most [`PAGE_SIZE`] entries to stay within
+//! Soroban's per-entry size limit. Each index also maintains a companion count
+//! key (`StatusCount` / `OpenBountiesCount` / `ContributorHistoryCount`). See
+//! the inline layout comments in this file for append and swap-remove
+//! semantics.
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::errors::{fail, ContractError};
@@ -911,25 +915,160 @@ pub fn remove_token_bounty(env: &Env, token: &Address, bounty_id: &BountyId) {
         .set(&DataKey::TokenBounties(token.clone()), &trimmed);
 }
 
-// ── Contributor bounty history ───────────────────────────────────────────────
+// ── Contributor bounty history — paged ───────────────────────────────────────
+//
+// Layout:
+//   DataKey::ContributorHistoryCount(address)        → u32
+//   DataKey::ContributorHistoryPage(address, page)   → Vec<BountyId>
+//
+// Entries are appended in chronological order (oldest first) to the last page,
+// creating a new page when the current one is full. Reads that need the most
+// recent entries walk pages from the tail backwards, so only the requested
+// window is materialised — the full history is never copied into a temporary
+// `Vec`. Inserts are deduplicated against the last page (the only page that can
+// receive the new entry) to keep the index idempotent.
 
-/// Returns every bounty ID `address` was an assignee on when it reached a
-/// terminal status (`"completed"` or `"cancelled"`). Empty if none.
-pub fn get_contributor_history(env: &Env, address: &Address) -> Vec<BountyId> {
-    let key = DataKey::ContributorHistory(address.clone());
-    let list: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
-    if list.is_some() {
+/// Returns the total number of terminal bounties recorded for `address`.
+pub fn get_contributor_history_count(env: &Env, address: &Address) -> u32 {
+    let key = DataKey::ContributorHistoryCount(address.clone());
+    let count: Option<u32> = env.storage().persistent().get(&key);
+    if count.is_some() {
         extend(env, &key);
     }
-    list.unwrap_or_else(|| Vec::new(env))
+    count.unwrap_or(0)
+}
+
+fn set_contributor_history_count(env: &Env, address: &Address, count: u32) {
+    let key = DataKey::ContributorHistoryCount(address.clone());
+    env.storage().persistent().set(&key, &count);
+    extend(env, &key);
+}
+
+fn get_contributor_history_page(env: &Env, address: &Address, page: u32) -> Vec<BountyId> {
+    let key = DataKey::ContributorHistoryPage(address.clone(), page);
+    let result: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
+    if result.is_some() {
+        extend(env, &key);
+    }
+    result.unwrap_or_else(|| Vec::new(env))
+}
+
+fn set_contributor_history_page(env: &Env, address: &Address, page: u32, items: &Vec<BountyId>) {
+    let key = DataKey::ContributorHistoryPage(address.clone(), page);
+    if items.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, items);
+        extend(env, &key);
+    }
+}
+
+/// Returns every bounty ID `address` was an assignee on when it reached a
+/// terminal status (`"completed"` or `"cancelled"`), oldest first. Empty if
+/// none.
+///
+/// Compatibility helper: walks all pages. Prefer
+/// [`get_contributor_history_page_data`] for large histories.
+pub fn get_contributor_history(env: &Env, address: &Address) -> Vec<BountyId> {
+    let total = get_contributor_history_count(env, address);
+    let mut result = Vec::new(env);
+    if total == 0 {
+        return result;
+    }
+    let page_count = total.div_ceil(PAGE_SIZE);
+    let mut p = 0u32;
+    while p < page_count {
+        let page = get_contributor_history_page(env, address, p);
+        for id in page.iter() {
+            result.push_back(id);
+        }
+        p += 1;
+    }
+    result
+}
+
+/// Returns a single page of `address`'s history, oldest first. `page` is
+/// 0-indexed; returns an empty `Vec` when `page >= page_count`.
+pub fn get_contributor_history_page_data(env: &Env, address: &Address, page: u32) -> Vec<BountyId> {
+    get_contributor_history_page(env, address, page)
+}
+
+/// Returns up to `limit` of `address`'s most recent history entries, newest
+/// first, starting `offset` entries back from the tail.
+///
+/// Only the pages overlapping the requested window are read; the full history
+/// is never materialised.
+pub fn get_contributor_history_recent(
+    env: &Env,
+    address: &Address,
+    offset: u32,
+    limit: u32,
+) -> Vec<BountyId> {
+    let mut result = Vec::new(env);
+    let total = get_contributor_history_count(env, address);
+    if total == 0 || limit == 0 || offset >= total {
+        return result;
+    }
+
+    // Number of entries still available after skipping `offset` from the tail.
+    let available = total - offset;
+    let take = if limit < available { limit } else { available };
+
+    // Index (exclusive) of the newest entry we want, in chronological order.
+    let mut end = total - offset; // exclusive
+    let mut remaining = take;
+    while remaining > 0 && end > 0 {
+        let page_idx = (end - 1) / PAGE_SIZE;
+        let page = get_contributor_history_page(env, address, page_idx);
+        let page_len = page.len();
+        if page_len == 0 {
+            fail(ContractError::CorruptedIndex);
+        }
+        // Position within the page of the newest wanted entry (exclusive end).
+        let page_end = end - page_idx * PAGE_SIZE;
+        let page_end = if page_end > page_len { page_len } else { page_end };
+        let mut pos = page_end;
+        while pos > 0 && remaining > 0 {
+            pos -= 1;
+            if let Some(id) = page.get(pos) {
+                result.push_back(id);
+                remaining -= 1;
+            }
+        }
+        end = page_idx * PAGE_SIZE;
+    }
+    result
 }
 
 fn append_contributor_history(env: &Env, address: &Address, bounty_id: &BountyId) {
-    let mut list = get_contributor_history(env, address);
-    list.push_back(bounty_id.clone());
-    let key = DataKey::ContributorHistory(address.clone());
-    env.storage().persistent().set(&key, &list);
-    extend(env, &key);
+    let total = get_contributor_history_count(env, address);
+    let last_page_idx = if total == 0 {
+        0
+    } else {
+        (total - 1) / PAGE_SIZE
+    };
+
+    // Deduplicate against the last page: appends only ever land there, so a
+    // duplicate can only exist on the tail page.
+    let mut page = get_contributor_history_page(env, address, last_page_idx);
+    for id in page.iter() {
+        if id == *bounty_id {
+            return; // already recorded, nothing to do
+        }
+    }
+
+    // Start a fresh page when the tail page is full.
+    let target_page_idx = if total > 0 && total.is_multiple_of(PAGE_SIZE) {
+        total / PAGE_SIZE
+    } else {
+        last_page_idx
+    };
+    if target_page_idx != last_page_idx {
+        page = Vec::new(env);
+    }
+    page.push_back(bounty_id.clone());
+    set_contributor_history_page(env, address, target_page_idx, &page);
+    set_contributor_history_count(env, address, total + 1);
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
