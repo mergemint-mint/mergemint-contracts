@@ -74,6 +74,17 @@ pub enum ContractError {
     /// A state-mutating entrypoint was called while the admin has the
     /// contract paused.
     ContractPaused,
+    /// A `BytesN<32>` hash argument (work submission or dispute evidence)
+    /// was the all-zero sentinel value, which is never a valid hash.
+    ZeroHash,
+    /// The supplied dispute evidence hash is already recorded for this
+    /// dispute; re-submitting it would consume the party's evidence quota
+    /// without adding new information.
+    DuplicateEvidence,
+    /// `pause` was called while the contract was already paused.
+    AlreadyPaused,
+    /// `unpause` was called while the contract was not paused.
+    NotPaused,
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
@@ -154,5 +165,9 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::NotPendingOwner => "caller is not the pending bounty owner",
         ContractError::OwnerCannotBeAssignee => "new owner cannot be an assignee of the bounty",
         ContractError::ContractPaused => "contract is paused",
+        ContractError::ZeroHash => "hash must not be all zero",
+        ContractError::DuplicateEvidence => "dispute evidence hash already recorded",
+        ContractError::AlreadyPaused => "contract is already paused",
+        ContractError::NotPaused => "contract is not paused",
     }
 }

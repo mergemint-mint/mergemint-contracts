@@ -83,6 +83,11 @@ fn generate_bounty_id(env: &Env, count: u64) -> BountyId {
     BountyId(BytesN::from_array(env, &buf))
 }
 
+/// Returns `true` when every byte of `hash` is zero (the all-zero sentinel).
+fn is_zero_hash(hash: &BytesN<32>) -> bool {
+    hash.to_array().iter().all(|b| *b == 0)
+}
+
 /// Probe `reward_token` by invoking the SEP-41 `balance` method. Non-token
 /// addresses must fail closed with `InvalidRewardToken` instead of trapping.
 fn validate_reward_token(env: &Env, reward_token: &Address) {
@@ -1170,7 +1175,14 @@ impl MergeMintContract {
             fail(ContractError::OnlyPartyCanAddEvidence);
         }
 
+        if is_zero_hash(&hash) {
+            fail(ContractError::ZeroHash);
+        }
+
         let existing = storage::get_dispute_evidence(&env, &bounty_id);
+        if existing.iter().any(|h| h == hash) {
+            fail(ContractError::DuplicateEvidence);
+        }
         if existing.len() >= storage::MAX_DISPUTE_EVIDENCE {
             fail(ContractError::EvidenceLimitReached);
         }
@@ -1362,6 +1374,10 @@ impl MergeMintContract {
         let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == assignee);
         if !is_assignee {
             fail(ContractError::NotAssignee);
+        }
+
+        if is_zero_hash(&submission_hash) {
+            fail(ContractError::ZeroHash);
         }
 
         storage::set_submission(&env, &bounty_id, &submission_hash);
@@ -1671,6 +1687,9 @@ impl MergeMintContract {
     /// Admin-only; requires auth from `admin`.
     pub fn pause(env: Env, admin: Address) {
         require_admin(&env, &admin);
+        if storage::is_paused(&env) {
+            fail(ContractError::AlreadyPaused);
+        }
         storage::set_paused(&env, true);
         events::emit_contract_paused(&env, &admin);
     }
@@ -1681,6 +1700,9 @@ impl MergeMintContract {
     /// Admin-only; requires auth from `admin`.
     pub fn unpause(env: Env, admin: Address) {
         require_admin(&env, &admin);
+        if !storage::is_paused(&env) {
+            fail(ContractError::NotPaused);
+        }
         storage::set_paused(&env, false);
         events::emit_contract_unpaused(&env, &admin);
     }
@@ -1717,6 +1739,7 @@ impl MergeMintContract {
     pub fn add_reward_token(env: Env, admin: Address, token: Address) {
         require_admin(&env, &admin);
         require_not_paused(&env);
+        validate_reward_token(&env, &token);
         storage::add_allowed_reward_token(&env, &token);
         events::emit_reward_token_added(&env, &admin, &token);
     }
@@ -1800,6 +1823,7 @@ impl MergeMintContract {
         if amount < 0 {
             fail(ContractError::AmountMustBePositive);
         }
+        validate_reward_token(&env, &token);
         let old = storage::get_min_reward(&env, &token);
         storage::set_min_reward(&env, &token, amount);
         events::emit_config_changed_min_reward(&env, &token, old, amount);
