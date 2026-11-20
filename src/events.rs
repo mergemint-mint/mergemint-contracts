@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-use soroban_sdk::{Address, BytesN, Env, Symbol};
+use soroban_sdk::{Address, BytesN, Env, Symbol, Vec};
 
 use crate::types::BountyId;
 
@@ -117,6 +117,25 @@ pub fn emit_deadline_extended(
     let topic = Symbol::new(env, "deadline_extended");
     env.events()
         .publish((topic, creator.clone()), (bounty_id.clone(), new_deadline));
+}
+
+/// Emitted by `update_tags` so off-chain indexers can keep a bounty's tag set
+/// in sync without re-reading the full record (#1192).
+///
+/// Topics: `(Symbol("bounty_tags_updated"), creator)`.
+/// Data: `(bounty_id, old_tags, new_tags)`.
+pub fn emit_bounty_tags_updated(
+    env: &Env,
+    bounty_id: &BountyId,
+    creator: &Address,
+    old_tags: &Vec<Symbol>,
+    new_tags: &Vec<Symbol>,
+) {
+    let topic = Symbol::new(env, "bounty_tags_updated");
+    env.events().publish(
+        (topic, creator.clone()),
+        (bounty_id.clone(), old_tags.clone(), new_tags.clone()),
+    );
 }
 
 pub fn emit_bounty_topped_up(

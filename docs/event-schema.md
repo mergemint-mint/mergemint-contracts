@@ -100,6 +100,12 @@ Contract events emitted for indexer integration.
 - **Trigger**: `archive_bounty` compacts a finished bounty into a `BountySummary`
 - **Purpose**: Tell the indexer the full bounty record is gone so it can rely on `get_bounty_summary` / the degenerate `get_bounty` fallback for this id going forward
 
+### bounty_tags_updated
+- **Topics**: `(Symbol("bounty_tags_updated"), creator_address)`
+- **Data**: `(bounty_id, old_tags, new_tags)`
+- **Trigger**: Bounty creator replaces the tag list of an active (`open`, `in_progress` or `submitted`) bounty via `update_tags`
+- **Purpose**: Keep off-chain indexers' tag sets in sync with on-chain tag changes without re-reading the full bounty record
+
 ### reputation_changed
 - **Topics**: `(Symbol("reputation_changed"), contributor_address)`
 - **Data**: `(old_reputation, new_reputation, reason)`
