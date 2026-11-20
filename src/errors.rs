@@ -74,6 +74,26 @@ pub enum ContractError {
     /// A state-mutating entrypoint was called while the admin has the
     /// contract paused.
     ContractPaused,
+    /// An admin window setter was given a value above `MAX_LEDGER_WINDOW`
+    /// (#1189).
+    WindowTooLarge,
+    /// `transfer_admin` nominated the current admin (#1194).
+    CannotTransferToSelf,
+    /// `cancel_admin_transfer` was called with no transfer pending (#1194).
+    NoPendingAdmin,
+    /// `resolve_dispute` was called while a decision is already pending its
+    /// appeal window (#1196).
+    ResolutionAlreadyPending,
+    /// `required_verifiers` was `Some` but empty (#1198).
+    EmptyVerifierList,
+    /// `required_verifiers` lists the same address more than once (#1198).
+    DuplicateVerifier,
+    /// `required_verifiers` exceeds `MAX_VERIFIERS` (#1198).
+    TooManyVerifiers,
+    /// `approval_threshold` is `0` while `required_verifiers` is set (#1198).
+    InvalidApprovalThreshold,
+    /// The bounty creator was listed as one of its own verifiers (#1198).
+    CreatorCannotBeVerifier,
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
@@ -154,5 +174,18 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::NotPendingOwner => "caller is not the pending bounty owner",
         ContractError::OwnerCannotBeAssignee => "new owner cannot be an assignee of the bounty",
         ContractError::ContractPaused => "contract is paused",
+        ContractError::WindowTooLarge => "ledger window exceeds the maximum allowed",
+        ContractError::CannotTransferToSelf => "new admin must differ from the current admin",
+        ContractError::NoPendingAdmin => "no admin transfer is pending",
+        ContractError::ResolutionAlreadyPending => {
+            "a dispute decision is already pending for this bounty"
+        }
+        ContractError::EmptyVerifierList => "required_verifiers must not be empty",
+        ContractError::DuplicateVerifier => "required_verifiers contains a duplicate address",
+        ContractError::TooManyVerifiers => "required_verifiers exceeds the maximum allowed",
+        ContractError::InvalidApprovalThreshold => {
+            "approval_threshold must be at least 1 when required_verifiers is set"
+        }
+        ContractError::CreatorCannotBeVerifier => "bounty creator cannot be a required verifier",
     }
 }
