@@ -267,6 +267,15 @@ pub fn emit_config_changed_address(
     );
 }
 
+/// Emitted by `cancel_admin_transfer` (#1194): `config_changed` /
+/// `pending_admin` with `(Some(cancelled_nominee), None)`.
+pub fn emit_config_changed_pending_admin_cleared(env: &Env, cancelled: &Address) {
+    env.events().publish(
+        config_changed_topic(env, "pending_admin"),
+        (Some(cancelled.clone()), Option::<Address>::None),
+    );
+}
+
 pub fn emit_ownership_transfer_started(
     env: &Env,
     bounty_id: &BountyId,

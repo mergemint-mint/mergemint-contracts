@@ -4178,3 +4178,337 @@ fn non_admin_cannot_unpause() {
     c.client.pause(&c.admin);
     c.client.unpause(&c.other);
 }
+
+// ===========================================================================
+// #1189 — saturating ledger-window arithmetic and bounded window setters
+// ===========================================================================
+
+#[test]
+fn window_setters_accept_up_to_max_and_reject_above() {
+    use crate::contract::MAX_LEDGER_WINDOW;
+    let candidates = [
+        0u32,
+        1,
+        MAX_LEDGER_WINDOW - 1,
+        MAX_LEDGER_WINDOW,
+        MAX_LEDGER_WINDOW + 1,
+        u32::MAX / 2,
+        u32::MAX - 1,
+        u32::MAX,
+    ];
+    for w in candidates {
+        let (env, _creator, admin, _verifier) = setup_test();
+        let contract_id = env.register(MergeMintContract, ());
+        let client = MergeMintContractClient::new(&env, &contract_id);
+        client.init_admin(&admin);
+        let ok = w <= MAX_LEDGER_WINDOW;
+        assert_eq!(client.try_set_claim_window(&admin, &w).is_ok(), ok, "claim_window {w}");
+        assert_eq!(client.try_set_claim_cooldown(&admin, &w).is_ok(), ok, "claim_cooldown {w}");
+        assert_eq!(client.try_set_appeal_window(&admin, &w).is_ok(), ok, "appeal_window {w}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "ledger window exceeds the maximum allowed")]
+fn set_appeal_window_u32_max_rejected() {
+    let (env, _creator, admin, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.set_appeal_window(&admin, &u32::MAX);
+}
+
+/// A dispute bounty with an appeal window, disputed by the creator.
+fn disputed_bounty_with_window(
+    window: u32,
+) -> (Env, MergeMintContractClient<'static>, Address, Address, Address, BountyId) {
+    let (env, creator, contributor, admin) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.set_appeal_window(&admin, &window);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "bug", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+    (env, client, contract_id, creator, contributor, bounty_id)
+}
+
+#[test]
+fn near_max_decided_at_does_not_overflow_finalize_or_appeal() {
+    use crate::contract::MAX_LEDGER_WINDOW;
+    let (env, client, contract_id, creator, contributor, bounty_id) =
+        disputed_bounty_with_window(MAX_LEDGER_WINDOW);
+    // Plant a decision recorded at a near-max ledger sequence, so
+    // `decided_at + window` would overflow `u32` without saturation.
+    for decided_at in [u32::MAX - MAX_LEDGER_WINDOW + 1, u32::MAX - 1, u32::MAX] {
+        env.as_contract(&contract_id, || {
+            storage::set_pending_resolution(
+                &env,
+                &bounty_id,
+                &crate::types::PendingResolution {
+                    arbitrator: creator.clone(),
+                    resolution: Symbol::new(&env, "cancel"),
+                    decided_at,
+                },
+            );
+        });
+        let err = panic_message(|| client.finalize_dispute(&creator, &bounty_id));
+        assert!(
+            err.as_deref()
+                .is_some_and(|m| m.contains("the appeal window has not yet passed")),
+            "decided_at {decided_at}: {err:?}"
+        );
+    }
+    // The appeal window is still open, so an appeal succeeds instead of trapping.
+    client.appeal_dispute(&contributor, &bounty_id);
+}
+
+#[test]
+fn near_max_unclaimed_at_does_not_overflow_claim_cooldown() {
+    use crate::contract::MAX_LEDGER_WINDOW;
+    let (env, creator, contributor, admin) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.set_claim_cooldown(&admin, &MAX_LEDGER_WINDOW);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "bug", 1000, None);
+    env.as_contract(&contract_id, || {
+        env.storage().temporary().set(
+            &DataKey::UnclaimedAt(bounty_id.clone(), contributor.clone()),
+            &(u32::MAX - 1),
+        );
+    });
+    let err = panic_message(|| client.claim_bounty(&contributor, &bounty_id));
+    assert!(
+        err.as_deref()
+            .is_some_and(|m| m.contains("claim cooldown is still active")),
+        "{err:?}"
+    );
+}
+
+// ===========================================================================
+// #1194 — cancel_admin_transfer and self-transfer guard
+// ===========================================================================
+
+#[test]
+#[should_panic(expected = "new admin must differ from the current admin")]
+fn transfer_admin_to_self_rejected() {
+    let (env, _creator, admin, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.transfer_admin(&admin, &admin);
+}
+
+#[test]
+fn cancel_admin_transfer_clears_pending_and_emits_event() {
+    let (env, _creator, admin, nominee) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.transfer_admin(&admin, &nominee);
+
+    client.cancel_admin_transfer(&admin);
+    assert_invocation_emits(&env, &contract_id, &["config_changed"]);
+    let config = client.get_config();
+    assert_eq!(config.pending_admin, None);
+    assert_eq!(config.admin, Some(admin));
+}
+
+#[test]
+fn cancel_admin_transfer_works_while_paused_and_blocks_stale_accept() {
+    let c = pause_ctx();
+    let wrong = Address::generate(&c.env);
+    c.client.transfer_admin(&c.admin, &wrong);
+    c.client.pause(&c.admin);
+
+    c.client.cancel_admin_transfer(&c.admin);
+    assert_eq!(c.client.get_config().pending_admin, None);
+
+    let err = panic_message(|| c.client.accept_admin(&wrong));
+    assert!(
+        err.as_deref()
+            .is_some_and(|m| m.contains("caller is not the pending admin")),
+        "{err:?}"
+    );
+    assert_eq!(c.client.get_config().admin, Some(c.admin.clone()));
+    c.client.unpause(&c.admin);
+}
+
+#[test]
+#[should_panic(expected = "no admin transfer is pending")]
+fn cancel_admin_transfer_without_pending_rejected() {
+    let (env, _creator, admin, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.cancel_admin_transfer(&admin);
+}
+
+#[test]
+#[should_panic(expected = "caller is not the contract admin")]
+fn cancel_admin_transfer_non_admin_rejected() {
+    let (env, other, admin, nominee) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.transfer_admin(&admin, &nominee);
+    client.cancel_admin_transfer(&other);
+}
+
+// ===========================================================================
+// #1196 — resolve_dispute cannot overwrite a pending resolution
+// ===========================================================================
+
+#[test]
+fn resolve_dispute_rejected_while_pending_and_allowed_after_appeal() {
+    let (env, client, _contract_id, creator, contributor, bounty_id) =
+        disputed_bounty_with_window(10);
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+    let first = client.get_pending_resolution(&bounty_id).unwrap();
+
+    // A later resolve cannot reset `decided_at` or swap the decision.
+    env.ledger().with_mut(|l| l.sequence_number += 5);
+    for resolution in ["cancel", "complete"] {
+        let err = panic_message(|| {
+            client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, resolution))
+        });
+        assert!(
+            err.as_deref()
+                .is_some_and(|m| m.contains("a dispute decision is already pending")),
+            "{resolution}: {err:?}"
+        );
+    }
+    assert_eq!(client.get_pending_resolution(&bounty_id).unwrap(), first);
+
+    // Once appealed, the arbitrator may issue a fresh decision.
+    client.appeal_dispute(&contributor, &bounty_id);
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+    assert!(client.get_pending_resolution(&bounty_id).is_some());
+}
+
+// ===========================================================================
+// #1198 — required_verifiers validation in create_bounty
+// ===========================================================================
+
+fn try_create_with_verifiers(
+    client: &MergeMintContractClient,
+    env: &Env,
+    creator: &Address,
+    token: &Address,
+    verifiers: Vec<Address>,
+    threshold: u32,
+) -> Option<std::string::String> {
+    panic_message(|| {
+        client.create_bounty(
+            creator,
+            &Symbol::new(env, "msig"),
+            &String::from_str(env, "desc"),
+            &1000,
+            token,
+            &0,
+            &None,
+            &Vec::new(env),
+            &1,
+            &Some(verifiers),
+            &threshold,
+            &Vec::new(env),
+        );
+    })
+}
+
+fn verifier_ctx() -> (Env, MergeMintContractClient<'static>, Address, Address) {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let token = create_token_and_mint(&env, &creator, &contract_id, 1000);
+    (env, client, creator, token)
+}
+
+fn assert_rejected(result: Option<std::string::String>, expected: &str) {
+    assert!(
+        result.as_deref().is_some_and(|m| m.contains(expected)),
+        "expected '{expected}', got {result:?}"
+    );
+}
+
+#[test]
+fn empty_verifier_list_rejected() {
+    let (env, client, creator, token) = verifier_ctx();
+    assert_rejected(
+        try_create_with_verifiers(&client, &env, &creator, &token, Vec::new(&env), 0),
+        "required_verifiers must not be empty",
+    );
+}
+
+#[test]
+fn duplicate_verifiers_rejected() {
+    let (env, client, creator, token) = verifier_ctx();
+    let v = Address::generate(&env);
+    let w = Address::generate(&env);
+    for list in [
+        vec![&env, v.clone(), v.clone()],
+        vec![&env, v.clone(), w.clone(), v.clone()],
+        vec![&env, w.clone(), v.clone(), v.clone()],
+    ] {
+        assert_rejected(
+            try_create_with_verifiers(&client, &env, &creator, &token, list, 1),
+            "required_verifiers contains a duplicate address",
+        );
+    }
+}
+
+#[test]
+fn creator_as_verifier_rejected() {
+    let (env, client, creator, token) = verifier_ctx();
+    let v = Address::generate(&env);
+    assert_rejected(
+        try_create_with_verifiers(&client, &env, &creator, &token, vec![&env, v, creator.clone()], 1),
+        "bounty creator cannot be a required verifier",
+    );
+}
+
+#[test]
+fn oversized_verifier_list_rejected() {
+    use crate::contract::MAX_VERIFIERS;
+    let (env, client, creator, token) = verifier_ctx();
+    let mut list = Vec::new(&env);
+    for _ in 0..=MAX_VERIFIERS {
+        list.push_back(Address::generate(&env));
+    }
+    assert_rejected(
+        try_create_with_verifiers(&client, &env, &creator, &token, list, 1),
+        "required_verifiers exceeds the maximum allowed",
+    );
+}
+
+#[test]
+fn zero_threshold_with_verifiers_rejected() {
+    let (env, client, creator, token) = verifier_ctx();
+    let list = vec![&env, Address::generate(&env), Address::generate(&env)];
+    assert_rejected(
+        try_create_with_verifiers(&client, &env, &creator, &token, list, 0),
+        "approval_threshold must be at least 1 when required_verifiers is set",
+    );
+}
+
+/// Exhaustive sweep of list sizes and thresholds: accepted iff
+/// `1 <= threshold <= len <= MAX_VERIFIERS`.
+#[test]
+fn verifier_threshold_edges_sweep() {
+    use crate::contract::MAX_VERIFIERS;
+    let (env, client, creator, token) = verifier_ctx();
+    for n in [1u32, 2, 3, MAX_VERIFIERS - 1, MAX_VERIFIERS, MAX_VERIFIERS + 1] {
+        let mut list = Vec::new(&env);
+        for _ in 0..n {
+            list.push_back(Address::generate(&env));
+        }
+        for t in [0u32, 1, n / 2, n.saturating_sub(1), n, n + 1, u32::MAX] {
+            let accepted = (1..=n).contains(&t) && n <= MAX_VERIFIERS;
+            let result = try_create_with_verifiers(&client, &env, &creator, &token, list.clone(), t);
+            assert_eq!(result.is_none(), accepted, "n={n} t={t}: {result:?}");
+        }
+    }
+}

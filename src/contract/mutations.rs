@@ -12,6 +12,54 @@ const MIN_REWARD_AMOUNT: i128 = 100;
 /// compacted. At ~5s/ledger this is roughly 1 day.
 const ARCHIVE_GRACE_PERIOD_LEDGERS: u32 = 17_280;
 
+/// Upper bound (in ledgers) accepted by the admin window setters
+/// (`set_claim_window`, `set_claim_cooldown`, `set_appeal_window`). ~180 days
+/// at 5s/ledger, matching the network's maximum entry TTL, so a configured
+/// window can never push ledger arithmetic near `u32::MAX` or ask
+/// `record_unclaim` for a TTL the host would reject (#1189).
+pub(crate) const MAX_LEDGER_WINDOW: u32 = 3_110_400;
+
+/// Maximum number of addresses in a bounty's `required_verifiers` (#1198).
+/// Bounds the per-approval membership scan and the stored bounty size.
+pub(crate) const MAX_VERIFIERS: u32 = 20;
+
+/// Fail with `WindowTooLarge` if `ledgers` exceeds `MAX_LEDGER_WINDOW` (#1189).
+fn validate_window(ledgers: u32) {
+    if ledgers > MAX_LEDGER_WINDOW {
+        fail(ContractError::WindowTooLarge);
+    }
+}
+
+/// Validate a `required_verifiers` list against `creator` and
+/// `approval_threshold` (#1198): non-empty, at most `MAX_VERIFIERS`, no
+/// duplicate addresses (a duplicate would let one verifier count twice
+/// towards — or make unreachable — the threshold), never the creator, and
+/// `1 <= approval_threshold <= verifiers.len()`.
+fn validate_verifiers(creator: &Address, verifiers: &Vec<Address>, approval_threshold: u32) {
+    if approval_threshold > verifiers.len() {
+        fail(ContractError::ApprovalThresholdExceedsVerifiers);
+    }
+    if verifiers.is_empty() {
+        fail(ContractError::EmptyVerifierList);
+    }
+    if verifiers.len() > MAX_VERIFIERS {
+        fail(ContractError::TooManyVerifiers);
+    }
+    if approval_threshold == 0 {
+        fail(ContractError::InvalidApprovalThreshold);
+    }
+    for (i, verifier) in verifiers.iter().enumerate() {
+        if verifier == *creator {
+            fail(ContractError::CreatorCannotBeVerifier);
+        }
+        for other in verifiers.iter().skip(i + 1) {
+            if other == verifier {
+                fail(ContractError::DuplicateVerifier);
+            }
+        }
+    }
+}
+
 /// Maximum number of tags a bounty may carry. Documented in
 /// `docs/contract-reference.md`. Enforced by `validate_tags`, used from both
 /// `create_bounty` and `update_tags` so a bounty can never accumulate more
@@ -66,6 +114,7 @@ pub(crate) const PAUSE_EXEMPT_ENTRYPOINTS: &[&str] = &[
     "init_admin",
     "transfer_admin",
     "accept_admin",
+    "cancel_admin_transfer",
 ];
 
 /// Fail with `ContractError::ContractPaused` while the admin has the contract
@@ -348,6 +397,10 @@ impl MergeMintContract {
     /// * If `max_assignees < 1` (`ContractError::MaxAssigneesMustBePositive`).
     /// * If `approval_threshold` exceeds `required_verifiers.len()` when set
     ///   (`ContractError::ApprovalThresholdExceedsVerifiers`).
+    /// * If `required_verifiers` is `Some` but empty (`EmptyVerifierList`), longer
+    ///   than `MAX_VERIFIERS` (`TooManyVerifiers`), contains duplicates
+    ///   (`DuplicateVerifier`) or the creator (`CreatorCannotBeVerifier`), or
+    ///   `approval_threshold` is `0` (`InvalidApprovalThreshold`).
     /// * If `reward_token` is not a valid Soroban token contract.
     /// * If milestone reward summation overflows (`ContractError::RewardAmountOverflow`).
     /// * If `milestones` is non-empty and their rewards do not sum to `reward_amount`.
@@ -389,9 +442,7 @@ impl MergeMintContract {
         }
 
         if let Some(ref verifiers) = required_verifiers {
-            if approval_threshold > verifiers.len() {
-                fail(ContractError::ApprovalThresholdExceedsVerifiers);
-            }
+            validate_verifiers(&creator, verifiers, approval_threshold);
         }
 
         validate_reward_token(&env, &reward_token);
@@ -538,7 +589,7 @@ impl MergeMintContract {
         // `claim_cooldown` ledgers of their own unclaim on this bounty.
         if let Some(unclaimed_at) = storage::get_unclaimed_at(&env, &bounty_id, &contributor) {
             let cooldown = storage::get_claim_cooldown(&env);
-            if cooldown > 0 && env.ledger().sequence() < unclaimed_at + cooldown {
+            if cooldown > 0 && env.ledger().sequence() < unclaimed_at.saturating_add(cooldown) {
                 fail(ContractError::ClaimCooldownActive);
             }
         }
@@ -985,6 +1036,14 @@ impl MergeMintContract {
 
         symbols::validate_symbol_or_fail(&env, SymbolKind::Resolution, &resolution);
 
+        // GUARD (#1196): a decision already waiting out its appeal window must
+        // be finalized or appealed first. Otherwise the arbitrator could keep
+        // resetting `decided_at` to stall `finalize_dispute` indefinitely, or
+        // swap the decision mid-window after the parties have relied on it.
+        if storage::get_pending_resolution(&env, &bounty_id).is_some() {
+            fail(ContractError::ResolutionAlreadyPending);
+        }
+
         // GUARD: arbitrator (creator) must meet the bounty's own min_reputation threshold.
         // This reflects the security/minimum-reputation-enforcement.md recommendation
         // that dispute resolvers are subject to a reputation floor.
@@ -1041,7 +1100,7 @@ impl MergeMintContract {
         };
 
         let window = storage::get_appeal_window(&env);
-        if env.ledger().sequence() < pending.decided_at + window {
+        if env.ledger().sequence() < pending.decided_at.saturating_add(window) {
             fail(ContractError::FinalizeTooEarly);
         }
 
@@ -1095,7 +1154,7 @@ impl MergeMintContract {
         }
 
         let window = storage::get_appeal_window(&env);
-        if env.ledger().sequence() >= pending.decided_at + window {
+        if env.ledger().sequence() >= pending.decided_at.saturating_add(window) {
             fail(ContractError::AppealWindowClosed);
         }
 
@@ -1127,6 +1186,7 @@ impl MergeMintContract {
             None => storage::set_admin(&env, &caller),
         }
 
+        validate_window(ledgers);
         let old = storage::get_appeal_window(&env);
         storage::set_appeal_window(&env, ledgers);
         events::emit_config_changed_u32(&env, "appeal_window", old, ledgers);
@@ -1692,6 +1752,7 @@ impl MergeMintContract {
     pub fn set_claim_window(env: Env, admin: Address, window: u32) {
         require_admin(&env, &admin);
         require_not_paused(&env);
+        validate_window(window);
         let old = storage::get_claim_window(&env);
         storage::set_claim_window(&env, window);
         events::emit_config_changed_u32(&env, "claim_window", old, window);
@@ -1783,6 +1844,7 @@ impl MergeMintContract {
             None => storage::set_admin(&env, &caller),
         }
 
+        validate_window(ledgers);
         let old = storage::get_claim_cooldown(&env);
         storage::set_claim_cooldown(&env, ledgers);
         events::emit_config_changed_u32(&env, "claim_cooldown", old, ledgers);
@@ -1810,9 +1872,35 @@ impl MergeMintContract {
     ///
     /// # Authorization
     /// Admin-only; requires auth from `admin`.
+    ///
+    /// # Panics
+    /// * If `new_admin` is the current admin (`ContractError::CannotTransferToSelf`).
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
         require_admin(&env, &admin);
+        if new_admin == admin {
+            fail(ContractError::CannotTransferToSelf);
+        }
         storage::set_pending_admin(&env, &new_admin);
+    }
+
+    /// Cancel a pending admin transfer, e.g. after nominating a wrong
+    /// address. Clears `PendingAdmin` so the nominee can no longer
+    /// `accept_admin`, and emits `config_changed` for `pending_admin`.
+    /// Pause-exempt, so an erroneous nomination can be revoked mid-incident.
+    ///
+    /// # Panics
+    /// * If no transfer is pending (`ContractError::NoPendingAdmin`).
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn cancel_admin_transfer(env: Env, admin: Address) {
+        require_admin(&env, &admin);
+        let pending = match storage::get_pending_admin(&env) {
+            Some(p) => p,
+            None => fail(ContractError::NoPendingAdmin),
+        };
+        storage::clear_pending_admin(&env);
+        events::emit_config_changed_pending_admin_cleared(&env, &pending);
     }
 
     /// Complete a pending admin transfer. Emits `config_changed` for `admin`.
@@ -2059,7 +2147,7 @@ impl MergeMintContract {
                 storage::set_archive_eligible_at(
                     &env,
                     &bounty_id,
-                    now + ARCHIVE_GRACE_PERIOD_LEDGERS,
+                    now.saturating_add(ARCHIVE_GRACE_PERIOD_LEDGERS),
                 );
                 fail(ContractError::DeadlineNotPassed);
             }
