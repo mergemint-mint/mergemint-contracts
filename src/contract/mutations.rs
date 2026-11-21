@@ -101,39 +101,74 @@ fn validate_reward_token(env: &Env, reward_token: &Address) {
     }
 }
 
+/// Transfer `amount` of `token` from `from` into the contract's own escrow
+/// account (`env.current_contract_address()`).
+///
+/// Used by `create_bounty` (creator funds the reward up front) and
+/// `sponsor_bounty` (third parties co-fund). Any failure from the SEP-41
+/// token contract (insufficient balance, missing allowance, non-token
+/// address) is mapped to `ContractError::TransferFailed` so callers get a
+/// deterministic error instead of a host trap.
+fn escrow_transfer(env: &Env, token: &Address, from: &Address, amount: i128) {
+    let token_client = TokenClient::new(env, token);
+    token_client.transfer(from, &env.current_contract_address(), &amount);
+}
+
 /// Shared payout loop used by `complete_bounty`, `approve_completion`,
-/// and `resolve_dispute`'s "complete" branch.
+/// `complete_milestone`, and `resolve_dispute`'s "complete" branch.
 ///
 /// For each assignee, computes the proportional payout from `reward_amount`,
-/// transfers the token, updates the contributor profile, and emits the
+/// transfers the token out of the contract's escrow account, and emits the
 /// `reward_paid` event. Returns the primary (first) assignee address.
+///
+/// Contributor accounting is intentionally *not* performed here: milestone
+/// payouts must not touch `active_claims`, `contribution_count`, or award
+/// completion reputation (see `complete_milestone`), while terminal
+/// completion must finalize all of them exactly once (see
+/// `complete_bounty_inner`). Callers apply the appropriate stat updates.
 fn distribute_payout(
     env: &Env,
     bounty_id: &BountyId,
     assignees: &Vec<(Address, u32)>,
-    from: &Address,
     token: &TokenClient,
     reward_amount: i128,
 ) -> Address {
-    let (primary_assignee, _) = assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
+    let (primary_assignee, _) = assignees
+        .get(0)
+        .unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
+    let escrow = env.current_contract_address();
 
     for (assignee, share_bp) in assignees.iter() {
         let payout = reward_amount * (share_bp as i128) / 10_000_i128;
-        token.transfer(from, &assignee, &payout);
+        if payout > 0 {
+            token.transfer(&escrow, &assignee, &payout);
+        }
 
         let mut contrib = storage::get_contributor(env, &assignee)
             .unwrap_or_else(|| Contributor::new(assignee.clone()));
-        set_reputation(env, &mut contrib, &assignee, 10, "completion");
         contrib.total_earned += payout;
-        contrib.contribution_count += 1;
-        if contrib.active_claims > 0 {
-            contrib.active_claims -= 1;
-        }
         storage::store_contributor(env, &assignee, &contrib);
         events::emit_reward_paid(env, bounty_id, &assignee, &payout);
     }
 
     primary_assignee
+}
+
+/// Finalize contributor accounting for a terminal completion: award the
+/// `+10` completion reputation, bump `contribution_count`, and release the
+/// assignee's `active_claims` slot. Called exactly once per assignee by
+/// `complete_bounty_inner` (and the equivalent branches in
+/// `approve_completion` / `apply_dispute_resolution`), never by
+/// `complete_milestone`.
+fn finalize_completion_stats(env: &Env, assignees: &Vec<(Address, u32)>) {
+    for (assignee, _) in assignees.iter() {
+        let mut contrib = storage::get_contributor(env, &assignee)
+            .unwrap_or_else(|| Contributor::new(assignee.clone()));
+        set_reputation(env, &mut contrib, &assignee, 10, "completion");
+        contrib.contribution_count += 1;
+        decrement_active_claims(&mut contrib);
+        storage::store_contributor(env, &assignee, &contrib);
+    }
 }
 
 /// Refund every sponsor's tracked contribution for `bounty_id`, clearing the
@@ -214,17 +249,26 @@ fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
         if !bounty.milestones.iter().all(|m| m.completed) {
             fail(ContractError::NotAllMilestonesCompleted);
         }
-        let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
+        // Milestone rewards were already paid out by `complete_milestone`;
+        // finalize the terminal accounting exactly once here.
+        let (primary_assignee, _) = bounty
+            .assignees
+            .get(0)
+            .unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_COMPLETED);
         storage::store_bounty(&env, &bounty_id, &bounty);
         storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
         storage::decrement_creator_open_count(&env, &bounty.creator);
+        finalize_completion_stats(&env, &bounty.assignees);
         events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
         return;
     }
 
-    let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
+    let (primary_assignee, _) = bounty
+        .assignees
+        .get(0)
+        .unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
     let previous_status = bounty.status.clone();
     bounty.status = Symbol::new(&env, STATUS_COMPLETED);
     storage::store_bounty(&env, &bounty_id, &bounty);
@@ -232,14 +276,8 @@ fn complete_bounty_inner(env: Env, bounty_id: BountyId, mut bounty: Bounty) {
     storage::decrement_creator_open_count(&env, &bounty.creator);
 
     let token = TokenClient::new(&env, &bounty.reward_token);
-    distribute_payout(
-        &env,
-        &bounty_id,
-        &bounty.assignees,
-        &env.current_contract_address(),
-        &token,
-        bounty.reward_amount,
-    );
+    distribute_payout(&env, &bounty_id, &bounty.assignees, &token, bounty.reward_amount);
+    finalize_completion_stats(&env, &bounty.assignees);
 
     events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
 }
@@ -273,24 +311,20 @@ fn apply_dispute_resolution(
             bounty.status = Symbol::new(&env, STATUS_COMPLETED);
             storage::store_bounty(&env, &bounty_id, &bounty);
             storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            finalize_completion_stats(&env, &bounty.assignees);
         } else {
+            // Pay from the contract's escrow account, not the arbitrator's
+            // wallet: `create_bounty` (and `sponsor_bounty`) already moved the
+            // reward into escrow, so the arbitrator never funds the payout.
             let token = TokenClient::new(&env, &bounty.reward_token);
-
-            for (assignee, share_bp) in bounty.assignees.iter() {
-                let payout = bounty.reward_amount * (share_bp as i128) / 10_000_i128;
-                token.transfer(&arbitrator, &assignee, &payout);
-
-                let mut contrib = storage::get_contributor(&env, &assignee)
-                    .unwrap_or_else(|| Contributor::new(assignee.clone()));
-
-                set_reputation(&env, &mut contrib, &assignee, 10, "completion");
-                contrib.total_earned += payout;
-                contrib.contribution_count += 1;
-                decrement_active_claims(&mut contrib);
-
-                storage::store_contributor(&env, &assignee, &contrib);
-                events::emit_reward_paid(&env, &bounty_id, &assignee, &payout);
-            }
+            distribute_payout(
+                &env,
+                &bounty_id,
+                &bounty.assignees,
+                &token,
+                bounty.reward_amount,
+            );
+            finalize_completion_stats(&env, &bounty.assignees);
 
             let previous_status = bounty.status.clone();
             bounty.status = Symbol::new(&env, STATUS_COMPLETED);
@@ -442,6 +476,14 @@ impl MergeMintContract {
         if limit > 0 && storage::get_creator_open_count(&env, &creator) >= limit {
             fail(ContractError::CreatorLimitReached);
         }
+
+        // Escrow the reward up front: move `reward_amount` from the creator
+        // into the contract's own account so every payout path (completion,
+        // milestone, dispute "complete") is backed by funds already held by
+        // the contract. This is atomic with the rest of `create_bounty`: if
+        // the transfer fails the whole invocation reverts and no bounty is
+        // stored.
+        escrow_transfer(&env, &reward_token, &creator, reward_amount);
 
         let count = storage::get_bounty_count(&env);
         let id = generate_bounty_id(&env, count);
@@ -617,6 +659,15 @@ impl MergeMintContract {
             None => fail(ContractError::BountyNotFound),
         };
 
+        // GUARD: only an in-progress bounty can be unclaimed. Completed,
+        // cancelled, disputed, and submitted bounties are terminal or under
+        // review and must not be mutated by an assignee walking away.
+        ensure_status(
+            &bounty,
+            &[Symbol::new(&env, STATUS_IN_PROGRESS)],
+            ContractError::BountyNotInProgress,
+        );
+
         let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == contributor);
         if !is_assignee {
             fail(ContractError::NotAssignee);
@@ -627,6 +678,25 @@ impl MergeMintContract {
             if addr != contributor {
                 remaining.push_back((addr, share));
             }
+        }
+
+        // Rebalance basis-point shares across the remaining assignees so they
+        // always sum to exactly 10_000. The first remaining assignee absorbs
+        // any division remainder, mirroring `claim_bounty`.
+        let remaining_count = remaining.len();
+        if remaining_count > 0 {
+            let base_share: u32 = 10_000 / remaining_count;
+            let remainder: u32 = 10_000 % remaining_count;
+            let mut rebalanced: Vec<(Address, u32)> = Vec::new(&env);
+            for (i, (addr, _)) in remaining.iter().enumerate() {
+                let share = if i == 0 {
+                    base_share + remainder
+                } else {
+                    base_share
+                };
+                rebalanced.push_back((addr, share));
+            }
+            remaining = rebalanced;
         }
         bounty.assignees = remaining;
 
@@ -641,6 +711,9 @@ impl MergeMintContract {
             storage::store_bounty(&env, &bounty_id, &bounty);
             storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
             storage::add_open_bounty(&env, &bounty_id);
+            // The last assignee left: clear the claim timestamp so a future
+            // claim starts a fresh claim window.
+            storage::clear_claimed_at_ledger(&env, &bounty_id);
         } else {
             storage::store_bounty(&env, &bounty_id, &bounty);
         }
@@ -722,15 +795,12 @@ impl MergeMintContract {
         let milestone_reward = milestone.reward;
         bounty.milestones.set(idx, milestone);
 
+        // Intermediate milestone payout: transfer the proportional reward and
+        // credit `total_earned` only. `active_claims`, `contribution_count`,
+        // and completion reputation are finalized once, by
+        // `complete_bounty_inner`, when the last milestone completes.
         let token = TokenClient::new(&env, &bounty.reward_token);
-        distribute_payout(
-            &env,
-            &bounty_id,
-            &bounty.assignees,
-            &env.current_contract_address(),
-            &token,
-            milestone_reward,
-        );
+        distribute_payout(&env, &bounty_id, &bounty.assignees, &token, milestone_reward);
 
         let completed_milestone = bounty
             .milestones
@@ -890,22 +960,23 @@ impl MergeMintContract {
                 storage::store_bounty(&env, &bounty_id, &bounty);
                 storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
                 storage::decrement_creator_open_count(&env, &bounty.creator);
-                let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
+                finalize_completion_stats(&env, &bounty.assignees);
+                let (primary_assignee, _) = bounty
+                    .assignees
+                    .get(0)
+                    .unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
                 events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
                 return;
             }
 
             let token = TokenClient::new(&env, &bounty.reward_token);
-            distribute_payout(
-                &env,
-                &bounty_id,
-                &bounty.assignees,
-                &env.current_contract_address(),
-                &token,
-                bounty.reward_amount,
-            );
+            distribute_payout(&env, &bounty_id, &bounty.assignees, &token, bounty.reward_amount);
+            finalize_completion_stats(&env, &bounty.assignees);
 
-            let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
+            let (primary_assignee, _) = bounty
+                .assignees
+                .get(0)
+                .unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
             let previous_status = bounty.status.clone();
             bounty.status = Symbol::new(&env, STATUS_COMPLETED);
             storage::store_bounty(&env, &bounty_id, &bounty);
@@ -1109,23 +1180,12 @@ impl MergeMintContract {
     /// dispute decision before it can be finalized. A value of `0` keeps the
     /// original immediate-payout behaviour (the default).
     ///
-    /// Uses the same lazily-established admin as the other admin entrypoints.
-    ///
     /// # Authorization
-    /// Requires auth from `caller`. Restricted to the contract admin once one
-    /// has been established.
+    /// Admin-only; requires auth from `caller`. The admin must have been
+    /// bootstrapped via `init_admin` first — there is no lazy takeover.
     pub fn set_appeal_window(env: Env, caller: Address, ledgers: u32) {
-        caller.require_auth();
+        require_admin(&env, &caller);
         require_not_paused(&env);
-
-        match storage::get_admin(&env) {
-            Some(admin) => {
-                if caller != admin {
-                    fail(ContractError::NotAdmin);
-                }
-            }
-            None => storage::set_admin(&env, &caller),
-        }
 
         let old = storage::get_appeal_window(&env);
         storage::set_appeal_window(&env, ledgers);
@@ -1419,8 +1479,7 @@ impl MergeMintContract {
             ContractError::BountyNotOpen,
         );
 
-        let token = TokenClient::new(&env, &bounty.reward_token);
-        token.transfer(&sponsor, env.current_contract_address(), &amount);
+        escrow_transfer(&env, &bounty.reward_token, &sponsor, amount);
 
         storage::add_sponsor_contribution(&env, &bounty_id, &sponsor, amount);
 
@@ -1650,6 +1709,18 @@ impl MergeMintContract {
 
     /// One-time admin bootstrap. May only be called while no admin is set.
     ///
+    /// # Deployment bootstrap sequence
+    /// 1. Deploy the contract.
+    /// 2. Call `init_admin(admin)` from the intended admin key. This is the
+    ///    **only** way an admin is ever established — no config setter
+    ///    auto-assigns the admin.
+    /// 3. Call the config setters (`set_appeal_window`,
+    ///    `set_creator_open_limit`, `set_claim_cooldown`, `set_claim_window`,
+    ///    `set_reputation_penalty`, `add_reward_token`, `set_min_reward`, …)
+    ///    from that admin key. Before step 2 every one of them fails closed
+    ///    with `ContractError::NotAdmin`.
+    /// 4. Optionally rotate the key via `transfer_admin` / `accept_admin`.
+    ///
     /// # Panics
     /// * If an admin has already been configured (`ContractError::AdminAlreadySet`).
     ///
@@ -1737,24 +1808,12 @@ impl MergeMintContract {
     /// Set the admin-configurable cap on concurrent open+claimed bounties
     /// per creator. A `limit` of `0` disables the cap (unlimited, the default).
     ///
-    /// The first address to call any admin-only entrypoint becomes the
-    /// contract admin; subsequent calls are restricted to that address.
-    ///
     /// # Authorization
-    /// Requires auth from `caller`. Restricted to the contract admin once one
-    /// has been established.
+    /// Admin-only; requires auth from `caller`. The admin must have been
+    /// bootstrapped via `init_admin` first — there is no lazy takeover.
     pub fn set_creator_open_limit(env: Env, caller: Address, limit: u32) {
-        caller.require_auth();
+        require_admin(&env, &caller);
         require_not_paused(&env);
-
-        match storage::get_admin(&env) {
-            Some(admin) => {
-                if caller != admin {
-                    fail(ContractError::NotAdmin);
-                }
-            }
-            None => storage::set_admin(&env, &caller),
-        }
 
         let old = storage::get_creator_open_limit(&env);
         storage::set_creator_open_limit(&env, limit);
@@ -1765,23 +1824,12 @@ impl MergeMintContract {
     /// contributor must wait after unclaiming a bounty before re-claiming it.
     /// A value of `0` disables the cooldown (the default).
     ///
-    /// Uses the same lazily-established admin as `set_creator_open_limit`.
-    ///
     /// # Authorization
-    /// Requires auth from `caller`. Restricted to the contract admin once one
-    /// has been established.
+    /// Admin-only; requires auth from `caller`. The admin must have been
+    /// bootstrapped via `init_admin` first — there is no lazy takeover.
     pub fn set_claim_cooldown(env: Env, caller: Address, ledgers: u32) {
-        caller.require_auth();
+        require_admin(&env, &caller);
         require_not_paused(&env);
-
-        match storage::get_admin(&env) {
-            Some(admin) => {
-                if caller != admin {
-                    fail(ContractError::NotAdmin);
-                }
-            }
-            None => storage::set_admin(&env, &caller),
-        }
 
         let old = storage::get_claim_cooldown(&env);
         storage::set_claim_cooldown(&env, ledgers);
