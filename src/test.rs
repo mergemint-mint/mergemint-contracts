@@ -521,6 +521,14 @@ fn test_contract_error_messages() {
         "milestone rewards do not sum to reward_amount"
     );
     assert_eq!(
+        message(ContractError::MilestoneRewardMustBePositive),
+        "milestone reward must be positive"
+    );
+    assert_eq!(
+        message(ContractError::TooManyMilestones),
+        "too many milestones"
+    );
+    assert_eq!(
         message(ContractError::MetadataEmpty),
         "metadata must not be empty"
     );
@@ -561,6 +569,8 @@ fn test_contract_error_messages_are_unique() {
         ContractError::NotAllMilestonesCompleted,
         ContractError::InvalidMilestoneIndex,
         ContractError::MilestoneRewardsMismatch,
+        ContractError::MilestoneRewardMustBePositive,
+        ContractError::TooManyMilestones,
     ];
 
     for (i, left) in variants.iter().enumerate() {
@@ -810,6 +820,142 @@ fn test_create_bounty_rejects_milestone_reward_overflow() {
         &Symbol::new(&env, "overflow"),
         &String::from_str(&env, "desc"),
         &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject negative milestone rewards.
+#[test]
+#[should_panic(expected = "milestone reward must be positive")]
+fn test_create_bounty_rejects_negative_milestone_reward() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 1500,
+        completed: false,
+        deadline: None,
+    });
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m2"),
+        reward: -500,
+        completed: false,
+        deadline: None,
+    });
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "neg_reward"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject zero milestone rewards.
+#[test]
+#[should_panic(expected = "milestone reward must be positive")]
+fn test_create_bounty_rejects_zero_milestone_reward() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 0,
+        completed: false,
+        deadline: None,
+    });
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "zero_reward"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject pre-completed milestones.
+#[test]
+#[should_panic(expected = "milestone is already completed")]
+fn test_create_bounty_rejects_pre_completed_milestone() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 1000,
+        completed: true,
+        deadline: None,
+    });
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "pre_comp"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject more than MAX_MILESTONES (20) milestones.
+#[test]
+#[should_panic(expected = "too many milestones")]
+fn test_create_bounty_rejects_oversized_milestone_list() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    for _ in 0..21 {
+        milestones.push_back(Milestone {
+            description: Symbol::new(&env, "m"),
+            reward: 100,
+            completed: false,
+            deadline: None,
+        });
+    }
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "too_many"),
+        &String::from_str(&env, "desc"),
+        &2100,
         &create_token_and_mint(&env, &creator, &contract_id, 0),
         &0,
         &None,
