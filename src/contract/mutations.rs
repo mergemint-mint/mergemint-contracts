@@ -155,12 +155,48 @@ fn refund_sponsors(env: &Env, bounty_id: &BountyId, reward_token: &Address, from
     total
 }
 
-/// Refund the full escrowed reward for a cancelled bounty: each sponsor gets
-/// back exactly what they contributed, and the creator gets the remainder.
+/// Compute the total reward already paid out for completed milestones.
+///
+/// When a bounty has milestones, individual milestone rewards are transferred
+/// by `complete_milestone` as work progresses. Only the *uncompleted*
+/// milestone rewards remain in escrow; refunding the full `reward_amount`
+/// would over-pay.
+fn completed_milestone_total(bounty: &Bounty) -> i128 {
+    if bounty.milestones.is_empty() {
+        return 0;
+    }
+    bounty
+        .milestones
+        .iter()
+        .filter(|m| m.completed)
+        .fold(0i128, |acc, m| acc.saturating_add(m.reward))
+}
+
+/// Refund the escrowed reward for a cancelled or expired bounty.
+///
+/// For milestone bounties, only the uncompleted milestone rewards remain in
+/// escrow — completed milestone funds were already paid out by
+/// `complete_milestone`. This function therefore only refunds
+/// `reward_amount - completed_milestone_total`, preserving the invariant
+/// that no funds are double-counted.
+///
+/// Each sponsor gets back exactly what they contributed (up to the
+/// refundable amount); the creator receives the remainder.
 fn refund_escrow(env: &Env, bounty_id: &BountyId, bounty: &Bounty) {
     let contract_address = env.current_contract_address();
+    // Deduct already-paid milestone rewards so we only refund what is still escrowed.
+    let refundable = bounty
+        .reward_amount
+        .saturating_sub(completed_milestone_total(bounty));
+    if refundable <= 0 {
+        // All funds were already distributed; nothing left to refund.
+        // Still consume the sponsors list so it cannot be replayed.
+        storage::take_sponsors(env, bounty_id);
+        return;
+    }
     let sponsor_total = refund_sponsors(env, bounty_id, &bounty.reward_token, &contract_address);
-    let creator_amount = bounty.reward_amount - sponsor_total;
+    // Clamp: sponsor_total must never exceed refundable (data invariant).
+    let creator_amount = refundable.saturating_sub(sponsor_total);
     if creator_amount > 0 {
         let token = TokenClient::new(env, &bounty.reward_token);
         token.transfer(&contract_address, &bounty.creator, &creator_amount);
@@ -1264,12 +1300,21 @@ impl MergeMintContract {
         events::emit_bounty_cancelled(&env, &bounty_id, &caller);
     }
 
-    /// Expire an open bounty whose deadline has passed.
+    /// Expire a bounty whose deadline has passed.
     ///
     /// Any authenticated address may trigger expiry — no privileged role is required,
     /// but the caller must still sign the transaction. The bounty must have a deadline
     /// set and the current ledger sequence must exceed that deadline.
-    /// Transitions to `"cancelled"`.
+    ///
+    /// Handles all non-terminal statuses:
+    /// * `"open"` → cancelled and escrowed funds refunded.
+    /// * `"in_progress"` or `"submitted"` → each assignee has their
+    ///   `active_claims` decremented and receives a reputation penalty, then the
+    ///   bounty is cancelled and all remaining escrowed funds are refunded
+    ///   (accounting for any milestone rewards already paid out).
+    ///
+    /// Already-terminal bounties (`"completed"`, `"cancelled"`, `"disputed"`)
+    /// are rejected with `BountyNotOpen`.
     ///
     /// # Arguments
     /// * `caller` - Wallet triggering the expiry (any authenticated address).
@@ -1277,9 +1322,10 @@ impl MergeMintContract {
     ///
     /// # Panics
     /// * If `bounty_id` does not exist.
-    /// * If the bounty has no deadline set.
-    /// * If the deadline has not yet passed.
-    /// * If the bounty is not in `"open"` status.
+    /// * If the bounty has no deadline set (`ContractError::BountyNoDeadline`).
+    /// * If the deadline has not yet passed (`ContractError::DeadlineNotPassed`).
+    /// * If the bounty is already in a terminal or disputed status
+    ///   (`ContractError::BountyNotOpen`).
     ///
     /// # Authorization
     /// Requires auth from `caller` (any authenticated wallet may trigger expiry).
@@ -1301,12 +1347,33 @@ impl MergeMintContract {
             fail(ContractError::DeadlineNotPassed);
         }
 
-        if bounty.status != Symbol::new(&env, STATUS_OPEN) {
+        // Reject terminal and disputed statuses; allow open/in_progress/submitted.
+        let is_expirable = bounty.status == Symbol::new(&env, STATUS_OPEN)
+            || bounty.status == Symbol::new(&env, STATUS_IN_PROGRESS)
+            || bounty.status == Symbol::new(&env, STATUS_SUBMITTED);
+        if !is_expirable {
             fail(ContractError::BountyNotOpen);
         }
 
+        // For claimed bounties, penalise assignees and release their claim slots
+        // before cancelling, mirroring the abandoned-claim behaviour of
+        // `release_stale_claim`.
+        if bounty.status != Symbol::new(&env, STATUS_OPEN) {
+            let penalty = storage::get_reputation_penalty(&env);
+            for (assignee, _) in bounty.assignees.iter() {
+                let mut contrib = storage::get_contributor(&env, &assignee)
+                    .unwrap_or_else(|| Contributor::new(assignee.clone()));
+                set_reputation(&env, &mut contrib, &assignee, -(penalty as i64), "penalty");
+                decrement_active_claims(&mut contrib);
+                storage::store_contributor(&env, &assignee, &contrib);
+            }
+            bounty.assignees = Vec::new(&env);
+            storage::clear_claimed_at_ledger(&env, &bounty_id);
+        }
+
         // Refund the escrowed reward pro rata: sponsors get their contribution
-        // back, the creator gets the remainder.
+        // back, the creator gets the remainder.  For milestone bounties only
+        // the uncompleted milestone rewards remain in escrow.
         refund_escrow(&env, &bounty_id, &bounty);
 
         let previous_status = bounty.status.clone();
@@ -1637,10 +1704,30 @@ impl MergeMintContract {
 
         bounty.assignees = Vec::new(&env);
         let previous_status = bounty.status.clone();
-        bounty.status = Symbol::new(&env, STATUS_OPEN);
-        storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
-        storage::add_open_bounty(&env, &bounty_id);
+
+        // If the bounty's global deadline has also passed, cancel it and
+        // refund escrow rather than re-opening it into an immediately-
+        // unclaimable state.  This prevents funds from being locked
+        // indefinitely in a bounty that can never be re-claimed.
+        let deadline_passed = bounty
+            .deadline
+            .map(|d| env.ledger().sequence() > d)
+            .unwrap_or(false);
+
+        if deadline_passed {
+            // Refund remaining escrowed funds (minus any already-paid
+            // milestone rewards) and move to cancelled.
+            refund_escrow(&env, &bounty_id, &bounty);
+            bounty.status = Symbol::new(&env, STATUS_CANCELLED);
+            storage::store_bounty(&env, &bounty_id, &bounty);
+            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            storage::decrement_creator_open_count(&env, &bounty.creator);
+        } else {
+            bounty.status = Symbol::new(&env, STATUS_OPEN);
+            storage::store_bounty(&env, &bounty_id, &bounty);
+            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            storage::add_open_bounty(&env, &bounty_id);
+        }
         storage::clear_claimed_at_ledger(&env, &bounty_id);
 
         events::emit_claim_released(&env, &bounty_id, &caller);
