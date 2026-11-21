@@ -615,6 +615,131 @@ fn test_fail_bounty_is_disputed_message() {
 }
 
 // ===========================================================================
+// Issue #1187 — creator.require_auth() is the first operation in create_bounty
+// ===========================================================================
+
+/// Run `f` and return the panic message it raised, or `None` if it returned.
+fn auth_panic_message<F: FnOnce()>(f: F) -> Option<std::string::String> {
+    use std::string::ToString;
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).err()?;
+    Some(if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<std::string::String>() {
+        s.clone()
+    } else {
+        "<non-string panic>".to_string()
+    })
+}
+
+/// An unauthenticated `create_bounty` must fail on the auth check, before the
+/// `reward_token` probe. The token address here is not a token contract, so a
+/// probe would panic with "invalid reward_token address"; the panic must be the
+/// auth failure instead.
+#[test]
+fn test_create_bounty_requires_auth_before_reward_token_probe() {
+    let env = Env::default();
+    // No mock_all_auths: the creator's authorization is missing.
+    let creator = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bogus_token = Address::generate(&env);
+    let msg = auth_panic_message(|| {
+        client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "auth_first"),
+            &String::from_str(&env, "desc"),
+            &1000,
+            &bogus_token,
+            &0,
+            &None,
+            &Vec::new(&env),
+            &1,
+            &None,
+            &1,
+            &Vec::new(&env),
+        );
+    })
+    .expect("unauthenticated create_bounty must panic");
+
+    assert!(
+        !msg.contains("invalid reward_token address"),
+        "auth must be checked before the reward_token probe, got: {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("auth"),
+        "expected an authorization failure, got: {msg}"
+    );
+
+    // Nothing was persisted: no bounty allocated, no storage written.
+    assert_eq!(client.get_bounty_count(), 0);
+    assert!(client.get_bounty(&fake_bounty_id(&env, 0)).is_none());
+}
+
+/// Same as above but with an explicit empty auth mock list.
+#[test]
+fn test_create_bounty_with_empty_auth_mocks_fails_before_storage() {
+    let env = Env::default();
+    env.mock_auths(&[]);
+    let creator = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let msg = auth_panic_message(|| {
+        client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "auth_empty"),
+            &String::from_str(&env, "desc"),
+            &1000,
+            &Address::generate(&env),
+            &0,
+            &None,
+            &Vec::new(&env),
+            &1,
+            &None,
+            &1,
+            &Vec::new(&env),
+        );
+    })
+    .expect("unauthenticated create_bounty must panic");
+
+    assert!(
+        !msg.contains("invalid reward_token address"),
+        "auth must be checked before the reward_token probe, got: {msg}"
+    );
+    assert_eq!(client.get_bounty_count(), 0);
+    assert_eq!(client.get_bounties_by_creator(&creator, &None, &10).0.len(), 0);
+}
+
+/// Audit: `claim_bounty` also authenticates the contributor before reading
+/// bounty state, so an unauthenticated call on a missing bounty fails on auth.
+#[test]
+fn test_claim_bounty_requires_auth_first() {
+    let env = Env::default();
+    let creator = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Create the bounty with mocked auths, then drop them.
+    env.mock_all_auths();
+    let bounty_id = make_bounty(&client, &env, &creator, "auth_claim", None);
+    env.set_auths(&[]);
+
+    let msg = auth_panic_message(|| client.claim_bounty(&contributor, &bounty_id))
+        .expect("unauthenticated claim_bounty must panic");
+    assert!(
+        msg.to_lowercase().contains("auth"),
+        "expected an authorization failure, got: {msg}"
+    );
+
+    // The bounty is untouched.
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.status, Symbol::new(&env, "open"));
+    assert!(bounty.assignees.is_empty());
+}
+
+// ===========================================================================
 // Issue 435 — reject past deadlines at creation time
 // ===========================================================================
 

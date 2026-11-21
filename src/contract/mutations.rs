@@ -353,7 +353,11 @@ impl MergeMintContract {
     /// * If `milestones` is non-empty and their rewards do not sum to `reward_amount`.
     ///
     /// # Authorization
-    /// Requires auth from `creator`.
+    /// Requires auth from `creator`. `creator.require_auth()` is the **first**
+    /// operation in this function: no pause check, storage read, TTL
+    /// extension, or cross-contract `validate_reward_token` probe runs before
+    /// authentication succeeds, so unauthenticated callers cannot trigger
+    /// cross-contract invocations or persistent storage writes.
     pub fn create_bounty(
         env: Env,
         creator: Address,
@@ -369,6 +373,9 @@ impl MergeMintContract {
         approval_threshold: u32,
         milestones: Vec<Milestone>,
     ) -> BountyId {
+        // AUTH: must be first — no storage reads, pause checks, or
+        // cross-contract invocations before this line.
+        creator.require_auth();
         require_not_paused(&env);
         if reward_amount <= 0 {
             fail(ContractError::RewardMustBePositive);
@@ -435,8 +442,6 @@ impl MergeMintContract {
                 fail(ContractError::BountyDeadlinePassed);
             }
         }
-
-        creator.require_auth();
 
         let limit = storage::get_creator_open_limit(&env);
         if limit > 0 && storage::get_creator_open_count(&env, &creator) >= limit {
@@ -2040,6 +2045,10 @@ impl MergeMintContract {
     /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
     /// * If the bounty is not completed or cancelled (`ContractError::InvalidStatus`).
     /// * If the grace period has not yet elapsed (`ContractError::DeadlineNotPassed`).
+    ///
+    /// # Authorization
+    /// No caller auth is required (anyone may archive), but the pause check
+    /// runs before any storage read.
     pub fn archive_bounty(env: Env, bounty_id: BountyId) {
         require_not_paused(&env);
         let bounty = match storage::get_bounty(&env, &bounty_id) {
