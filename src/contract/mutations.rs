@@ -400,10 +400,20 @@ impl MergeMintContract {
             fail(ContractError::RewardTokenNotAllowed);
         }
 
+        if milestones.len() > MAX_MILESTONES {
+            fail(ContractError::TooManyMilestones);
+        }
+
         if !milestones.is_empty() {
             let mut total: i128 = 0;
             let mut previous_deadline: Option<u32> = None;
             for m in milestones.iter() {
+                if m.reward <= 0 {
+                    fail(ContractError::MilestoneRewardMustBePositive);
+                }
+                if m.completed {
+                    fail(ContractError::MilestoneAlreadyCompleted);
+                }
                 total = match total.checked_add(m.reward) {
                     Some(sum) => sum,
                     None => fail(ContractError::RewardAmountOverflow),
