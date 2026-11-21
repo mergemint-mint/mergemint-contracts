@@ -115,20 +115,49 @@ fn distribute_payout(
     token: &TokenClient,
     reward_amount: i128,
 ) -> Address {
-    let (primary_assignee, _) = assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
+    let (primary_assignee, _) = assignees
+        .get(0)
+        .unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
 
+    // Calculate base payouts avoiding integer overflow:
+    // reward_amount * share_bp can exceed i128::MAX when reward_amount is large.
+    // Decomposing via q * share_bp + (r * share_bp) / 10_000 prevents overflow
+    // because r < 10_000 and share_bp <= 10_000, so r * share_bp < 100_000_000.
+    let mut total_distributed: i128 = 0;
+    for (_, share_bp) in assignees.iter() {
+        let q = reward_amount / 10_000_i128;
+        let r = reward_amount % 10_000_i128;
+        let payout = q * (share_bp as i128) + (r * (share_bp as i128)) / 10_000_i128;
+        total_distributed += payout;
+    }
+
+    // Deterministically allocate integer-division remainder dust to the primary assignee
+    // so sum(payouts) == reward_amount and no tokens remain stranded in escrow.
+    let dust = reward_amount - total_distributed;
+
+    let mut is_primary = true;
     for (assignee, share_bp) in assignees.iter() {
-        let payout = reward_amount * (share_bp as i128) / 10_000_i128;
-        token.transfer(from, &assignee, &payout);
+        let q = reward_amount / 10_000_i128;
+        let r = reward_amount % 10_000_i128;
+        let mut payout = q * (share_bp as i128) + (r * (share_bp as i128)) / 10_000_i128;
+        if is_primary {
+            payout += dust;
+            is_primary = false;
+        }
+
+        if payout > 0 {
+            token.transfer(from, &assignee, &payout);
+        }
 
         let mut contrib = storage::get_contributor(env, &assignee)
             .unwrap_or_else(|| Contributor::new(assignee.clone()));
         set_reputation(env, &mut contrib, &assignee, 10, "completion");
-        contrib.total_earned += payout;
+        contrib.total_earned = contrib
+            .total_earned
+            .checked_add(payout)
+            .unwrap_or_else(|| fail(ContractError::RewardAmountOverflow));
         contrib.contribution_count += 1;
-        if contrib.active_claims > 0 {
-            contrib.active_claims -= 1;
-        }
+        decrement_active_claims(&mut contrib);
         storage::store_contributor(env, &assignee, &contrib);
         events::emit_reward_paid(env, bounty_id, &assignee, &payout);
     }
@@ -275,22 +304,14 @@ fn apply_dispute_resolution(
             storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
         } else {
             let token = TokenClient::new(&env, &bounty.reward_token);
-
-            for (assignee, share_bp) in bounty.assignees.iter() {
-                let payout = bounty.reward_amount * (share_bp as i128) / 10_000_i128;
-                token.transfer(&arbitrator, &assignee, &payout);
-
-                let mut contrib = storage::get_contributor(&env, &assignee)
-                    .unwrap_or_else(|| Contributor::new(assignee.clone()));
-
-                set_reputation(&env, &mut contrib, &assignee, 10, "completion");
-                contrib.total_earned += payout;
-                contrib.contribution_count += 1;
-                decrement_active_claims(&mut contrib);
-
-                storage::store_contributor(&env, &assignee, &contrib);
-                events::emit_reward_paid(&env, &bounty_id, &assignee, &payout);
-            }
+            distribute_payout(
+                &env,
+                &bounty_id,
+                &bounty.assignees,
+                &arbitrator,
+                &token,
+                bounty.reward_amount,
+            );
 
             let previous_status = bounty.status.clone();
             bounty.status = Symbol::new(&env, STATUS_COMPLETED);

@@ -1086,4 +1086,47 @@ proptest! {
             check_counts(&env, &client, &model)?;
         }
     }
+
+    #[test]
+    fn prop_distribute_payout_sum_equals_reward_amount(
+        reward_amount in 100i128..=10_000_000_000_000i128,
+        num_assignees in 1u32..=5u32,
+    ) {
+        let (env, client, creator, token_addr) = create_test_env();
+        let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+        token_admin.mint(&client.address, &reward_amount);
+
+        let id = client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "prop_dust"),
+            &SorobanString::from_str(&env, "desc"),
+            &reward_amount,
+            &token_addr,
+            &0,
+            &None,
+            &SorobanVec::new(&env),
+            &num_assignees,
+            &None,
+            &1,
+            &SorobanVec::new(&env),
+        );
+
+        let mut assignees = std::vec::Vec::new();
+        for _ in 0..num_assignees {
+            let assignee = Address::generate(&env);
+            client.claim_bounty(&assignee, &id);
+            assignees.push(assignee);
+        }
+
+        let verifier = Address::generate(&env);
+        client.complete_bounty(&verifier, &id);
+
+        let mut total_paid: i128 = 0;
+        for assignee in assignees {
+            total_paid += token_admin.balance(&assignee);
+        }
+
+        prop_assert_eq!(total_paid, reward_amount, "sum of payouts must strictly equal reward_amount");
+        prop_assert_eq!(token_admin.balance(&client.address), 0, "no reward dust remains stranded in contract escrow");
+    }
 }
