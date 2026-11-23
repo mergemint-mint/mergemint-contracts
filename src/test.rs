@@ -4938,6 +4938,371 @@ fn non_admin_cannot_unpause() {
     c.client.unpause(&c.other);
 }
 
+// ===========================================================================
+// Issue #1203 — SEP-41 probe in add_reward_token / set_min_reward
+// ===========================================================================
+
+/// `add_reward_token` rejects a plain account address (EOA) that is not a
+/// deployed contract implementing the SEP-41 `balance` interface.
+#[test]
+#[should_panic(expected = "invalid reward_token address")]
+fn test_add_reward_token_rejects_eoa() {
+    let (env, _creator, _other, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let eoa = Address::generate(&env);
+    client.add_reward_token(&admin, &eoa);
+}
+
+/// `add_reward_token` rejects a deployed contract that does not implement the
+/// SEP-41 token interface.
+#[test]
+#[should_panic(expected = "invalid reward_token address")]
+fn test_add_reward_token_rejects_non_token_contract() {
+    let (env, _creator, _other, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    // A second instance of this contract is a contract, but not a token.
+    let non_token = env.register(MergeMintContract, ());
+    client.add_reward_token(&admin, &non_token);
+}
+
+/// `add_reward_token` accepts a real Stellar Asset Contract token.
+#[test]
+fn test_add_reward_token_accepts_real_token() {
+    let (env, creator, _other, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let token = create_token_and_mint(&env, &creator, &contract_id, 0);
+    client.add_reward_token(&admin, &token);
+    assert!(client.is_reward_token_allowed(&token));
+}
+
+/// `set_min_reward` rejects a plain account address (EOA).
+#[test]
+#[should_panic(expected = "invalid reward_token address")]
+fn test_set_min_reward_rejects_eoa() {
+    let (env, _creator, _other, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let eoa = Address::generate(&env);
+    client.set_min_reward(&admin, &eoa, &200);
+}
+
+/// `set_min_reward` rejects a deployed contract that is not a SEP-41 token.
+#[test]
+#[should_panic(expected = "invalid reward_token address")]
+fn test_set_min_reward_rejects_non_token_contract() {
+    let (env, _creator, _other, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let non_token = env.register(MergeMintContract, ());
+    client.set_min_reward(&admin, &non_token, &200);
+}
+
+/// `set_min_reward` accepts a real Stellar Asset Contract token and persists
+/// the configured minimum.
+#[test]
+fn test_set_min_reward_accepts_real_token() {
+    let (env, creator, _other, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let token = create_token_and_mint(&env, &creator, &contract_id, 0);
+    client.set_min_reward(&admin, &token, &200);
+    assert_eq!(client.get_min_reward(&token), 200);
+}
+
+// ===========================================================================
+// Issue #1205 — zero-hash and duplicate-evidence rejection
+// ===========================================================================
+
+/// `submit_work` rejects an all-zero `BytesN<32>` hash.
+#[test]
+#[should_panic(expected = "hash must not be all-zero")]
+fn test_submit_work_rejects_zero_hash() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "zero_hash", None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.submit_work(
+        &contributor,
+        &bounty_id,
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+}
+
+/// `add_dispute_evidence` rejects an all-zero `BytesN<32>` hash.
+#[test]
+#[should_panic(expected = "hash must not be all-zero")]
+fn test_add_dispute_evidence_rejects_zero_hash() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "zero_ev", None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+    client.add_dispute_evidence(
+        &creator,
+        &bounty_id,
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+}
+
+/// Re-submitting an already-recorded evidence hash fails with the duplicate
+/// error and neither grows the evidence list nor consumes quota.
+#[test]
+fn test_add_dispute_evidence_rejects_duplicate_hash() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "dup_ev", None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+
+    let hash = BytesN::from_array(&env, &[9u8; 32]);
+    client.add_dispute_evidence(&creator, &bounty_id, &hash);
+    assert_eq!(client.get_dispute_evidence(&bounty_id).len(), 1);
+
+    let msg = panic_message(|| {
+        client.add_dispute_evidence(&creator, &bounty_id, &hash);
+    });
+    let msg = msg.expect("duplicate evidence hash must be rejected");
+    assert!(
+        msg.contains("dispute evidence hash already submitted"),
+        "unexpected duplicate-evidence error: {msg}"
+    );
+
+    // The duplicate attempt must not have been recorded.
+    assert_eq!(client.get_dispute_evidence(&bounty_id).len(), 1);
+}
+
+/// Duplicate evidence submissions do not consume the submitter's
+/// `MAX_DISPUTE_EVIDENCE` quota: after filling the quota, a duplicate of an
+/// existing hash is still rejected as a duplicate (not as a quota overflow).
+#[test]
+fn test_duplicate_evidence_does_not_consume_quota() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "quota_ev", None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+
+    let first = BytesN::from_array(&env, &[1u8; 32]);
+    client.add_dispute_evidence(&creator, &bounty_id, &first);
+    let after_first = client.get_dispute_evidence(&bounty_id).len();
+
+    // Repeated duplicates must never grow the stored evidence list.
+    for _ in 0..3 {
+        let msg = panic_message(|| {
+            client.add_dispute_evidence(&creator, &bounty_id, &first);
+        });
+        assert!(
+            msg.expect("duplicate must be rejected")
+                .contains("dispute evidence hash already submitted"),
+            "duplicate must be reported as such"
+        );
+        assert_eq!(client.get_dispute_evidence(&bounty_id).len(), after_first);
+    }
+}
+
+// ===========================================================================
+// Issue #1207 — pause/unpause idempotency
+// ===========================================================================
+
+/// A second `pause` fails with `AlreadyPaused` and emits no extra event.
+#[test]
+fn test_pause_twice_fails_with_already_paused() {
+    let c = pause_ctx();
+    c.client.pause(&c.admin);
+    assert!(c.client.is_paused());
+
+    let msg = panic_message(|| c.client.pause(&c.admin));
+    let msg = msg.expect("second pause must fail");
+    assert!(
+        msg.contains("contract is already paused"),
+        "unexpected second-pause error: {msg}"
+    );
+    assert!(c.client.is_paused());
+}
+
+/// A second `unpause` fails with `NotPaused` and emits no extra event.
+#[test]
+fn test_unpause_twice_fails_with_not_paused() {
+    let c = pause_ctx();
+    c.client.pause(&c.admin);
+    c.client.unpause(&c.admin);
+    assert!(!c.client.is_paused());
+
+    let msg = panic_message(|| c.client.unpause(&c.admin));
+    let msg = msg.expect("second unpause must fail");
+    assert!(
+        msg.contains("contract is not paused"),
+        "unexpected second-unpause error: {msg}"
+    );
+    assert!(!c.client.is_paused());
+}
+
+/// Repeated pause/unpause toggles never emit duplicate lifecycle events.
+#[test]
+fn test_pause_toggle_emits_no_duplicate_events() {
+    let c = pause_ctx();
+    c.client.pause(&c.admin);
+    let _ = panic_message(|| c.client.pause(&c.admin));
+    c.client.unpause(&c.admin);
+    let _ = panic_message(|| c.client.unpause(&c.admin));
+
+    let events = c.env.events().all();
+    let mut paused_events = 0u32;
+    let mut unpaused_events = 0u32;
+    for i in 0..events.len() {
+        let (_, topics, _) = events.get(i).unwrap();
+        for j in 0..topics.len() {
+            let topic = topics.get(j).unwrap();
+            if let Ok(sym) = Symbol::try_from_val(&c.env, &topic) {
+                if sym == Symbol::new(&c.env, "contract_paused") {
+                    paused_events += 1;
+                } else if sym == Symbol::new(&c.env, "contract_unpaused") {
+                    unpaused_events += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(paused_events, 1, "exactly one contract_paused event");
+    assert_eq!(unpaused_events, 1, "exactly one contract_unpaused event");
+}
+
+/// Exhaustive: every mutating entrypoint outside `PAUSE_EXEMPT_ENTRYPOINTS`
+/// must fail with `contract is paused` while the contract is paused.
+#[test]
+fn every_mutation_outside_exempt_list_is_paused() {
+    use crate::contract::PAUSE_EXEMPT_ENTRYPOINTS;
+    use std::collections::BTreeSet;
+
+    let declared: BTreeSet<&str> = entrypoints_in(include_str!("contract/mutations.rs"))
+        .into_iter()
+        .collect();
+    let exempt: BTreeSet<&str> = PAUSE_EXEMPT_ENTRYPOINTS.iter().copied().collect();
+    let cases = pause_cases();
+    let covered: BTreeSet<&str> = cases.iter().map(|(name, _)| *name).collect();
+
+    // Every non-exempt declared mutation must have a pause case.
+    let missing: std::vec::Vec<_> = declared
+        .difference(&covered)
+        .filter(|n| !exempt.contains(*n))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "mutating entrypoints with no pause case: {missing:?}"
+    );
+
+    let mut failures = std::vec::Vec::new();
+    for (name, call) in cases {
+        if exempt.contains(name) {
+            continue;
+        }
+        let c = pause_ctx();
+        c.client.pause(&c.admin);
+        match panic_message(|| call(&c)) {
+            Some(msg) if msg.contains("contract is paused") => {}
+            Some(msg) => failures.push(std::format!("{name}: wrong error: {msg}")),
+            None => failures.push(std::format!("{name}: succeeded while paused")),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "pause guard failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+// ===========================================================================
+// Issue #1208 — instance storage TTL extension
+// ===========================================================================
+
+/// Instance configuration and admin state survive ledger advancement past the
+/// instance TTL threshold because every accessor extends the instance TTL.
+#[test]
+fn test_instance_config_survives_ttl_threshold() {
+    let (env, creator, _other, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+    client.set_claim_window(&admin, &42);
+    client.set_reputation_penalty(&admin, &7);
+    client.set_appeal_window(&admin, &11);
+    client.set_creator_open_limit(&admin, &3);
+    client.set_claim_cooldown(&admin, &5);
+
+    let token = create_token_and_mint(&env, &creator, &contract_id, 0);
+    client.add_reward_token(&admin, &token);
+    client.set_min_reward(&admin, &token, &250);
+    client.pause(&admin);
+
+    // Advance well past the instance TTL threshold.
+    env.ledger()
+        .set_sequence_number(storage::STORAGE_TTL_THRESHOLD + 1);
+
+    // Reads must still succeed and return the persisted values.
+    assert_eq!(client.get_admin(), Some(admin.clone()));
+    assert!(client.is_paused());
+    assert_eq!(client.get_claim_window(), 42);
+    assert_eq!(client.get_reputation_penalty(), 7);
+    assert_eq!(client.get_appeal_window(), 11);
+    assert_eq!(client.get_creator_open_limit(), 3);
+    assert_eq!(client.get_claim_cooldown(), 5);
+    assert!(client.is_reward_token_allowed(&token));
+    assert_eq!(client.get_min_reward(&token), 250);
+    assert_eq!(client.get_config().admin, Some(admin.clone()));
+}
+
+/// Admin rotation state (admin + pending admin) survives TTL advancement.
+#[test]
+fn test_admin_state_survives_ttl_threshold() {
+    let (env, _creator, admin, new_admin) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    client.init_admin(&admin);
+    client.transfer_admin(&admin, &new_admin);
+
+    env.ledger()
+        .set_sequence_number(storage::STORAGE_TTL_THRESHOLD + 1);
+
+    let config = client.get_config();
+    assert_eq!(config.admin, Some(admin.clone()));
+    assert_eq!(config.pending_admin, Some(new_admin.clone()));
+
+    // The pending admin can still accept after the TTL threshold.
+    client.accept_admin(&new_admin);
+    assert_eq!(client.get_admin(), Some(new_admin));
+}
+
 // --- #1231: reward-split dust invariants ---
 #[test]
 fn test_split_reward_dust_invariants() {
@@ -5118,4 +5483,5 @@ fn test_open_bounties_page_boundaries_all_orders() {
             });
         }
     }
+}
 }
