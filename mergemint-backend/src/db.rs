@@ -45,6 +45,8 @@ const AUDIT_LOGS_MIGRATION: &str = include_str!("../migrations/0002_create_audit
 #[cfg(test)]
 const AUDIT_LOGS_PAGINATION_MIGRATION: &str =
     include_str!("../migrations/0003_add_audit_log_pagination_index.sql");
+#[cfg(test)]
+const IDEMPOTENCY_MIGRATION: &str = include_str!("../migrations/0010_create_idempotency_keys.sql");
 
 /// Lightweight in-memory store used during development / integration tests.
 /// Production deployments replace this with a real database pool.
@@ -987,20 +989,92 @@ pub fn close_db(db: &SharedDb) {
 }
 
 // ---------------------------------------------------------------------------
-// Idempotency-key store
+// Idempotency-key store (#1263)
 // ---------------------------------------------------------------------------
+
+/// How long a Postgres `in_flight` reservation remains valid before a retry
+/// may reclaim it. The RAII-free route handler can be cancelled or crash
+/// mid-flight, so this TTL is the backstop that prevents a permanently stuck
+/// key.
+pub const IDEMPOTENCY_IN_FLIGHT_TTL: Duration = Duration::from_secs(60);
+
+/// How long a cached `completed` response is replayable before it is removed.
+pub const IDEMPOTENCY_COMPLETED_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// Proof that a request owns an `in_flight` reservation.
+///
+/// The token is generated when the key is claimed and must be presented when
+/// the result is finalized. Without it, a slow request whose reservation
+/// expired could overwrite a newer request's outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyReservation {
+    pub key: String,
+    pub token: String,
+}
+
+/// Result of claiming an `Idempotency-Key`, shared by both store backends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdempotencyOutcome {
+    /// The caller owns the key and may submit the transaction.
+    Proceed(IdempotencyReservation),
+    /// A prior successful request with the same key and payload was replayed.
+    Replay(String),
+    /// The same key is already being processed by another request.
+    Conflict,
+    /// The key was previously used with a different request payload.
+    PayloadMismatch,
+}
 
 /// Outcome recorded for a client-supplied `Idempotency-Key`.
 ///
-/// `InFlight` is written *before* the transaction-submitting work begins, so
-/// a concurrent duplicate request (the client retried before the first
-/// response came back) sees the reservation rather than racing the same
-/// submission a second time. `Completed` replays the original response body
-/// once the first request finishes successfully.
+/// Both variants keep the SHA-256 digest of the canonical request payload so
+/// a replay can verify that the retry carries the same body. `created_at`
+/// drives the state-specific TTLs; `Instant` is only used by the in-memory
+/// fallback, while Postgres persists `expires_at` as `TIMESTAMPTZ`.
 #[derive(Debug, Clone)]
 pub enum IdempotencyEntry {
-    InFlight,
-    Completed(String),
+    InFlight {
+        request_hash: String,
+        token: String,
+        created_at: Instant,
+    },
+    Completed {
+        request_hash: String,
+        body: String,
+        created_at: Instant,
+    },
+}
+
+impl IdempotencyEntry {
+    /// When this entry was first written to the store.
+    pub fn created_at(&self) -> Instant {
+        match self {
+            Self::InFlight { created_at, .. } | Self::Completed { created_at, .. } => *created_at,
+        }
+    }
+
+    /// Digest of the payload that first claimed this key.
+    pub fn request_hash(&self) -> &str {
+        match self {
+            Self::InFlight { request_hash, .. } | Self::Completed { request_hash, .. } => {
+                request_hash
+            }
+        }
+    }
+
+    /// Whether this entry's age has reached the TTL for its state.
+    pub fn is_expired(
+        &self,
+        now: Instant,
+        in_flight_ttl: Duration,
+        completed_ttl: Duration,
+    ) -> bool {
+        let ttl = match self {
+            Self::InFlight { .. } => in_flight_ttl,
+            Self::Completed { .. } => completed_ttl,
+        };
+        now.saturating_duration_since(self.created_at()) >= ttl
+    }
 }
 
 /// In-memory record of recently-seen idempotency keys, keyed by the raw
@@ -1008,13 +1082,112 @@ pub enum IdempotencyEntry {
 ///
 /// Mirrors `DbStore`: a plain `HashMap` guarded by an `RwLock` kept separate
 /// from `DbStore` so idempotency bookkeeping never contends with the
-/// business-data lock.
-#[derive(Debug, Default)]
+/// business-data lock. This is the fallback for single-instance deployments;
+/// the Postgres backend in [`PostgresIdempotencyStore`] is authoritative when
+/// a pool is configured.
+#[derive(Debug)]
 pub struct IdempotencyStore {
     pub entries: HashMap<String, IdempotencyEntry>,
+    /// TTL for `InFlight` reservations (overridable in tests).
+    pub in_flight_ttl: Duration,
+    /// TTL for cached `Completed` responses (overridable in tests).
+    pub completed_ttl: Duration,
 }
 
-/// Shared, thread-safe handle to the idempotency store.
+impl Default for IdempotencyStore {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            in_flight_ttl: IDEMPOTENCY_IN_FLIGHT_TTL,
+            completed_ttl: IDEMPOTENCY_COMPLETED_TTL,
+        }
+    }
+}
+
+impl IdempotencyStore {
+    /// Remove every entry whose age has reached the TTL for its state.
+    pub fn prune_expired(&mut self, now: Instant) {
+        let (in_flight_ttl, completed_ttl) = (self.in_flight_ttl, self.completed_ttl);
+        self.entries
+            .retain(|_, entry| !entry.is_expired(now, in_flight_ttl, completed_ttl));
+    }
+
+    /// Atomically claim `key` for `request_hash` or resolve what a retry
+    /// should receive. Expired entries are reclaimed first, mirroring the
+    /// Postgres backend's `expires_at` check.
+    pub fn claim(&mut self, key: &str, request_hash: &str, now: Instant) -> IdempotencyOutcome {
+        self.prune_expired(now);
+        match self.entries.get(key) {
+            Some(entry) if entry.request_hash() != request_hash => {
+                IdempotencyOutcome::PayloadMismatch
+            }
+            Some(IdempotencyEntry::Completed { body, .. }) => {
+                IdempotencyOutcome::Replay(body.clone())
+            }
+            Some(IdempotencyEntry::InFlight { .. }) => IdempotencyOutcome::Conflict,
+            None => {
+                let token = uuid::Uuid::new_v4().to_string();
+                self.entries.insert(
+                    key.to_string(),
+                    IdempotencyEntry::InFlight {
+                        request_hash: request_hash.to_string(),
+                        token: token.clone(),
+                        created_at: now,
+                    },
+                );
+                IdempotencyOutcome::Proceed(IdempotencyReservation {
+                    key: key.to_string(),
+                    token,
+                })
+            }
+        }
+    }
+
+    /// Cache a successful response for `key`. Returns `false` unless the
+    /// caller still owns the matching in-flight reservation.
+    pub fn complete(&mut self, key: &str, token: &str, body: String, now: Instant) -> bool {
+        let Some(entry) = self.entries.get(key).cloned() else {
+            return false;
+        };
+        let IdempotencyEntry::InFlight {
+            request_hash,
+            token: current_token,
+            ..
+        } = entry
+        else {
+            return false;
+        };
+        if current_token != token {
+            return false;
+        }
+        self.entries.insert(
+            key.to_string(),
+            IdempotencyEntry::Completed {
+                request_hash,
+                body,
+                created_at: now,
+            },
+        );
+        true
+    }
+
+    /// Release a failed or cancelled reservation so the client can retry.
+    /// A stale token cannot delete a newer request's reservation.
+    pub fn release(&mut self, key: &str, token: &str) {
+        let owns_reservation = matches!(
+            self.entries.get(key),
+            Some(IdempotencyEntry::InFlight {
+                token: current_token,
+                ..
+            }) if current_token == token
+        );
+        if owns_reservation {
+            self.entries.remove(key);
+        }
+    }
+}
+
+/// Shared, thread-safe handle to the in-memory idempotency store.
 pub type SharedIdempotencyStore = Arc<RwLock<IdempotencyStore>>;
 
 /// Create a new, empty shared idempotency-store handle.
@@ -1036,6 +1209,222 @@ pub fn read_idempotency(
     store: &SharedIdempotencyStore,
 ) -> std::sync::RwLockReadGuard<'_, IdempotencyStore> {
     store.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// PostgreSQL-backed idempotency store shared by every backend replica.
+///
+/// All state transitions are expressed as a single SQL statement or a short
+/// `SELECT ... FOR UPDATE` transaction so two replicas can never both win the
+/// same key. Parameters are always bound, never interpolated into SQL.
+#[derive(Debug, Clone)]
+pub struct PostgresIdempotencyStore {
+    pub pool: sqlx::PgPool,
+    pub in_flight_ttl: Duration,
+    pub completed_ttl: Duration,
+}
+
+impl PostgresIdempotencyStore {
+    /// Use the standard TTLs with an existing connection pool.
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self {
+            pool,
+            in_flight_ttl: IDEMPOTENCY_IN_FLIGHT_TTL,
+            completed_ttl: IDEMPOTENCY_COMPLETED_TTL,
+        }
+    }
+
+    /// Claim a key, or report why this request cannot proceed.
+    ///
+    /// `INSERT ... ON CONFLICT DO NOTHING` is the fast path: exactly one
+    /// replica inserts the reservation. On conflict the existing row is
+    /// locked, its payload hash is checked, and an expired row is deleted
+    /// inside the same transaction so a fresh insert can be attempted. This
+    /// keeps "check hash + inspect status + reclaim TTL" atomic across
+    /// replicas.
+    pub async fn claim(
+        &self,
+        key: &str,
+        request_hash: &str,
+    ) -> Result<IdempotencyOutcome, sqlx::Error> {
+        use sqlx::Row;
+
+        let token = uuid::Uuid::new_v4().to_string();
+
+        // Two attempts are enough: one insert plus at most one expired-row
+        // reclaim. A third concurrent reclainer would itself win an insert.
+        for _ in 0..2 {
+            let mut tx = self.pool.begin().await?;
+
+            let inserted = sqlx::query(
+                "INSERT INTO idempotency_keys \
+                 (key, request_hash, status, reservation_token, expires_at) \
+                 VALUES ($1, $2, 'in_flight', $3, NOW() + make_interval(secs => $4)) \
+                 ON CONFLICT (key) DO NOTHING",
+            )
+            .bind(key)
+            .bind(request_hash)
+            .bind(&token)
+            .bind(self.in_flight_ttl.as_secs_f64())
+            .execute(&mut *tx)
+            .await?;
+
+            if inserted.rows_affected() == 1 {
+                tx.commit().await?;
+                return Ok(IdempotencyOutcome::Proceed(IdempotencyReservation {
+                    key: key.to_string(),
+                    token: token.clone(),
+                }));
+            }
+
+            let existing = sqlx::query(
+                "SELECT request_hash, status, response_body, expires_at \
+                 FROM idempotency_keys WHERE key = $1 FOR UPDATE",
+            )
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            // The conflicting row was deleted between our insert and the
+            // lock; retry the insert inside a fresh transaction.
+            let Some(row) = existing else {
+                tx.commit().await?;
+                continue;
+            };
+
+            let stored_hash: String = row.try_get("request_hash")?;
+            if stored_hash != request_hash {
+                tx.commit().await?;
+                return Ok(IdempotencyOutcome::PayloadMismatch);
+            }
+
+            let expires_at: DateTime<Utc> = row.try_get("expires_at")?;
+            let outcome = if expires_at <= Utc::now() {
+                sqlx::query("DELETE FROM idempotency_keys WHERE key = $1 AND expires_at <= NOW()")
+                    .bind(key)
+                    .execute(&mut *tx)
+                    .await?;
+                None
+            } else {
+                let status: String = row.try_get("status")?;
+                if status == "completed" {
+                    let body: Option<String> = row.try_get("response_body")?;
+                    Some(
+                        body.map(IdempotencyOutcome::Replay)
+                            .unwrap_or(IdempotencyOutcome::Conflict),
+                    )
+                } else {
+                    Some(IdempotencyOutcome::Conflict)
+                }
+            };
+
+            tx.commit().await?;
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+        }
+
+        Err(sqlx::Error::Protocol(
+            "idempotency key reservation was contended too many times".to_string(),
+        ))
+    }
+
+    /// Atomically transition an owned reservation to `completed` and cache
+    /// its response body for replay. Returns `false` if the reservation was
+    /// already released, so a stale request cannot overwrite a newer one.
+    pub async fn complete(&self, key: &str, token: &str, body: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE idempotency_keys \
+             SET status = 'completed', response_body = $3, updated_at = NOW(), \
+                 expires_at = NOW() + make_interval(secs => $4) \
+             WHERE key = $1 AND status = 'in_flight' AND reservation_token = $2",
+        )
+        .bind(key)
+        .bind(token)
+        .bind(body)
+        .bind(self.completed_ttl.as_secs_f64())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Release a failed or cancelled reservation so the key can be reused.
+    /// The token guard prevents a stale request from deleting a newer claim.
+    pub async fn release(&self, key: &str, token: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "DELETE FROM idempotency_keys \
+             WHERE key = $1 AND status = 'in_flight' AND reservation_token = $2",
+        )
+        .bind(key)
+        .bind(token)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Delete every expired row. Intended for a periodic maintenance task;
+    /// per-key reclaim during `claim` already keeps hot keys unblocked.
+    pub async fn cleanup_expired(&self) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM idempotency_keys WHERE expires_at <= NOW()")
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+}
+
+/// The backend chosen for a request: shared Postgres in production, with the
+/// in-memory map as the zero-configuration fallback.
+#[derive(Clone)]
+pub enum IdempotencyBackend {
+    InMemory(SharedIdempotencyStore),
+    Postgres(PostgresIdempotencyStore),
+}
+
+impl IdempotencyBackend {
+    /// Claim `key` on the configured backend.
+    pub async fn claim(
+        &self,
+        key: &str,
+        request_hash: &str,
+    ) -> Result<IdempotencyOutcome, sqlx::Error> {
+        match self {
+            Self::InMemory(store) => {
+                Ok(acquire_idempotency(store).claim(key, request_hash, Instant::now()))
+            }
+            Self::Postgres(store) => store.claim(key, request_hash).await,
+        }
+    }
+
+    /// Cache a successful response on the configured backend.
+    pub async fn complete(
+        &self,
+        reservation: &IdempotencyReservation,
+        body: &str,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::InMemory(store) => Ok(acquire_idempotency(store).complete(
+                &reservation.key,
+                &reservation.token,
+                body.to_string(),
+                Instant::now(),
+            )),
+            Self::Postgres(store) => {
+                store
+                    .complete(&reservation.key, &reservation.token, body)
+                    .await
+            }
+        }
+    }
+
+    /// Release a failed or cancelled reservation on the configured backend.
+    pub async fn release(&self, reservation: &IdempotencyReservation) -> Result<(), sqlx::Error> {
+        match self {
+            Self::InMemory(store) => {
+                acquire_idempotency(store).release(&reservation.key, &reservation.token);
+                Ok(())
+            }
+            Self::Postgres(store) => store.release(&reservation.key, &reservation.token).await,
+        }
+    }
 }
 
 /// Get a single bounty by id
@@ -1064,6 +1453,109 @@ mod tests {
         }
         assert!(AUDIT_LOGS_PAGINATION_MIGRATION
             .contains("ON audit_logs (action, timestamp DESC, id DESC)"));
+    }
+
+    #[test]
+    fn idempotency_migration_declares_shared_key_ledger() {
+        for fragment in [
+            "CREATE TABLE IF NOT EXISTS idempotency_keys",
+            "key TEXT PRIMARY KEY",
+            "request_hash TEXT NOT NULL",
+            "status TEXT NOT NULL",
+            "reservation_token TEXT NOT NULL",
+            "response_body TEXT",
+            "expires_at TIMESTAMPTZ NOT NULL",
+            "idx_idempotency_keys_expires_at",
+        ] {
+            assert!(
+                IDEMPOTENCY_MIGRATION.contains(fragment),
+                "idempotency migration must contain `{fragment}`"
+            );
+        }
+    }
+
+    fn assert_proceed(outcome: IdempotencyOutcome) -> IdempotencyReservation {
+        match outcome {
+            IdempotencyOutcome::Proceed(reservation) => reservation,
+            other => panic!("expected a fresh reservation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn in_memory_idempotency_store_replays_and_rejects_mismatched_payload() {
+        let mut store = IdempotencyStore::default();
+        let now = Instant::now();
+
+        let reservation = assert_proceed(store.claim("key", "hash-a", now));
+        assert_eq!(
+            store.claim("key", "hash-b", now),
+            IdempotencyOutcome::PayloadMismatch
+        );
+        assert!(store.complete("key", &reservation.token, "cached body".to_string(), now));
+        assert_eq!(
+            store.claim("key", "hash-a", now),
+            IdempotencyOutcome::Replay("cached body".to_string())
+        );
+        assert_eq!(
+            store.claim("key", "hash-b", now),
+            IdempotencyOutcome::PayloadMismatch
+        );
+    }
+
+    #[test]
+    fn in_memory_idempotency_store_conflicts_while_in_flight() {
+        let mut store = IdempotencyStore::default();
+        let now = Instant::now();
+
+        let reservation = assert_proceed(store.claim("key", "hash", now));
+        assert_eq!(
+            store.claim("key", "hash", now),
+            IdempotencyOutcome::Conflict
+        );
+
+        store.release("key", &reservation.token);
+        assert_proceed(store.claim("key", "hash", now));
+    }
+
+    #[test]
+    fn stale_token_cannot_finalize_a_newer_in_memory_reservation() {
+        let mut store = IdempotencyStore::default();
+        store.in_flight_ttl = Duration::ZERO;
+        let now = Instant::now();
+
+        let stale = assert_proceed(store.claim("key", "hash", now));
+        let fresh = assert_proceed(store.claim("key", "hash", now));
+
+        assert!(!store.complete("key", &stale.token, "stale body".to_string(), now));
+        store.release("key", &stale.token);
+        assert!(store.complete("key", &fresh.token, "fresh body".to_string(), now));
+        assert_eq!(
+            store.claim("key", "hash", now),
+            IdempotencyOutcome::Replay("fresh body".to_string())
+        );
+    }
+
+    #[test]
+    fn in_memory_idempotency_store_reclaims_expired_entries() {
+        let mut store = IdempotencyStore::default();
+        store.in_flight_ttl = Duration::from_secs(1);
+        store.completed_ttl = Duration::from_secs(2);
+        let now = Instant::now();
+
+        assert_proceed(store.claim("in-flight", "hash", now));
+        let completed = assert_proceed(store.claim("completed", "hash", now));
+        assert!(store.complete("completed", &completed.token, "body".to_string(), now));
+
+        let later = now + Duration::from_secs(1);
+        assert_proceed(store.claim("in-flight", "hash", later));
+        assert_eq!(
+            store.claim("completed", "hash", later),
+            IdempotencyOutcome::Replay("body".to_string()),
+            "completed responses outlive in-flight reservations"
+        );
+
+        let much_later = now + Duration::from_secs(2);
+        assert_proceed(store.claim("completed", "hash", much_later));
     }
 
     #[test]

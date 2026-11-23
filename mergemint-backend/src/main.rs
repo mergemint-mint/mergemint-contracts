@@ -137,7 +137,7 @@ mod sse_limit;
 mod test_helpers;
 mod webhooks;
 
-use db::{new_shared_db, new_shared_idempotency_store};
+use db::{new_shared_db, new_shared_idempotency_store, PostgresIdempotencyStore};
 use deadline_reminders::{
     read_deadline_reminder_interval, read_deadline_reminder_lead_time, start_deadline_reminder_job,
 };
@@ -505,6 +505,27 @@ async fn main() {
         sse_limiter: sse_limiter.clone(),
     });
 
+    // Reclaim expired idempotency rows even when no client retries a given
+    // key, so cached responses do not accumulate indefinitely (#1263).
+    if let Some(pool) = state.postgres.clone() {
+        let store = PostgresIdempotencyStore::new(pool);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                match store.cleanup_expired().await {
+                    Ok(removed) if removed > 0 => {
+                        tracing::info!(removed, "pruned expired idempotency keys");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to prune expired idempotency keys");
+                    }
+                }
+            }
+        });
+    }
+
     // No fallback to a default client here: that client would skip the SSRF
     // guard.
     let webhook_client = WebhookClient::new(webhook_guard, Duration::from_secs(10))
@@ -815,7 +836,10 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         if let Ok(row) = sqlx::query_scalar::<_, i64>(
             "SELECT ledger FROM indexer_checkpoints WHERE name = $1 ORDER BY ledger DESC LIMIT 1",
         )
-        .bind(format!("indexer:{}", std::env::var("CONTRACT_ID").unwrap_or_default()))
+        .bind(format!(
+            "indexer:{}",
+            std::env::var("CONTRACT_ID").unwrap_or_default()
+        ))
         .fetch_one(&pool)
         .await
         {
@@ -866,6 +890,7 @@ async fn connect_postgres() -> anyhow::Result<Option<sqlx::PgPool>> {
     for migration in [
         include_str!("../migrations/0005_create_reputation_history.sql"),
         include_str!("../migrations/0006_create_indexer_state.sql"),
+        include_str!("../migrations/0010_create_idempotency_keys.sql"),
     ] {
         for statement in migration
             .split(';')
