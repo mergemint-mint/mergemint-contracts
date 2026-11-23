@@ -4949,6 +4949,330 @@ fn non_admin_cannot_unpause() {
 }
 
 // ===========================================================================
+// Issue — escrow liveness: expire_bounty on in_progress / submitted bounties
+// ===========================================================================
+
+/// An in_progress bounty past its deadline must be expirable by anyone,
+/// transitioning to "cancelled" and refunding the full escrowed reward to
+/// the creator (no milestones, no sponsors).
+#[test]
+fn test_expire_in_progress_bounty_refunds_creator() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let reward: i128 = 1_000;
+    let (bounty_id, token_addr) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "exp_ip", reward, Some(50));
+
+    // Claim the bounty at ledger 0.
+    client.claim_bounty(&contributor, &bounty_id);
+
+    // Advance past the deadline.
+    env.ledger().set_sequence_number(100);
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_addr);
+    let creator_before = token.balance(&creator);
+
+    // A third party (the verifier address, acting as an observer) triggers expiry.
+    let observer = Address::generate(&env);
+    client.expire_bounty(&observer, &bounty_id);
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.status, Symbol::new(&env, "cancelled"));
+    assert!(
+        bounty.assignees.is_empty(),
+        "assignees must be cleared on expiry"
+    );
+
+    // Creator must have received the full reward back.
+    let creator_after = token.balance(&creator);
+    assert_eq!(
+        creator_after - creator_before,
+        reward,
+        "creator must receive full escrowed reward on in_progress expiry"
+    );
+}
+
+/// expire_bounty on a "submitted" bounty (past its deadline) must also
+/// cancel and refund, penalise the assignee, and clear assignees.
+#[test]
+fn test_expire_submitted_bounty_refunds_creator() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let reward: i128 = 1_000;
+    let (bounty_id, token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "exp_sub",
+        reward,
+        Some(50),
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+
+    // Record a submission hash to move bounty into "submitted".
+    let hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+    client.submit_work(&contributor, &bounty_id, &hash);
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.status, Symbol::new(&env, "submitted"));
+
+    env.ledger().set_sequence_number(100);
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_addr);
+    let creator_before = token.balance(&creator);
+
+    client.expire_bounty(&creator, &bounty_id);
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.status, Symbol::new(&env, "cancelled"));
+
+    let creator_after = token.balance(&creator);
+    assert_eq!(
+        creator_after - creator_before,
+        reward,
+        "creator must receive full escrowed reward on submitted expiry"
+    );
+}
+
+/// expire_bounty on an in_progress bounty must penalise the assignee's
+/// reputation and decrement their active_claims counter.
+#[test]
+fn test_expire_in_progress_penalises_assignee() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "exp_pen",
+        1_000,
+        Some(50),
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+
+    // Verify active_claims is 1 before expiry.
+    let contrib_before = client.get_contributor(&contributor).unwrap();
+    assert_eq!(contrib_before.active_claims, 1);
+
+    env.ledger().set_sequence_number(100);
+    client.expire_bounty(&creator, &bounty_id);
+
+    let contrib_after = client.get_contributor(&contributor).unwrap();
+    assert_eq!(
+        contrib_after.active_claims, 0,
+        "active_claims must be decremented after expiry"
+    );
+    // The default penalty is 5; contributor started at 0 so reputation saturates at 0.
+    assert_eq!(
+        contrib_after.reputation, 0,
+        "reputation must be penalised (saturating at 0) after expiry"
+    );
+}
+
+/// expire_bounty on a bounty whose deadline has NOT yet passed must panic.
+#[test]
+#[should_panic(expected = "deadline has not passed")]
+fn test_expire_bounty_before_deadline_panics() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "exp_early",
+        1_000,
+        Some(1_000),
+    );
+    client.claim_bounty(&contributor, &bounty_id);
+    // Ledger is at 0, deadline is 1 000 — must be rejected.
+    client.expire_bounty(&creator, &bounty_id);
+}
+
+/// expire_bounty on an already-cancelled bounty must panic.
+#[test]
+#[should_panic(expected = "bounty not open")]
+fn test_expire_already_cancelled_bounty_panics() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "exp_cc",
+        1_000,
+        Some(50),
+    );
+    client.cancel_bounty(&creator, &bounty_id);
+
+    env.ledger().set_sequence_number(100);
+    client.expire_bounty(&creator, &bounty_id);
+}
+
+// ===========================================================================
+// Issue — release_stale_claim with expired global deadline
+// ===========================================================================
+
+/// When release_stale_claim fires on a bounty whose deadline has also passed,
+/// the bounty must be cancelled (not re-opened) and the escrowed reward
+/// refunded to the creator.
+#[test]
+fn test_release_stale_claim_past_deadline_cancels_and_refunds() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Set a short claim window so it elapses before the deadline.
+    client.init_admin(&creator);
+    client.set_claim_window(&creator, &10);
+
+    let reward: i128 = 1_000;
+    let (bounty_id, token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "stale_dl",
+        reward,
+        Some(200),
+    );
+
+    // Claim at ledger 0.
+    client.claim_bounty(&contributor, &bounty_id);
+
+    // Advance past both the claim window (10) and the deadline (200).
+    env.ledger().set_sequence_number(300);
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_addr);
+    let creator_before = token.balance(&creator);
+
+    let observer = Address::generate(&env);
+    client.release_stale_claim(&observer, &bounty_id);
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(
+        bounty.status,
+        Symbol::new(&env, "cancelled"),
+        "bounty must be cancelled when stale claim is released after deadline"
+    );
+
+    let creator_after = token.balance(&creator);
+    assert_eq!(
+        creator_after - creator_before,
+        reward,
+        "creator must receive escrowed reward when stale claim release cancels an expired bounty"
+    );
+}
+
+/// When release_stale_claim fires but the deadline has NOT yet passed, the
+/// bounty must revert to "open" (original behaviour preserved).
+#[test]
+fn test_release_stale_claim_before_deadline_reopens() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    client.init_admin(&creator);
+    client.set_claim_window(&creator, &10);
+
+    let (bounty_id, _token) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "stale_reopen",
+        1_000,
+        Some(1_000),
+    );
+
+    // Claim at ledger 0, advance past claim window but before deadline.
+    client.claim_bounty(&contributor, &bounty_id);
+    env.ledger().set_sequence_number(50);
+
+    client.release_stale_claim(&creator, &bounty_id);
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(
+        bounty.status,
+        Symbol::new(&env, "open"),
+        "bounty must revert to open when stale claim is released before deadline"
+    );
+}
+
+/// release_stale_claim on a bounty with no deadline always re-opens it
+/// (no deadline means it can never expire, so the original path applies).
+#[test]
+fn test_release_stale_claim_no_deadline_reopens() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    client.init_admin(&creator);
+    client.set_claim_window(&creator, &5);
+
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "stale_nodl", 1_000, None);
+
+    client.claim_bounty(&contributor, &bounty_id);
+    env.ledger().set_sequence_number(10);
+
+    client.release_stale_claim(&creator, &bounty_id);
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.status, Symbol::new(&env, "open"));
+}
+
+// ===========================================================================
+// Issue — partial-milestone escrow refunds
+// ===========================================================================
+
+/// When a bounty has milestones and some have been completed (funds paid out)
+/// before cancellation, the refund must only return the uncompleted milestone
+/// rewards.
+#[test]
+fn test_cancel_bounty_partial_milestones_refunds_only_uncompleted() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Two milestones: 400 + 600 = 1 000.
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 400,
+        completed: false,
+        deadline: None,
+    });
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m2"),
+        reward: 600,
+        completed: false,
+        deadline: None,
+    });
+
+    let total_reward: i128 = 1_000;
+    let token_addr = create_token_and_mint(&env, &creator, &contract_id, total_reward);
+
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "partial_ms"),
+        &String::from_str(&env, "desc"),
+        &total_reward,
 // Issue #1180 — STATUS_SUBMITTED transitions
 // ===========================================================================
 
@@ -5046,8 +5370,151 @@ fn test_1180_complete_milestone_after_submit_work() {
         &1,
         &None,
         &1,
+        &milestones,
     );
 
+    // Claim then complete only the first milestone.
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_milestone(&verifier, &bounty_id, &0);
+
+    // Verify milestone 0 paid out 400 to the contributor.
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_addr);
+    assert_eq!(
+        token.balance(&contributor),
+        400,
+        "first milestone reward must have been paid to contributor"
+    );
+
+    // The bounty is now in_progress with milestone 0 completed.
+    // Un-claim so it reverts to open and can be cancelled.
+    client.unclaim_bounty(&contributor, &bounty_id);
+
+    let creator_before = token.balance(&creator);
+
+    // Cancel the open bounty — only the second milestone (600) remains escrowed.
+    client.cancel_bounty(&creator, &bounty_id);
+
+    let creator_after = token.balance(&creator);
+    assert_eq!(
+        creator_after - creator_before,
+        600,
+        "cancel must refund only uncompleted milestone reward (600), not 1 000"
+    );
+}
+
+/// expire_bounty with a partially-completed milestone set must refund only
+/// the uncompleted milestone rewards.
+#[test]
+fn test_expire_bounty_partial_milestones_refunds_only_uncompleted() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 300,
+        completed: false,
+        deadline: None,
+    });
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m2"),
+        reward: 700,
+        completed: false,
+        deadline: None,
+    });
+
+    let total_reward: i128 = 1_000;
+    let token_addr = create_token_and_mint(&env, &creator, &contract_id, total_reward);
+
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "exp_partial"),
+        &String::from_str(&env, "desc"),
+        &total_reward,
+        &token_addr,
+        &0,
+        &Some(100),
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+    // Complete milestone 0 (pays out 300 to contributor).
+    client.complete_milestone(&verifier, &bounty_id, &0);
+
+    env.ledger().set_sequence_number(200);
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_addr);
+    let creator_before = token.balance(&creator);
+
+    client.expire_bounty(&creator, &bounty_id);
+
+    let creator_after = token.balance(&creator);
+    assert_eq!(
+        creator_after - creator_before,
+        700,
+        "expire must refund only uncompleted milestone reward (700)"
+    );
+}
+
+/// When all milestones are completed before cancellation, the refundable
+/// amount is zero and the creator receives nothing (all funds already paid).
+#[test]
+fn test_cancel_bounty_all_milestones_completed_zero_refund() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "only"),
+        reward: 1_000,
+        completed: false,
+        deadline: None,
+    });
+
+    let token_addr = create_token_and_mint(&env, &creator, &contract_id, 1_000);
+
+    let bounty_id = client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "all_done"),
+        &String::from_str(&env, "desc"),
+        &1_000,
+        &token_addr,
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+
+    client.claim_bounty(&contributor, &bounty_id);
+    // Complete the only milestone — 1 000 tokens paid to contributor.
+    client.complete_milestone(&verifier, &bounty_id, &0);
+
+    // Un-claim to revert to open.
+    client.unclaim_bounty(&contributor, &bounty_id);
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_addr);
+    let creator_before = token.balance(&creator);
+
+    client.cancel_bounty(&creator, &bounty_id);
+
+    let creator_after = token.balance(&creator);
+    assert_eq!(
+        creator_after - creator_before,
+        0,
+        "no funds remain escrowed when all milestones are completed; creator receives 0"
+    );
+}
+
+// ===========================================================================
 // #1195 — independent dispute arbitrator
 // ===========================================================================
 
@@ -5068,6 +5535,30 @@ struct ArbCtx {
 fn arbitrator_ctx() -> ArbCtx {
     let (env, creator, contributor, arbitrator) = setup_test();
 
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+    client.set_arbitrator(&admin, &Some(arbitrator.clone()));
+    assert_invocation_emits(&env, &contract_id, &["config_changed"]);
+    let (bounty_id, token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "bug", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&contributor, &bounty_id);
+    ArbCtx {
+        env,
+        client,
+        contract_id,
+        admin,
+        creator,
+        contributor,
+        arbitrator,
+        token,
+        bounty_id,
+    }
+}
+
+// ===========================================================================
 // Issue #1203 — SEP-41 probe in add_reward_token / set_min_reward
 // ===========================================================================
 

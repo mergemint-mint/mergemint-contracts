@@ -206,12 +206,48 @@ fn refund_sponsors(env: &Env, bounty_id: &BountyId, reward_token: &Address, from
     total
 }
 
-/// Refund the full escrowed reward for a cancelled bounty: each sponsor gets
-/// back exactly what they contributed, and the creator gets the remainder.
+/// Compute the total reward already paid out for completed milestones.
+///
+/// When a bounty has milestones, individual milestone rewards are transferred
+/// by `complete_milestone` as work progresses. Only the *uncompleted*
+/// milestone rewards remain in escrow; refunding the full `reward_amount`
+/// would over-pay.
+fn completed_milestone_total(bounty: &Bounty) -> i128 {
+    if bounty.milestones.is_empty() {
+        return 0;
+    }
+    bounty
+        .milestones
+        .iter()
+        .filter(|m| m.completed)
+        .fold(0i128, |acc, m| acc.saturating_add(m.reward))
+}
+
+/// Refund the escrowed reward for a cancelled or expired bounty.
+///
+/// For milestone bounties, only the uncompleted milestone rewards remain in
+/// escrow — completed milestone funds were already paid out by
+/// `complete_milestone`. This function therefore only refunds
+/// `reward_amount - completed_milestone_total`, preserving the invariant
+/// that no funds are double-counted.
+///
+/// Each sponsor gets back exactly what they contributed (up to the
+/// refundable amount); the creator receives the remainder.
 fn refund_escrow(env: &Env, bounty_id: &BountyId, bounty: &Bounty) {
     let contract_address = env.current_contract_address();
+    // Deduct already-paid milestone rewards so we only refund what is still escrowed.
+    let refundable = bounty
+        .reward_amount
+        .saturating_sub(completed_milestone_total(bounty));
+    if refundable <= 0 {
+        // All funds were already distributed; nothing left to refund.
+        // Still consume the sponsors list so it cannot be replayed.
+        storage::take_sponsors(env, bounty_id);
+        return;
+    }
     let sponsor_total = refund_sponsors(env, bounty_id, &bounty.reward_token, &contract_address);
-    let creator_amount = bounty.reward_amount - sponsor_total;
+    // Clamp: sponsor_total must never exceed refundable (data invariant).
+    let creator_amount = refundable.saturating_sub(sponsor_total);
     if creator_amount > 0 {
         let token = TokenClient::new(env, &bounty.reward_token);
         token.transfer(&contract_address, &bounty.creator, &creator_amount);
@@ -1573,18 +1609,43 @@ pub fn reopen_bounty(env: Env, creator: Address, bounty_id: BountyId, new_deadli
 
         bounty.assignees = Vec::new(&env);
         let previous_status = bounty.status.clone();
-        bounty.status = Symbol::new(&env, STATUS_OPEN);
-        storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::move_bounty_status(
-            &env,
-            &bounty_id,
-            &previous_status,
-            &bounty.status,
-            &bounty.assignees,
-        );
-        storage::add_open_bounty(&env, &bounty_id);
-        for tag in bounty.tags.iter() {
-            storage::append_tag_bounty(&env, &tag, &bounty_id);
+        // If the bounty's global deadline has also passed, cancel it and
+        // refund escrow rather than re-opening it into an immediately-
+        // unclaimable state.  This prevents funds from being locked
+        // indefinitely in a bounty that can never be re-claimed.
+        let deadline_passed = bounty
+            .deadline
+            .map(|d| env.ledger().sequence() > d)
+            .unwrap_or(false);
+
+        if deadline_passed {
+            // Refund remaining escrowed funds (minus any already-paid
+            // milestone rewards) and move to cancelled.
+            refund_escrow(&env, &bounty_id, &bounty);
+            bounty.status = Symbol::new(&env, STATUS_CANCELLED);
+            storage::store_bounty(&env, &bounty_id, &bounty);
+            storage::move_bounty_status(
+                &env,
+                &bounty_id,
+                &previous_status,
+                &bounty.status,
+                &bounty.assignees,
+            );
+            storage::decrement_creator_open_count(&env, &bounty.creator);
+        } else {
+            bounty.status = Symbol::new(&env, STATUS_OPEN);
+            storage::store_bounty(&env, &bounty_id, &bounty);
+            storage::move_bounty_status(
+                &env,
+                &bounty_id,
+                &previous_status,
+                &bounty.status,
+                &bounty.assignees,
+            );
+            storage::add_open_bounty(&env, &bounty_id);
+            for tag in bounty.tags.iter() {
+                storage::append_tag_bounty(&env, &tag, &bounty_id);
+            }
         }
         storage::clear_claimed_at_ledger(&env, &bounty_id);
 
