@@ -1202,8 +1202,10 @@ impl MergeMintContract {
         let mut contrib = storage::get_contributor(&env, &contributor)
             .unwrap_or_else(|| Contributor::new(contributor.clone()));
 
-        contrib.metadata = Some(metadata);
+        contrib.metadata = Some(metadata.clone());
         storage::store_contributor(&env, &contributor, &contrib);
+
+        events::emit_contributor_metadata_updated(&env, &contributor, &metadata);
     }
 
     /// Cancel an open bounty.
@@ -1927,6 +1929,24 @@ impl MergeMintContract {
         events::emit_ownership_transferred(&env, &bounty_id, &previous_owner, &new_owner);
     }
 
+    /// Drain the legacy `DataKey::StatusIndex(Symbol)` and
+    /// `DataKey::OpenBounties` storage blobs into their paged
+    /// (`StatusIndexPage` / `OpenBountiesPage`) replacements.
+    ///
+    /// The migration is bounded and idempotent: each call migrates at most
+    /// `storage::MIGRATION_CHUNK_SIZE` entries per legacy index, deduplicating
+    /// against entries already present in the paged storage, and deletes the
+    /// legacy key once fully drained. Callers should invoke this repeatedly
+    /// until `storage::has_legacy_indexes` returns `false`.
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn migrate_legacy_indexes(env: Env, admin: Address) {
+        require_admin(&env, &admin);
+        require_not_paused(&env);
+        storage::migrate_legacy_indexes(&env);
+    }
+
     /// Reopen an expired bounty with a new deadline.
     ///
     /// Moves an expired bounty back to open status with a new future deadline,
@@ -2077,6 +2097,7 @@ impl MergeMintContract {
             assignee,
             status: bounty.status.clone(),
             reward: bounty.reward_amount,
+            reward_token: bounty.reward_token.clone(),
         };
 
         storage::store_bounty_archive(&env, &bounty_id, &summary);

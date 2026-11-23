@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 #![no_std]
-#![allow(dead_code, deprecated, unused_imports, clippy::too_many_arguments)]
 // Non-test contract code must raise typed `ContractError`s (via `fail`)
 // instead of panicking opaquely. `cfg_attr` keeps this from firing inside
 // `#[cfg(test)]` modules, where panics/unwraps are the normal assertion
