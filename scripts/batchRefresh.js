@@ -6,11 +6,15 @@ const { ethers } = require("hardhat");
  */
 class BatchRefreshManager {
   constructor(contractAddress) {
+    if (!ethers.isAddress(contractAddress)) {
+      throw new Error(`Invalid contract address: ${contractAddress}`);
+    }
     this.contractAddress = contractAddress;
     this.contract = null;
     this.batchSize = 100;
     this.maxRetries = 3;
     this.retryDelay = 1000; // ms
+    this.gasBufferPercent = 120; // gas estimate safety buffer
   }
 
   /**
@@ -45,6 +49,8 @@ class BatchRefreshManager {
     if (contributors.length === 0) {
       throw new Error("Empty contributors array");
     }
+
+    this._validateInputs(contributors, bountyIds);
 
     const chunks = this.chunkArray(contributors, this.batchSize);
     const results = [];
@@ -88,45 +94,123 @@ class BatchRefreshManager {
   }
 
   /**
-   * Process a single batch
+   * Validate contributor addresses and bounty IDs before any tx is sent.
+   */
+  _validateInputs(contributors, bountyIds) {
+    if (!Array.isArray(contributors) || !Array.isArray(bountyIds)) {
+      throw new Error("contributors and bountyIds must be arrays");
+    }
+    contributors.forEach((addr, i) => {
+      if (typeof addr !== "string" || !ethers.isAddress(addr)) {
+        throw new Error(`Invalid contributor address at index ${i}: ${addr}`);
+      }
+      if (addr === ethers.ZeroAddress) {
+        throw new Error(`Zero address contributor at index ${i}`);
+      }
+    });
+    bountyIds.forEach((id, i) => {
+      let value;
+      try {
+        value = BigInt(id);
+      } catch (e) {
+        throw new Error(`Invalid bounty ID at index ${i}: ${id}`);
+      }
+      if (value <= 0n) {
+        throw new Error(`Bounty ID at index ${i} must be a positive integer`);
+      }
+    });
+  }
+
+  /**
+   * Estimate gas for a contract call and add a safety buffer (default 20%).
+   */
+  async _gasOverrides(method, ...args) {
+    const estimate = await this.contract[method].estimateGas(...args);
+    return { gasLimit: (estimate * BigInt(this.gasBufferPercent)) / 100n };
+  }
+
+  /**
+   * Wait for a tx and make sure it was mined successfully.
+   */
+  async _confirm(tx, label) {
+    const receipt = await tx.wait();
+    if (!receipt || receipt.status !== 1) {
+      throw new Error(`${label} transaction reverted (${tx.hash})`);
+    }
+    return receipt;
+  }
+
+  /**
+   * Process a single batch.
+   *
+   * Retries are idempotent: the created batchId is remembered across
+   * attempts so a failure in processBatchParallel/finalizeBatch never causes
+   * a second createBatch (and a duplicate on-chain batch).
    */
   async _processSingleBatch(contributors, bountyIds, parallel, verbose) {
+    this._validateInputs(contributors, bountyIds);
+
     let retries = 0;
     let lastError;
+    let batchId;
+    let createTx;
+    let processTx;
+    let processed = false;
 
     while (retries < this.maxRetries) {
       try {
-        // Create batch
-        const createTx = await this.contract.createBatch(
-          contributors,
-          bountyIds,
+        if (batchId === undefined) {
+          const createOverrides = await this._gasOverrides(
+            "createBatch",
+            contributors,
+            bountyIds,
+          );
+          createTx = await this.contract.createBatch(
+            contributors,
+            bountyIds,
+            createOverrides,
+          );
+          const createReceipt = await this._confirm(createTx, "createBatch");
+
+          if (verbose) {
+            console.log(`Batch created in tx: ${createTx.hash}`);
+          }
+
+          // Remember the id before any further step can fail.
+          batchId = this._extractBatchId(createReceipt);
+        }
+
+        if (!processed) {
+          const processOverrides = await this._gasOverrides(
+            "processBatchParallel",
+            batchId,
+          );
+          processTx = await this.contract.processBatchParallel(
+            batchId,
+            processOverrides,
+          );
+          await this._confirm(processTx, "processBatchParallel");
+          processed = true;
+
+          if (verbose) {
+            console.log(`Batch processed in tx: ${processTx.hash}`);
+          }
+        }
+
+        const finalizeOverrides = await this._gasOverrides(
+          "finalizeBatch",
+          batchId,
         );
-        const createReceipt = await createTx.wait();
-
-        if (verbose) {
-          console.log(`Batch created in tx: ${createTx.hash}`);
-        }
-
-        // Extract batch ID from events
-        const batchId = this._extractBatchId(createReceipt);
-
-        // Process batch
-        const processTx = await this.contract.processBatchParallel(batchId);
-        const processReceipt = await processTx.wait();
-
-        if (verbose) {
-          console.log(`Batch processed in tx: ${processTx.hash}`);
-        }
-
-        // Finalize batch
-        const finalizeTx = await this.contract.finalizeBatch(batchId);
-        await finalizeTx.wait();
+        const finalizeTx = await this.contract.finalizeBatch(
+          batchId,
+          finalizeOverrides,
+        );
+        await this._confirm(finalizeTx, "finalizeBatch");
 
         if (verbose) {
           console.log(`Batch finalized in tx: ${finalizeTx.hash}`);
         }
 
-        // Get batch details
         const batchDetails = await this.contract.getBatch(batchId);
 
         return {
@@ -136,13 +220,24 @@ class BatchRefreshManager {
           failureCount: batchDetails.failureCount.toString(),
           transactionHashes: {
             create: createTx.hash,
-            process: processTx.hash,
+            process: processTx && processTx.hash,
             finalize: finalizeTx.hash,
           },
         };
       } catch (error) {
         lastError = error;
         retries++;
+
+        // Recover state from chain: if the batch was already processed by a
+        // tx whose confirmation we lost, do not process it again.
+        if (batchId !== undefined && !processed) {
+          try {
+            const details = await this.contract.getBatch(batchId);
+            if (details.isProcessing || details.isCompleted) processed = true;
+          } catch (_) {
+            // ignore, retry normally
+          }
+        }
 
         if (retries < this.maxRetries) {
           if (verbose) {
@@ -156,21 +251,31 @@ class BatchRefreshManager {
     }
 
     throw new Error(
-      `Failed after ${this.maxRetries} retries: ${lastError.message}`,
+      `Failed after ${this.maxRetries} retries${
+        batchId !== undefined ? ` (batchId ${batchId})` : ""
+      }: ${lastError.message}`,
     );
   }
 
   /**
-   * Extract batch ID from transaction receipt
+   * Extract batch ID from transaction receipt (ethers v6 logs, v5 events).
    */
   _extractBatchId(receipt) {
-    const batchCreatedEvent = receipt.events?.find(
-      (e) => e.event === "BatchCreated",
-    );
-    if (!batchCreatedEvent) {
-      throw new Error("BatchCreated event not found in receipt");
+    if (receipt && Array.isArray(receipt.events)) {
+      const ev = receipt.events.find((e) => e.event === "BatchCreated");
+      if (ev && ev.args) return ev.args.batchId;
     }
-    return batchCreatedEvent.args.batchId;
+    for (const log of (receipt && receipt.logs) || []) {
+      try {
+        const parsed = this.contract.interface.parseLog(log);
+        if (parsed && parsed.name === "BatchCreated") {
+          return parsed.args.batchId;
+        }
+      } catch (_) {
+        // log from another contract / unparsable
+      }
+    }
+    throw new Error("BatchCreated event not found in receipt");
   }
 
   /**
