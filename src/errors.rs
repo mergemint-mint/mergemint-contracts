@@ -90,17 +90,20 @@ pub enum ContractError {
     /// A state-mutating entrypoint was called while the admin has the
     /// contract paused.
     ContractPaused = 62,
+    /// The designated arbitrator is the bounty creator or one of its
+    /// assignees, i.e. an interested party in the dispute (#1195).
+    ArbitratorConflict = 63,
     /// A `BytesN<32>` hash argument (work submission or dispute evidence)
     /// was the all-zero sentinel value, which is never a valid hash.
-    ZeroHash = 63,
+    ZeroHash = 64,
     /// The supplied dispute evidence hash is already recorded for this
     /// dispute; re-submitting it would consume the party's evidence quota
     /// without adding new information.
-    DuplicateEvidence = 64,
+    DuplicateEvidence = 65,
     /// `pause` was called while the contract was already paused.
-    AlreadyPaused = 65,
+    AlreadyPaused = 66,
     /// `unpause` was called while the contract was not paused.
-    NotPaused = 66,
+    NotPaused = 67,
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
@@ -194,6 +197,9 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::OwnerCannotBeCreator => "new owner cannot be the current creator",
         ContractError::NoPendingOwner => "no pending ownership transfer for this bounty",
         ContractError::ContractPaused => "contract is paused",
+        ContractError::ArbitratorConflict => {
+            "arbitrator cannot be the bounty creator or an assignee"
+        }
         ContractError::ZeroHash => "hash must not be all zero",
         ContractError::DuplicateEvidence => "dispute evidence hash already recorded",
         ContractError::AlreadyPaused => "contract is already paused",

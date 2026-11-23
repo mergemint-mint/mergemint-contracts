@@ -378,11 +378,20 @@ fn apply_dispute_resolution(
             );
         } else {
             let token = TokenClient::new(&env, &bounty.reward_token);
+            // An independent arbitrator (#1195) is not a party to the bounty
+            // and must not fund it: pay from the contract's escrow. The
+            // creator acting as its own arbitrator keeps paying from its wallet.
+            let payer = if arbitrator == bounty.creator {
+                arbitrator.clone()
+            } else {
+                env.current_contract_address()
+            };
+
             distribute_payout(
                 &env,
                 &bounty_id,
                 &bounty.assignees,
-                &arbitrator,
+                &payer,
                 &token,
                 bounty.reward_amount,
             );
@@ -433,6 +442,10 @@ fn apply_dispute_resolution(
             &bounty.assignees,
         );
     }
+
+    // #1197: a disputed bounty stays counted against `creator_open_limit`
+    // until it reaches a terminal status here.
+    storage::decrement_creator_open_count(&env, &bounty.creator);
 
     events::emit_dispute_resolved(&env, &bounty_id, &arbitrator, &resolution);
     Ok(())
@@ -1150,14 +1163,28 @@ Actually, you know what, let me just make reasonable assumptions and write the c
             &bounty.status,
             &bounty.assignees,
         );
-        storage::decrement_creator_open_count(&env, &bounty.creator);
-        for tag in bounty.tags.iter() {
-            storage::remove_tag_bounty(&env, &tag, &bounty_id);
-        }
+        // #1197: a disputed bounty is still active, so it keeps its slot in
+        // `creator_open_count` until `apply_dispute_resolution` makes it
+        // terminal. Decrementing here let creators bypass the limit by
+        // disputing their own bounties, then double-decrement on resolution.
         events::emit_bounty_disputed(&env, &bounty_id, &caller);
     }
 
-Let me just use `storage::get_sponsors(&env, &bounty_id)` returning `Vec<(Address, i128)>`. This is symmetric with `take_sponsors`. Then:
+    /// Resolve a disputed bounty. Only the admin-designated arbitrator may call this when one
+    /// is set via `set_arbitrator` (#1195); otherwise the bounty creator acts as arbitrator.
+    /// resolution must be the Symbol "complete" (pay assignees) or "cancel" (refund creator).
+    ///
+    /// When resolution is "complete" and the creator is the arbitrator, the arbitrator's wallet
+    /// funds the payout to each assignee (mirroring complete_bounty's verifier-funds-the-payout
+    /// model); a designated arbitrator is not a party to the bounty, so its decision pays from
+    /// the contract's escrow.
+    ///
+    /// # Authorization
+    /// `arbitrator.require_auth()` is the **first** operation in this function.
+    /// No storage reads or business logic execute before authentication is checked.
+    pub fn resolve_dispute(env: Env, arbitrator: Address, bounty_id: BountyId, resolution: Symbol) {
+        arbitrator.require_auth();
+        require_not_paused(&env);
 
 ```rust
 let existing = storage::get_sponsors(&env, &bounty_id);
@@ -1169,7 +1196,26 @@ if is_new && existing.len() >= storage::MAX_SPONSORS_PER_BOUNTY {
 
 This is clean. Let me go with this.
 
-For `MIN_SPONSOR_AMOUNT`, I'll reference `storage::MIN_SPONSOR_AMOUNT`.
+        // #1195: an admin-designated independent arbitrator, when configured,
+        // is the only party allowed to resolve, and must not have a stake in
+        // the outcome. Without one, the bounty creator keeps the role.
+        match storage::get_arbitrator(&env) {
+            Some(designated) => {
+                if arbitrator != designated {
+                    fail(ContractError::NotArbitrator);
+                }
+                let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == arbitrator);
+                if arbitrator == bounty.creator || is_assignee {
+                    fail(ContractError::ArbitratorConflict);
+                }
+            }
+            None => {
+                if arbitrator != bounty.creator {
+                    fail(ContractError::NotArbitrator);
+                }
+            }
+        }
+        // For `MIN_SPONSOR_AMOUNT`, reference `storage::MIN_SPONSOR_AMOUNT`.
 
 OK let me write the full file now. I need to be careful to preserve everything.
 
@@ -1665,7 +1711,32 @@ Hmm, but actually, is there a scenario where an open bounty has assignees? No, b
         events::emit_config_changed_min_reward(&env, &token, old, amount);
     }
 
-OK, writing the full file now.
+    /// Designate (`Some`) or clear (`None`) an independent dispute arbitrator
+    /// (#1195). While set, only this address may call `resolve_dispute`, and
+    /// it is rejected on any bounty where it is the creator or an assignee;
+    /// a "complete" decision then pays assignees from the contract's escrow.
+    /// While unset, the bounty creator acts as arbitrator, as before.
+    /// Emits `config_changed` / `arbitrator`.
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn set_arbitrator(env: Env, admin: Address, arbitrator: Option<Address>) {
+        require_admin(&env, &admin);
+        require_not_paused(&env);
+        let old = storage::get_arbitrator(&env);
+        storage::set_arbitrator(&env, &arbitrator);
+        events::emit_config_changed_arbitrator(&env, old, arbitrator);
+    }
+
+    /// Begin a two-step admin transfer by proposing `new_admin`. The
+    /// transfer completes only once `new_admin` calls `accept_admin`.
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
+        require_admin(&env, &admin);
+        storage::set_pending_admin(&env, &new_admin);
+    }
 
 One more thing — I need to make sure the `distribute_payout` function clears the mapping. But wait, `distribute_payout` is called from `complete_bounty_inner` (non-milestone path), `complete_milestone`, and `approve_completion`. For `complete_milestone`, the bounty is NOT terminal — it's still in progress. So we should NOT clear the active bounty mapping there!
 
@@ -1744,9 +1815,11 @@ So:
         }
 
         // Statuses counted by the per-creator open-bounty cap.
+        // `disputed` stays active until `apply_dispute_resolution` (#1197).
         let is_active = bounty.status == Symbol::new(&env, STATUS_OPEN)
             || bounty.status == Symbol::new(&env, STATUS_IN_PROGRESS)
-            || bounty.status == Symbol::new(&env, STATUS_SUBMITTED);
+            || bounty.status == Symbol::new(&env, STATUS_SUBMITTED)
+            || bounty.status == Symbol::new(&env, STATUS_DISPUTED);
         if is_active {
             let limit = storage::get_creator_open_limit(&env);
             if limit > 0 && storage::get_creator_open_count(&env, &new_owner) >= limit {
