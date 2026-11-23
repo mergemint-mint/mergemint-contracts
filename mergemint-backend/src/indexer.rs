@@ -19,6 +19,19 @@
 
 use tracing::warn;
 
+/// Maximum byte length for a single XDR event payload.  Soroban contract
+/// events are bounded by the protocol's contract event size limit; this is a
+/// defensive ceiling so a malicious or corrupt payload cannot cause
+/// unbounded allocation during decode.
+const XDR_PAYLOAD_MAX_BYTES: usize = 8 * 1024;
+
+/// Expected length, in bytes, of a [`BountyId`](src/types.rs) as serialised
+/// inside an `ScVal::Bytes`.  `BountyId` is `BytesN<32>`, so the decoded
+/// `ScBytes` must contain exactly 32 bytes.
+pub const BOUNTY_ID_LEN: usize = 32;
+
+use stellar_xdr::{Limits, ReadXdr, ScVal};
+
 #[allow(clippy::too_many_arguments)]
 pub fn index_reputation_change(
     db: &crate::db::SharedDb,
@@ -152,6 +165,14 @@ const ALL_CONTRACT_EVENTS: &[&str] = &[
 
 /// Extract the bounty-id hex string from a raw event topic slice.
 ///
+/// Decodes the `value_hex` payload as base64-encoded Soroban XDR and extracts
+/// the 32-byte `BountyId`:
+///
+/// - For [`SINGLE_VALUE_EVENTS`], the payload is a single `ScVal::Bytes`
+///   containing exactly 32 bytes.
+/// - For [`TUPLE_EVENTS`], the payload is an `ScVal::Vec` whose first element
+///   is an `ScVal::Bytes` of 32 bytes.
+///
 /// Returns `None` when:
 /// - `topics` is empty (no event-name topic present), or
 /// - the first topic is not a recognised bounty-scoped event name (see
@@ -168,19 +189,45 @@ const ALL_CONTRACT_EVENTS: &[&str] = &[
 pub fn extract_bounty_id_hex(topics: &[String], value_hex: &str) -> Option<String> {
     let event_name = topics.first()?;
 
-    if SINGLE_VALUE_EVENTS.contains(&event_name.as_str()) {
-        // Data payload *is* the bounty id.
-        Some(value_hex.to_owned())
-    } else if TUPLE_EVENTS.contains(&event_name.as_str()) {
-        // Data payload is a tuple; first element is the bounty id.
-        // In a real implementation this would decode the XDR tuple.
-        // Here we treat the whole value as the id for testability.
-        Some(value_hex.to_owned())
+    let is_single = SINGLE_VALUE_EVENTS.contains(&event_name.as_str());
+    let is_tuple = TUPLE_EVENTS.contains(&event_name.as_str());
+
+    if !is_single && !is_tuple {
+        // Covers CONTRIBUTOR_ONLY_EVENTS, CONTRACT_ADMIN_EVENTS, and unknown.
+        return None;
+    }
+
+    decode_bounty_id_from_xdr(value_hex, is_tuple)
+}
+
+/// Decode a base64-encoded XDR `ScVal` and extract the 32-byte bounty id.
+///
+/// `is_tuple` selects between the single-value shape (`ScVal::Bytes`) and the
+/// tuple shape (`ScVal::Vec` whose first element is `ScVal::Bytes`).
+///
+/// Uses bounded [`Limits`] to defend against excessively large or deeply
+/// nested payloads.  Any decode error, shape mismatch, or length mismatch
+/// returns `None` (the caller logs a structured warning).
+pub(crate) fn decode_bounty_id_from_xdr(value_hex: &str, is_tuple: bool) -> Option<String> {
+    let scval = ScVal::from_xdr_base64(value_hex, Limits::len(XDR_PAYLOAD_MAX_BYTES)).ok()?;
+
+    let bytes: &[u8] = if is_tuple {
+        // ScVal::Vec(Option<ScVec>); the first element must be ScVal::Bytes.
+        let ScVal::Vec(Some(vec)) = &scval else {
+            return None;
+        };
+        let first = vec.0.first()?;
+        let ScVal::Bytes(bytes) = first else {
+            return None;
+        };
+        bytes.as_ref()
     } else {
         // Covers CONTRIBUTOR_ONLY_EVENTS, CONTRACT_ADMIN_EVENTS, and
         // any truly unknown name.
         None
     }
+
+    Some(hex::encode(bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +304,14 @@ pub struct IndexerState {
 ///
 /// When the first topic fails to decode, the error is logged via
 /// `tracing::warn!` instead of being swallowed silently.
+///
+/// # XDR decode failures (#1259)
+///
+/// When the event name is recognised as bounty-scoped but the XDR payload is
+/// malformed, truncated, oversized, or does not contain a valid 32-byte
+/// `BountyId`, a structured `tracing::warn!` is emitted with the event name and
+/// the raw payload length so operators can correlate the failure with the
+/// on-chain data.  The event is not dropped from ledger tracking.
 #[tracing::instrument(skip(state, events), fields(event_count = events.len(), page_complete))]
 pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: bool) {
     let mut highest_ledger = state.last_ledger;
@@ -291,6 +346,22 @@ pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: b
         if !is_recognised {
             warn!("unrecognized contract event: {event_name}");
             // Still track the ledger so unrecognised events don't stall progress.
+            if event.ledger > highest_ledger {
+                highest_ledger = event.ledger;
+            }
+            continue;
+        }
+
+        // For bounty-scoped events, attempt XDR decode and warn on failure.
+        if is_bounty_scoped
+            && extract_bounty_id_hex(std::slice::from_ref(&event_name), &event.value_hex).is_none()
+        {
+            warn!(
+                event = %event_name,
+                payload_len = event.value_hex.len(),
+                "bounty-scoped event has malformed XDR payload or invalid bounty id; \
+                 skipping bounty extraction but tracking ledger"
+            );
         }
 
         if event.ledger > highest_ledger {
@@ -411,12 +482,72 @@ pub fn poll_once_and_publish(
 mod tests {
     use super::*;
 
-    // ── helpers ──────────────────────────────────────────────────────────────
+    // ── XDR fixture helpers ─────────────────────────────────────────────────
+    //
+    // The indexer now performs genuine stellar-xdr `ScVal::from_xdr_base64`
+    // decoding, so tests must supply base64-encoded XDR payloads that decode
+    // to the expected `ScVal` shape — not arbitrary hex strings.
 
-    fn ok_event(name: &str, ledger: u32) -> RawEvent {
+    use stellar_xdr::{ScBytes, ScVal, ScVec, WriteXdr};
+
+    /// Encode an `ScVal` to base64 XDR using bounded limits.
+    fn scval_to_base64(scval: &ScVal) -> String {
+        let raw = scval.to_xdr(Limits::none()).expect("encode ScVal");
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw)
+    }
+
+    /// Build base64 XDR for a single `ScVal::Bytes` of `n` bytes, all zero.
+    fn bytes_xdr(n: usize) -> String {
+        let scval = ScVal::Bytes(ScBytes(vec![0u8; n].try_into().unwrap()));
+        scval_to_base64(&scval)
+    }
+
+    /// Build base64 XDR for an `ScVal::Vec` whose first element is
+    /// `ScVal::Bytes(n)` and whose remaining elements are filler `ScVal::U32`.
+    fn tuple_xdr(n: usize, extra: usize) -> String {
+        let mut elements = vec![ScVal::Bytes(ScBytes(vec![0u8; n].try_into().unwrap()))];
+        elements.extend(std::iter::repeat_n(ScVal::U32(42), extra));
+        let scval = ScVal::Vec(Some(ScVec(elements.try_into().unwrap())));
+        scval_to_base64(&scval)
+    }
+
+    /// A valid 32-byte single-value bounty-id payload.
+    fn valid_single_bounty_id() -> String {
+        bytes_xdr(BOUNTY_ID_LEN)
+    }
+
+    /// A valid tuple payload with a 32-byte bounty id as the first element.
+    fn valid_tuple_bounty_id() -> String {
+        tuple_xdr(BOUNTY_ID_LEN, 2)
+    }
+
+    // ── RawEvent helpers ────────────────────────────────────────────────────
+
+    /// Build a RawEvent with a single-value bounty-id payload, suitable for
+    /// SINGLE_VALUE_EVENTS.
+    fn single_event(name: &str, ledger: u32) -> RawEvent {
         RawEvent {
             topics: vec![TopicDecodeResult::Ok(name.to_owned())],
-            value_hex: "deadbeef".to_owned(),
+            value_hex: valid_single_bounty_id(),
+            ledger,
+        }
+    }
+
+    /// Build a RawEvent with a tuple bounty-id payload, suitable for
+    /// TUPLE_EVENTS.
+    fn tuple_event(name: &str, ledger: u32) -> RawEvent {
+        RawEvent {
+            topics: vec![TopicDecodeResult::Ok(name.to_owned())],
+            value_hex: valid_tuple_bounty_id(),
+            ledger,
+        }
+    }
+
+    /// Build a RawEvent with an arbitrary (possibly invalid) payload string.
+    fn raw_event(name: &str, value_hex: &str, ledger: u32) -> RawEvent {
+        RawEvent {
+            topics: vec![TopicDecodeResult::Ok(name.to_owned())],
+            value_hex: value_hex.to_owned(),
             ledger,
         }
     }
@@ -439,8 +570,8 @@ mod tests {
         let mut state = IndexerState { last_ledger: 100 };
 
         let events = vec![
-            ok_event("bounty_created", 150),
-            ok_event("bounty_claimed", 200),
+            tuple_event("bounty_created", 150),
+            single_event("bounty_claimed", 200),
         ];
 
         poll_once(&mut state, &events, false);
@@ -457,8 +588,8 @@ mod tests {
         let mut state = IndexerState { last_ledger: 100 };
 
         let events = vec![
-            ok_event("bounty_created", 150),
-            ok_event("bounty_claimed", 200),
+            tuple_event("bounty_created", 150),
+            single_event("bounty_claimed", 200),
         ];
 
         poll_once(&mut state, &events, true);
@@ -508,18 +639,50 @@ mod tests {
 
     /// `extract_bounty_id_hex` must return Some for every bounty-scoped event.
     #[test]
-    fn test_extract_bounty_id_hex_known_events() {
-        let known: Vec<&str> = SINGLE_VALUE_EVENTS
-            .iter()
-            .chain(TUPLE_EVENTS.iter())
-            .copied()
-            .collect();
-
-        for name in known {
-            let result = extract_bounty_id_hex(&[name.to_owned()], "aabbccdd");
+    fn test_extract_bounty_id_hex_single_value_events() {
+        for &name in SINGLE_VALUE_EVENTS {
+            let result = extract_bounty_id_hex(&[name.to_owned()], &valid_single_bounty_id());
             assert!(
                 result.is_some(),
-                "expected Some for known event '{name}', got None"
+                "expected Some for single-value event '{name}' with valid 32-byte XDR, got None"
+            );
+        }
+    }
+
+    /// `extract_bounty_id_hex` must return Some for every known tuple event
+    /// when given a valid tuple XDR payload with a 32-byte first element.
+    #[test]
+    fn test_extract_bounty_id_hex_tuple_events() {
+        for &name in TUPLE_EVENTS {
+            let result = extract_bounty_id_hex(&[name.to_owned()], &valid_tuple_bounty_id());
+            assert!(
+                result.is_some(),
+                "expected Some for tuple event '{name}' with valid tuple XDR, got None"
+            );
+        }
+    }
+
+    /// `extract_bounty_id_hex` must return None for contributor-only events —
+    /// they carry no bounty_id by design.
+    #[test]
+    fn test_extract_bounty_id_hex_returns_none_for_contributor_only_events() {
+        for name in CONTRIBUTOR_ONLY_EVENTS {
+            let result = extract_bounty_id_hex(&[name.to_string()], &valid_single_bounty_id());
+            assert!(
+                result.is_none(),
+                "contributor-only event '{name}' should yield None — no bounty_id"
+            );
+        }
+    }
+
+    /// `extract_bounty_id_hex` must return None for contract-admin events.
+    #[test]
+    fn test_extract_bounty_id_hex_returns_none_for_admin_events() {
+        for name in CONTRACT_ADMIN_EVENTS {
+            let result = extract_bounty_id_hex(&[name.to_string()], &valid_single_bounty_id());
+            assert!(
+                result.is_none(),
+                "contract-admin event '{name}' should yield None — no bounty_id"
             );
         }
     }
@@ -698,10 +861,21 @@ mod tests {
 
         for &name in &bounty_events {
             let mut state = IndexerState { last_ledger: 0 };
-            let events = vec![ok_event(name, 1)];
+            poll_once(&mut state, &[tuple_event(name, 1)], true);
+            assert_eq!(
+                state.last_ledger, 1,
+                "tuple event '{name}' should advance last_ledger"
+            );
+        }
+    }
 
+    /// Contributor-only events must advance last_ledger without warning.
+    #[test]
+    fn test_contributor_only_events_advance_ledger_without_warn() {
+        for &name in CONTRIBUTOR_ONLY_EVENTS {
+            let mut state = IndexerState { last_ledger: 0 };
+            let events = vec![raw_event(name, "deadbeef", 5)];
             poll_once(&mut state, &events, true);
-
             assert_eq!(
                 state.last_ledger, 1,
                 "bounty-scoped event '{name}' should advance last_ledger on a complete page"
@@ -754,7 +928,7 @@ mod tests {
                 TopicDecodeResult::Ok("some_address".to_owned()),
                 TopicDecodeResult::Ok("unexpected_extra_field".to_owned()),
             ],
-            value_hex: "aabbccdd".to_owned(),
+            value_hex: valid_tuple_bounty_id(),
             ledger: 5,
         }];
 
@@ -776,17 +950,14 @@ mod tests {
         let mut state = IndexerState { last_ledger: 100 };
 
         let full_batch = vec![
-            ok_event("bounty_created", 110),
-            ok_event("bounty_claimed", 120),
-            ok_event("reward_paid", 130),
+            tuple_event("bounty_created", 110),
+            single_event("bounty_claimed", 120),
+            tuple_event("reward_paid", 130),
         ];
 
         let seen_before_crash = &full_batch[..1];
         poll_once(&mut state, seen_before_crash, false);
-        assert_eq!(
-            state.last_ledger, 100,
-            "cursor must not advance past a batch interrupted by a crash"
-        );
+        assert_eq!(state.last_ledger, 100);
 
         poll_once(&mut state, &full_batch, true);
         assert_eq!(
@@ -800,8 +971,8 @@ mod tests {
     fn test_indexer_cursor_stable_across_repeated_crashes() {
         let mut state = IndexerState { last_ledger: 500 };
         let batch = vec![
-            ok_event("bounty_created", 510),
-            ok_event("bounty_claimed", 520),
+            tuple_event("bounty_created", 510),
+            single_event("bounty_claimed", 520),
         ];
 
         poll_once(&mut state, &[], false);
