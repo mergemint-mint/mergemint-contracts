@@ -1,5 +1,13 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`StatusBadge > renders the label and modifier class for status 'archived' 1`] = `
+{
+  "className": "status-badge status-badge--archived",
+  "label": "archived",
+  "status": "archived",
+}
+`;
+
 exports[`StatusBadge > renders the label and modifier class for status 'cancelled' 1`] = `
 {
   "className": "status-badge status-badge--cancelled",
@@ -37,5 +45,21 @@ exports[`StatusBadge > renders the label and modifier class for status 'open' 1`
   "className": "status-badge status-badge--open",
   "label": "open",
   "status": "open",
+}
+`;
+
+exports[`StatusBadge > renders the label and modifier class for status 'paused' 1`] = `
+{
+  "className": "status-badge status-badge--paused",
+  "label": "paused",
+  "status": "paused",
+}
+`;
+
+exports[`StatusBadge > renders the label and modifier class for status 'submitted' 1`] = `
+{
+  "className": "status-badge status-badge--submitted",
+  "label": "submitted",
+  "status": "submitted",
 }
 `;

@@ -2,92 +2,100 @@
 
 //! Canonical contract error conditions.
 //!
-//! Each variant must be referenced from contract logic (`fail(ContractError::…)`)
-//! and have a unique panic message. `InvalidRewardToken` is enforced during
-//! `create_bounty` via a non-trapping token `balance` probe.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+//! Errors are surfaced as a typed [`ContractError`] with stable numeric
+//! discriminants via Soroban's `#[contracterror]` convention. Entrypoints
+//! return `Result<_, ContractError>` so the SDK can decode a deterministic
+//! `u32` code instead of parsing an opaque panic string. This keeps the
+//! release WASM free of the ~60 static error messages and lets the backend
+//! match on numeric codes.
+//!
+//! Discriminants are part of the public ABI: never renumber an existing
+//! variant. Append new variants with the next unused value.
+use soroban_sdk::contracterror;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum ContractError {
-    BountyNotFound,
-    BountyAlreadyAssigned,
-    AlreadyClaimed,
-    BountyNotOpen,
-    BountyNotInProgress,
-    BountyHasNoAssignee,
-    RewardMustBePositive,
-    RewardBelowMinimum,
-    NotBountyCreator,
-    VerifierCannotBeAssignee,
-    CreatorCannotClaim,
-    ContributorHasActiveClaim,
-    BountyIsDisputed,
-    BountyDeadlinePassed,
-    BountyNoDeadline,
-    DeadlineNotPassed,
-    ReputationTooLow,
-    TooManyTags,
-    MaxAssigneesMustBePositive,
-    OnlyCreatorOrAssigneeCanDispute,
-    VerifierNotAuthorized,
-    AlreadyApproved,
-    BountyNotDisputed,
-    NotArbitrator,
-    ApprovalThresholdExceedsVerifiers,
-    InvalidRewardToken,
-    InvalidStatus,
-    InvalidTag,
-    InvalidResolution,
-    MilestoneAlreadyCompleted,
-    NotAllMilestonesCompleted,
-    InvalidMilestoneIndex,
-    MilestoneRewardsMismatch,
-    RewardAmountOverflow,
-    MetadataEmpty,
-    NotAssignee,
-    AmountMustBePositive,
-    SubmissionRequired,
-    DuplicateTag,
-    CreatorLimitReached,
-    NotAdmin,
-    ClaimCooldownActive,
-    OnlyPartyCanAddEvidence,
-    EvidenceLimitReached,
-    DisputeAlreadyResolved,
-    NoPendingResolution,
-    AppealWindowClosed,
-    AlreadyAppealed,
-    FinalizeTooEarly,
-    ClaimWindowNotElapsed,
-    NoActiveClaim,
-    MilestoneDeadlineInvalid,
-    MilestoneDeadlinePassed,
-    AdminAlreadySet,
-    RewardTokenNotAllowed,
+    BountyNotFound = 1,
+    BountyAlreadyAssigned = 2,
+    AlreadyClaimed = 3,
+    BountyNotOpen = 4,
+    BountyNotInProgress = 5,
+    BountyHasNoAssignee = 6,
+    RewardMustBePositive = 7,
+    RewardBelowMinimum = 8,
+    NotBountyCreator = 9,
+    VerifierCannotBeAssignee = 10,
+    CreatorCannotClaim = 11,
+    ContributorHasActiveClaim = 12,
+    BountyIsDisputed = 13,
+    BountyDeadlinePassed = 14,
+    BountyNoDeadline = 15,
+    DeadlineNotPassed = 16,
+    ReputationTooLow = 17,
+    TooManyTags = 18,
+    MaxAssigneesMustBePositive = 19,
+    OnlyCreatorOrAssigneeCanDispute = 20,
+    VerifierNotAuthorized = 21,
+    AlreadyApproved = 22,
+    BountyNotDisputed = 23,
+    NotArbitrator = 24,
+    ApprovalThresholdExceedsVerifiers = 25,
+    InvalidRewardToken = 26,
+    InvalidStatus = 27,
+    InvalidTag = 28,
+    InvalidResolution = 29,
+    MilestoneAlreadyCompleted = 30,
+    NotAllMilestonesCompleted = 31,
+    InvalidMilestoneIndex = 32,
+    MilestoneRewardsMismatch = 33,
+    MilestoneRewardMustBePositive = 34,
+    TooManyMilestones = 35,
+    RewardAmountOverflow = 36,
+    MetadataEmpty = 37,
+    NotAssignee = 38,
+    AmountMustBePositive = 39,
+    SubmissionRequired = 40,
+    DuplicateTag = 41,
+    CreatorLimitReached = 42,
+    NotAdmin = 43,
+    ClaimCooldownActive = 44,
+    OnlyPartyCanAddEvidence = 45,
+    EvidenceLimitReached = 46,
+    DisputeAlreadyResolved = 47,
+    NoPendingResolution = 48,
+    AppealWindowClosed = 49,
+    AlreadyAppealed = 50,
+    FinalizeTooEarly = 51,
+    ClaimWindowNotElapsed = 52,
+    NoActiveClaim = 53,
+    MilestoneDeadlineInvalid = 54,
+    MilestoneDeadlinePassed = 55,
+    AdminAlreadySet = 56,
+    RewardTokenNotAllowed = 57,
     /// Internal storage invariant violated (e.g. a status index page that
     /// should contain the bounty being removed turned out to be empty).
     /// Surfacing this as a typed error rather than panicking on an unwrap
     /// keeps the failure mode a catchable contract error instead of an
     /// opaque host trap.
-    CorruptedIndex,
-    NotPendingAdmin,
-    NotPendingOwner,
-    OwnerCannotBeAssignee,
+    CorruptedIndex = 58,
+    NotPendingAdmin = 59,
+    NotPendingOwner = 60,
+    OwnerCannotBeAssignee = 61,
     /// `transfer_bounty_ownership` named the current creator as new owner (#1193).
-    OwnerCannotBeCreator,
+    OwnerCannotBeCreator = 63,
     /// `cancel_bounty_ownership_transfer` called with no pending transfer (#1193).
-    NoPendingOwner,
+    NoPendingOwner = 64,
     /// A state-mutating entrypoint was called while the admin has the
     /// contract paused.
-    ContractPaused,
+    ContractPaused = 62,
 }
 
-/// Convert a `ContractError` to its canonical panic message and panic.
-// The one sanctioned panic: every typed contract error funnels through here.
-#[allow(clippy::panic)]
-#[inline(never)]
-pub fn fail(e: ContractError) -> ! {
-    panic!("{}", message(e))
-}
-
+/// Convert a `ContractError` to its canonical human-readable message.
+///
+/// Retained for tests and documentation only; contract logic must return the
+/// typed error rather than trapping with this string.
 pub const fn message(e: ContractError) -> &'static str {
     match e {
         ContractError::BountyNotFound => "bounty not found",
@@ -127,6 +135,8 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::NotAllMilestonesCompleted => "not all milestones are completed",
         ContractError::InvalidMilestoneIndex => "invalid milestone index",
         ContractError::MilestoneRewardsMismatch => "milestone rewards do not sum to reward_amount",
+        ContractError::MilestoneRewardMustBePositive => "milestone reward must be positive",
+        ContractError::TooManyMilestones => "too many milestones",
         ContractError::RewardAmountOverflow => "reward amount arithmetic overflow",
         ContractError::MetadataEmpty => "metadata must not be empty",
         ContractError::NotAssignee => "caller is not an assignee of this bounty",
@@ -151,6 +161,11 @@ pub const fn message(e: ContractError) -> &'static str {
             "milestone deadlines must be non-decreasing and not exceed the bounty deadline"
         }
         ContractError::MilestoneDeadlinePassed => "milestone deadline has passed",
+        ContractError::MilestoneDeadlineExpired => {
+            "an uncompleted milestone deadline has already expired"
+        }
+        ContractError::TooManySponsors => "maximum number of sponsors per bounty reached",
+        ContractError::SponsorAmountTooLow => "sponsor amount is below the minimum allowed",
         ContractError::AdminAlreadySet => "admin has already been initialized",
         ContractError::RewardTokenNotAllowed => "reward_token is not on the admin allowlist",
         ContractError::CorruptedIndex => "internal storage index invariant violated",

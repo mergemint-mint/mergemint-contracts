@@ -1,16 +1,21 @@
 // mergemint-backend/src/validation.rs
 //
 // Input validation rules that mirror `app/src/lib/validation.ts` on the
-// frontend. Both sides enforce the same reward-amount and description-length
-// rules independently (the frontend for fast UI feedback, the backend as the
-// authoritative check before a bounty is persisted); `validation-parity.json`
-// at the repo root is the shared fixture the `#[cfg(test)]` module below uses
-// to assert the two never drift apart.
+// frontend. Both sides enforce the same reward-amount, title-symbol, and
+// description-length rules independently (the frontend for fast UI feedback,
+// the backend as the authoritative check before a bounty is persisted);
+// `validation-parity.json` at the repo root is the shared fixture the
+// `#[cfg(test)]` module below uses to assert the two never drift apart.
 
-/// On-chain title/description fields are stored as Soroban Symbols, which cap
-/// out at 32 characters. Mirrors `SYMBOL_MAX_LENGTH` in
+/// On-chain `BountyMeta.title` is stored as a Soroban `Symbol`, which caps out
+/// at 32 characters. Mirrors `SYMBOL_MAX_LENGTH` in
 /// `app/src/lib/validation.ts`.
 pub const SYMBOL_MAX_LENGTH: usize = 32;
+
+/// `BountyMeta.description` is a UTF-8 `String` (not a `Symbol`), so it is
+/// bounded by a character count rather than the 32-char symbol cap. Mirrors
+/// `DESCRIPTION_MAX_LENGTH` in `app/src/lib/validation.ts`.
+pub const DESCRIPTION_MAX_LENGTH: usize = 280;
 
 /// Mirrors the frontend's `REWARD_AMOUNT_REGEX` (`^\d+(\.\d{1,7})?$`) plus the
 /// `parseFloat(value) > 0` strictly-positive check.
@@ -44,11 +49,23 @@ pub fn is_valid_reward_amount(value: &str) -> bool {
     !(whole_is_zero && fraction_is_zero)
 }
 
-/// Mirrors the frontend's `isValidDescriptionLength`: non-empty once trimmed,
-/// and no longer than [`SYMBOL_MAX_LENGTH`].
-pub fn is_valid_description_length(value: &str) -> bool {
+/// Mirrors the frontend's `isValidTitle`: a Soroban `Symbol` must be 1–32
+/// characters drawn from `[a-zA-Z0-9_]`.
+pub fn is_valid_title(value: &str) -> bool {
     let trimmed = value.trim();
-    !trimmed.is_empty() && trimmed.len() <= SYMBOL_MAX_LENGTH
+    !trimmed.is_empty()
+        && trimmed.chars().count() <= SYMBOL_MAX_LENGTH
+        && trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Mirrors the frontend's `isValidDescription`: a UTF-8 `String` that is
+/// non-empty once trimmed and no longer than [`DESCRIPTION_MAX_LENGTH`]
+/// characters (counted as Unicode scalar values, not bytes).
+pub fn is_valid_description(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed.chars().count() <= DESCRIPTION_MAX_LENGTH
 }
 
 #[cfg(test)]
@@ -68,8 +85,10 @@ mod tests {
     struct Fixture {
         #[serde(rename = "rewardAmount")]
         reward_amount: Vec<Case>,
-        #[serde(rename = "descriptionLength")]
-        description_length: Vec<Case>,
+        #[serde(rename = "title")]
+        title: Vec<Case>,
+        #[serde(rename = "description")]
+        description: Vec<Case>,
     }
 
     fn load_fixture() -> Fixture {
@@ -96,11 +115,26 @@ mod tests {
     }
 
     #[test]
-    fn description_length_matches_fixture() {
+    fn title_matches_fixture() {
         let fixture = load_fixture();
-        for case in &fixture.description_length {
+        for case in &fixture.title {
             assert_eq!(
-                is_valid_description_length(&case.value),
+                is_valid_title(&case.value),
+                case.valid,
+                "title {:?} expected valid={} ({}), backend disagreed",
+                case.value,
+                case.valid,
+                case.reason
+            );
+        }
+    }
+
+    #[test]
+    fn description_matches_fixture() {
+        let fixture = load_fixture();
+        for case in &fixture.description {
+            assert_eq!(
+                is_valid_description(&case.value),
                 case.valid,
                 "description {:?} expected valid={} ({}), backend disagreed",
                 case.value,

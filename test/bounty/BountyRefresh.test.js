@@ -405,3 +405,69 @@ describe("BountyRefresh task retries", function () {
         expect(task.failed).to.equal(true);
     });
 });
+
+describe("batchRefresh script hardening", function () {
+  const BatchRefreshManager = require("../../scripts/batchRefresh");
+  const addr = "0x1111111111111111111111111111111111111111";
+
+  function makeManager(contract) {
+    const m = new BatchRefreshManager(addr);
+    m.contract = contract;
+    m.retryDelay = 0;
+    return m;
+  }
+
+  it("rejects malformed addresses and bounty IDs before sending txs", async function () {
+    const m = makeManager({});
+    expect(() => m._validateInputs(["not-an-address"], [1])).to.throw(
+      /Invalid contributor address/,
+    );
+    expect(() => m._validateInputs([addr], [0])).to.throw(/positive integer/);
+    expect(() => m._validateInputs([addr], ["abc"])).to.throw(
+      /Invalid bounty ID/,
+    );
+  });
+
+  it("does not call createBatch twice when processing fails and is retried", async function () {
+    let createCalls = 0;
+    let processCalls = 0;
+    const tx = (hash) => ({
+      hash,
+      wait: async () => ({
+        status: 1,
+        events: [{ event: "BatchCreated", args: { batchId: 7n } }],
+      }),
+    });
+    const fn = (impl) => Object.assign(impl, { estimateGas: async () => 100n });
+    const contract = {
+      createBatch: fn(async () => {
+        createCalls++;
+        return tx("0xc");
+      }),
+      processBatchParallel: fn(async () => {
+        processCalls++;
+        if (processCalls === 1) throw new Error("transient");
+        return tx("0xp");
+      }),
+      finalizeBatch: fn(async () => tx("0xf")),
+      getBatch: async () => ({
+        successCount: 1n,
+        failureCount: 0n,
+        isProcessing: false,
+        isCompleted: false,
+      }),
+    };
+    const m = makeManager(contract);
+    const res = await m._processSingleBatch([addr], [1], true, false);
+    expect(createCalls).to.equal(1);
+    expect(processCalls).to.equal(2);
+    expect(res.batchId).to.equal("7");
+  });
+
+  it("throws when BatchCreated log is missing", function () {
+    const m = makeManager({ interface: { parseLog: () => null } });
+    expect(() => m._extractBatchId({ logs: [{}] })).to.throw(
+      /BatchCreated event not found/,
+    );
+  });
+});

@@ -34,6 +34,12 @@
   --mm-disputed-fg: #a31515;
   --mm-cancelled-bg: #eef0f3;
   --mm-cancelled-fg: #5a6270;
+  --mm-submitted-bg: #e8f0fe;
+  --mm-submitted-fg: #1a4bb8;
+  --mm-archived-bg: #eef0f3;
+  --mm-archived-fg: #4a5260;
+  --mm-paused-bg: #fff3d6;
+  --mm-paused-fg: #7a4d00;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -55,6 +61,12 @@
     --mm-disputed-fg: #f2a6a6;
     --mm-cancelled-bg: #2a2d31;
     --mm-cancelled-fg: #9aa2ad;
+    --mm-submitted-bg: #1c2c4c;
+    --mm-submitted-fg: #a8c7fa;
+    --mm-archived-bg: #25282c;
+    --mm-archived-fg: #b6bec9;
+    --mm-paused-bg: #3a2b0f;
+    --mm-paused-fg: #f5cc7a;
   }
 }
 
@@ -170,6 +182,27 @@
 .status-badge--cancelled {
   background: var(--mm-cancelled-bg);
   color: var(--mm-cancelled-fg);
+}
+.status-badge--submitted {
+  background: var(--mm-submitted-bg);
+  color: var(--mm-submitted-fg);
+}
+.status-badge--archived {
+  background: var(--mm-archived-bg);
+  color: var(--mm-archived-fg);
+}
+.status-badge--paused {
+  background: var(--mm-paused-bg);
+  color: var(--mm-paused-fg);
+}
+
+.contract-paused-banner {
+  background: var(--mm-paused-bg);
+  color: var(--mm-paused-fg);
+  border: 1px solid var(--mm-border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 12px 0;
 }
 
 /* CopyButton.tsx */
