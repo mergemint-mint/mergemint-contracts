@@ -23,6 +23,18 @@ pub use crate::errors::*;
 pub use contract::MergeMintContractClient;
 
 #[cfg(test)]
+mod mutation_guard_tests;
+
+#[cfg(test)]
+mod verification_proofs;
+
+#[cfg(test)]
+mod bounty_meta_fuzz_tests;
+
+#[cfg(test)]
+mod archive_lifecycle_tests;
+
+#[cfg(test)]
 mod test;
 
 #[cfg(test)]
