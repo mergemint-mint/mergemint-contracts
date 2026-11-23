@@ -1519,8 +1519,10 @@ mod tests {
 
     #[test]
     fn stale_token_cannot_finalize_a_newer_in_memory_reservation() {
-        let mut store = IdempotencyStore::default();
-        store.in_flight_ttl = Duration::ZERO;
+        let mut store = IdempotencyStore {
+            in_flight_ttl: Duration::ZERO,
+            ..Default::default()
+        };
         let now = Instant::now();
 
         let stale = assert_proceed(store.claim("key", "hash", now));
@@ -1537,9 +1539,11 @@ mod tests {
 
     #[test]
     fn in_memory_idempotency_store_reclaims_expired_entries() {
-        let mut store = IdempotencyStore::default();
-        store.in_flight_ttl = Duration::from_secs(1);
-        store.completed_ttl = Duration::from_secs(2);
+        let mut store = IdempotencyStore {
+            in_flight_ttl: Duration::from_secs(1),
+            completed_ttl: Duration::from_secs(2),
+            ..Default::default()
+        };
         let now = Instant::now();
 
         assert_proceed(store.claim("in-flight", "hash", now));
