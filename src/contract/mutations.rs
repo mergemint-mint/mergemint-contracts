@@ -189,18 +189,45 @@ fn distribute_payout(
         .get(0)
         .ok_or(ContractError::BountyHasNoAssignee)?;
 
+    // Calculate base payouts avoiding integer overflow:
+    // reward_amount * share_bp can exceed i128::MAX when reward_amount is large.
+    // Decomposing via q * share_bp + (r * share_bp) / 10_000 prevents overflow
+    // because r < 10_000 and share_bp <= 10_000, so r * share_bp < 100_000_000.
+    let mut total_distributed: i128 = 0;
+    for (_, share_bp) in assignees.iter() {
+        let q = reward_amount / 10_000_i128;
+        let r = reward_amount % 10_000_i128;
+        let payout = q * (share_bp as i128) + (r * (share_bp as i128)) / 10_000_i128;
+        total_distributed += payout;
+    }
+
+    // Deterministically allocate integer-division remainder dust to the primary assignee
+    // so sum(payouts) == reward_amount and no tokens remain stranded in escrow.
+    let dust = reward_amount - total_distributed;
+
+    let mut is_primary = true;
     for (assignee, share_bp) in assignees.iter() {
-        let payout = reward_amount * (share_bp as i128) / 10_000_i128;
-        token.transfer(from, &assignee, &payout);
+        let q = reward_amount / 10_000_i128;
+        let r = reward_amount % 10_000_i128;
+        let mut payout = q * (share_bp as i128) + (r * (share_bp as i128)) / 10_000_i128;
+        if is_primary {
+            payout += dust;
+            is_primary = false;
+        }
+
+        if payout > 0 {
+            token.transfer(from, &assignee, &payout);
+        }
 
         let mut contrib = storage::get_contributor(env, &assignee)
             .unwrap_or_else(|| Contributor::new(assignee.clone()));
         set_reputation(env, &mut contrib, &assignee, 10, "completion");
-        contrib.total_earned += payout;
+        contrib.total_earned = contrib
+            .total_earned
+            .checked_add(payout)
+            .unwrap_or_else(|| fail(ContractError::RewardAmountOverflow));
         contrib.contribution_count += 1;
-        if contrib.active_claims > 0 {
-            contrib.active_claims -= 1;
-        }
+        decrement_active_claims(&mut contrib);
         storage::store_contributor(env, &assignee, &contrib);
         // #1216: clear the O(1) active-bounty mapping on completion.
         storage::remove_contributor_active_bounty(env, &assignee);
@@ -394,10 +421,17 @@ fn apply_dispute_resolution(
             );
         } else {
             let token = TokenClient::new(&env, &bounty.reward_token);
+            distribute_payout(
+                &env,
+                &bounty_id,
+                &bounty.assignees,
+                &arbitrator,
+                &token,
+                bounty.reward_amount,
+            );
 
             for (assignee, share_bp) in bounty.assignees.iter() {
                 let payout = bounty.reward_amount * (share_bp as i128) / 10_000_i128;
-                token.transfer(&arbitrator, &assignee, &payout);
 
                 let mut contrib = storage::get_contributor(&env, &assignee)
                     .unwrap_or_else(|| Contributor::new(assignee.clone()));
@@ -491,7 +525,11 @@ impl MergeMintContract {
     /// * If `milestones` is non-empty and their rewards do not sum to `reward_amount`.
     ///
     /// # Authorization
-    /// Requires auth from `creator`.
+    /// Requires auth from `creator`. `creator.require_auth()` is the **first**
+    /// operation in this function: no pause check, storage read, TTL
+    /// extension, or cross-contract `validate_reward_token` probe runs before
+    /// authentication succeeds, so unauthenticated callers cannot trigger
+    /// cross-contract invocations or persistent storage writes.
     pub fn create_bounty(
         env: Env,
         creator: Address,
@@ -507,6 +545,9 @@ impl MergeMintContract {
         approval_threshold: u32,
         milestones: Vec<Milestone>,
     ) -> Result<BountyId, ContractError> {
+        // AUTH: must be first — no storage reads, pause checks, or
+        // cross-contract invocations before this line.
+        creator.require_auth();
         require_not_paused(&env)?;
         if reward_amount <= 0 {
             return Err(ContractError::RewardMustBePositive);
@@ -539,10 +580,20 @@ impl MergeMintContract {
             return Err(ContractError::RewardTokenNotAllowed);
         }
 
+        if milestones.len() > MAX_MILESTONES {
+            fail(ContractError::TooManyMilestones);
+        }
+
         if !milestones.is_empty() {
             let mut total: i128 = 0;
             let mut previous_deadline: Option<u32> = None;
             for m in milestones.iter() {
+                if m.reward <= 0 {
+                    fail(ContractError::MilestoneRewardMustBePositive);
+                }
+                if m.completed {
+                    fail(ContractError::MilestoneAlreadyCompleted);
+                }
                 total = match total.checked_add(m.reward) {
                     Some(sum) => sum,
                     None => return Err(ContractError::RewardAmountOverflow),
@@ -574,8 +625,6 @@ impl MergeMintContract {
                 return Err(ContractError::BountyDeadlinePassed);
             }
         }
-
-        creator.require_auth();
 
         let limit = storage::get_creator_open_limit(&env);
         if limit > 0 && storage::get_creator_open_count(&env, &creator) >= limit {
@@ -1771,6 +1820,10 @@ const MAX_TAGS: u32 = 5;
     /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
     /// * If the bounty is not completed or cancelled (`ContractError::InvalidStatus`).
     /// * If the grace period has not yet elapsed (`ContractError::DeadlineNotPassed`).
+    ///
+    /// # Authorization
+    /// No caller auth is required (anyone may archive), but the pause check
+    /// runs before any storage read.
     pub fn archive_bounty(env: Env, bounty_id: BountyId) {
         require_not_paused(&env);
         let bounty = match storage::get_bounty(&env, &bounty_id) {

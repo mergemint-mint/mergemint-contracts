@@ -1,4 +1,12 @@
-export type BountyStatus = 'open' | 'claimed' | 'disputed' | 'completed' | 'cancelled';
+export type BountyStatus =
+  | 'open'
+  | 'claimed'
+  | 'submitted'
+  | 'disputed'
+  | 'completed'
+  | 'cancelled'
+  | 'archived'
+  | 'paused';
 
 /** A token listed on the backend reward-token allowlist. */
 export interface RewardToken {
@@ -30,6 +38,13 @@ export interface Bounty {
     reward: string;
     completed: boolean;
   }>;
+  /** Optional multi-sig verifier addresses and approval threshold. */
+  verifiers?: string[];
+  approvalThreshold?: number;
+  /** Optional sponsors list. */
+  sponsors?: Array<{ address: string; amount: string }>;
+  /** Whether the contract is currently paused by the admin. */
+  paused?: boolean;
 }
 
 export interface BountyPage {
