@@ -77,6 +77,18 @@ fn extend<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
         .extend_ttl(key, STORAGE_TTL_THRESHOLD, STORAGE_TTL_LEDGERS);
 }
 
+/// Refresh the TTL of the contract's instance storage.
+///
+/// Instance storage holds global configuration (admin, pause flag, limits,
+/// windows, allowlist, ...). Unlike persistent entries it is not extended by
+/// [`extend`], so every instance read/write must bump it explicitly or the
+/// whole instance entry can silently expire and archive on-chain.
+fn extend_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(STORAGE_TTL_THRESHOLD, STORAGE_TTL_LEDGERS);
+}
+
 // ── BountyCount ───────────────────────────────────────────────────────────────
 
 /// Returns the total number of bounties ever created.
@@ -1245,6 +1257,7 @@ pub fn decrement_bounties_by_creator_count(env: &Env, creator: &Address) {
 // ── Pending admin / bounty owner (two-step transfers) ─────────────────────────
 
 pub fn get_pending_admin(env: &Env) -> Option<Address> {
+    extend_instance(env);
     env.storage().instance().get(&DataKey::PendingAdmin)
 }
 
@@ -1252,10 +1265,12 @@ pub fn set_pending_admin(env: &Env, pending: &Address) {
     env.storage()
         .instance()
         .set(&DataKey::PendingAdmin, pending);
+    extend_instance(env);
 }
 
 pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
+    extend_instance(env);
 }
 
 // ── Dispute arbitrator (#1195) ────────────────────────────────────────────────
@@ -1275,6 +1290,7 @@ pub fn set_arbitrator(env: &Env, arbitrator: &Option<Address>) {
 
 /// Whether the admin has paused the contract. Defaults to `false`.
 pub fn is_paused(env: &Env) -> bool {
+    extend_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::Paused)
@@ -1283,6 +1299,7 @@ pub fn is_paused(env: &Env) -> bool {
 
 pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&DataKey::Paused, &paused);
+    extend_instance(env);
 }
 
 pub fn get_pending_owner(env: &Env, bounty_id: &BountyId) -> Option<Address> {
@@ -1310,6 +1327,7 @@ pub fn clear_pending_owner(env: &Env, bounty_id: &BountyId) {
 
 /// Admin-configured minimum reward for `token`; `0` when never set.
 pub fn get_min_reward(env: &Env, token: &Address) -> i128 {
+    extend_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::MinReward(token.clone()))
@@ -1320,6 +1338,7 @@ pub fn set_min_reward(env: &Env, token: &Address, amount: i128) {
     env.storage()
         .instance()
         .set(&DataKey::MinReward(token.clone()), &amount);
+    extend_instance(env);
 }
 
 // ── Token bounties index — paged ─────────────────────────────────────────────
@@ -1887,12 +1906,14 @@ fn append_contributor_history(env: &Env, address: &Address, bounty_id: &BountyId
 
 /// Returns the contract admin, if one has been set.
 pub fn get_admin(env: &Env) -> Option<Address> {
+    extend_instance(env);
     env.storage().instance().get(&DataKey::Admin)
 }
 
 /// Persist the contract admin address.
 pub fn set_admin(env: &Env, admin: &Address) {
     env.storage().instance().set(&DataKey::Admin, admin);
+    extend_instance(env);
 }
 
 // ── Creator open-bounty cap ───────────────────────────────────────────────────
@@ -1900,6 +1921,7 @@ pub fn set_admin(env: &Env, admin: &Address) {
 /// Returns the configured cap on concurrent open+claimed bounties per
 /// creator. `0` means unlimited (the default when never configured).
 pub fn get_creator_open_limit(env: &Env) -> u32 {
+    extend_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::CreatorOpenLimit)
@@ -1911,6 +1933,7 @@ pub fn set_creator_open_limit(env: &Env, limit: u32) {
     env.storage()
         .instance()
         .set(&DataKey::CreatorOpenLimit, &limit);
+    extend_instance(env);
 }
 
 /// Returns the current count of open+claimed bounties for `creator`.
@@ -1949,6 +1972,7 @@ pub fn decrement_creator_open_count(env: &Env, creator: &Address) {
 /// Returns the configured claim cooldown, in ledgers. `0` disables it
 /// (the default).
 pub fn get_claim_cooldown(env: &Env) -> u32 {
+    extend_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::ClaimCooldown)
@@ -1960,6 +1984,7 @@ pub fn set_claim_cooldown(env: &Env, ledgers: u32) {
     env.storage()
         .instance()
         .set(&DataKey::ClaimCooldown, &ledgers);
+    extend_instance(env);
 }
 
 /// Record that `contributor` unclaimed `bounty_id` at the current ledger
@@ -1996,6 +2021,19 @@ pub fn get_dispute_evidence(env: &Env, bounty_id: &BountyId) -> Vec<soroban_sdk:
     result.unwrap_or_else(|| Vec::new(env))
 }
 
+/// Returns `true` when `hash` is already present in `bounty_id`'s dispute
+/// evidence list. Read-only: performs no writes, so callers can reject
+/// duplicates before consuming a party's `MAX_DISPUTE_EVIDENCE` quota.
+pub fn has_dispute_evidence(env: &Env, bounty_id: &BountyId, hash: &soroban_sdk::BytesN<32>) -> bool {
+    let evidence = get_dispute_evidence(env, bounty_id);
+    for existing in evidence.iter() {
+        if existing == *hash {
+            return true;
+        }
+    }
+    false
+}
+
 /// Append `hash` to `bounty_id`'s dispute evidence list.
 pub fn append_dispute_evidence(env: &Env, bounty_id: &BountyId, hash: &soroban_sdk::BytesN<32>) {
     let mut evidence = get_dispute_evidence(env, bounty_id);
@@ -2010,6 +2048,7 @@ pub fn append_dispute_evidence(env: &Env, bounty_id: &BountyId, hash: &soroban_s
 /// Returns the configured appeal window, in ledgers. `0` keeps the
 /// immediate-payout behaviour (the default).
 pub fn get_appeal_window(env: &Env) -> u32 {
+    extend_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::AppealWindow)
@@ -2021,6 +2060,7 @@ pub fn set_appeal_window(env: &Env, ledgers: u32) {
     env.storage()
         .instance()
         .set(&DataKey::AppealWindow, &ledgers);
+    extend_instance(env);
 }
 
 /// Returns the pending (undecided) dispute resolution for `bounty_id`, if any.
@@ -2070,6 +2110,7 @@ pub fn set_dispute_appealed(env: &Env, bounty_id: &BountyId) {
 pub const DEFAULT_CLAIM_WINDOW: u32 = 120_960;
 
 pub fn get_claim_window(env: &Env) -> u32 {
+    extend_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::ClaimWindow)
@@ -2078,6 +2119,7 @@ pub fn get_claim_window(env: &Env) -> u32 {
 
 pub fn set_claim_window(env: &Env, window: u32) {
     env.storage().instance().set(&DataKey::ClaimWindow, &window);
+    extend_instance(env);
 }
 
 pub fn get_claimed_at_ledger(env: &Env, bounty_id: &BountyId) -> Option<u32> {
@@ -2104,6 +2146,7 @@ pub fn clear_claimed_at_ledger(env: &Env, bounty_id: &BountyId) {
 pub const DEFAULT_REPUTATION_PENALTY: u32 = 10;
 
 pub fn get_reputation_penalty(env: &Env) -> u32 {
+    extend_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::ReputationPenalty)
@@ -2114,6 +2157,7 @@ pub fn set_reputation_penalty(env: &Env, penalty: u32) {
     env.storage()
         .instance()
         .set(&DataKey::ReputationPenalty, &penalty);
+    extend_instance(env);
 }
 
 // ── Reward token allowlist ────────────────────────────────────────────────────
@@ -2126,6 +2170,7 @@ pub fn set_reputation_penalty(env: &Env, penalty: u32) {
 // in-flight bounties denominated in a removed token keep paying out normally.
 
 pub fn is_reward_token_allowed(env: &Env, token: &Address) -> bool {
+    extend_instance(env);
     if !is_reward_token_allowlist_enabled(env) {
         return true;
     }
@@ -2138,6 +2183,7 @@ pub fn is_reward_token_allowed(env: &Env, token: &Address) -> bool {
 /// The allowlist is opt-in: it is enforced only after the admin has added at
 /// least one token. Removing tokens later never disables it again.
 pub fn is_reward_token_allowlist_enabled(env: &Env) -> bool {
+    extend_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::RewardTokenAllowlistEnabled)
@@ -2151,10 +2197,12 @@ pub fn add_allowed_reward_token(env: &Env, token: &Address) {
     env.storage()
         .instance()
         .set(&DataKey::RewardTokenAllowlistEnabled, &true);
+    extend_instance(env);
 }
 
 pub fn remove_allowed_reward_token(env: &Env, token: &Address) {
     env.storage()
         .instance()
         .remove(&DataKey::AllowedRewardToken(token.clone()));
+    extend_instance(env);
 }
