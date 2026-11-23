@@ -7,6 +7,7 @@ import {
   TESTNET,
 } from "./index";
 import { MergeMintSdkError } from "./types";
+import { parseSimulationError } from "./errors";
 
 describe("symbolToScVal", () => {
   it("throws for a 33-character input", () => {
@@ -181,5 +182,32 @@ describe("MergeMintSDK constructor typed errors", () => {
       expect(err).toBeInstanceOf(MergeMintSdkError);
       expect((err as MergeMintSdkError).code).toBe("INVALID_RPC_URL");
     }
+  });
+});
+
+describe("parseSimulationError ContractError mapping", () => {
+  // Table of [contract error message, expected SDK error code].
+  const cases: Array<[string, string]> = [
+    ["ContractPaused", "CONTRACT_PAUSED"],
+    ["NotPendingAdmin", "NOT_PENDING_ADMIN"],
+    ["NotPendingOwner", "NOT_PENDING_OWNER"],
+    ["OwnerCannotBeAssignee", "OWNER_CANNOT_BE_ASSIGNEE"],
+    ["RewardTokenNotAllowed", "REWARD_TOKEN_NOT_ALLOWED"],
+    ["ClaimCooldownActive", "CLAIM_COOLDOWN_ACTIVE"],
+    ["AppealWindowClosed", "APPEAL_WINDOW_CLOSED"],
+    ["MilestoneDeadlinePassed", "MILESTONE_DEADLINE_PASSED"],
+    ["CorruptedIndex", "CORRUPTED_INDEX"],
+  ];
+
+  it.each(cases)("maps %s to %s", (message, expectedCode) => {
+    const err = parseSimulationError(`HostError: ${message}`);
+    expect(err).toBeInstanceOf(MergeMintSdkError);
+    expect((err as MergeMintSdkError).code).toBe(expectedCode);
+  });
+
+  it("falls back to SIMULATION_FAILED for an unknown message", () => {
+    const err = parseSimulationError("HostError: SomethingUnknown");
+    expect(err).toBeInstanceOf(MergeMintSdkError);
+    expect((err as MergeMintSdkError).code).toBe("SIMULATION_FAILED");
   });
 });

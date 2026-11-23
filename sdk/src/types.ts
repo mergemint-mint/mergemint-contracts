@@ -192,6 +192,76 @@ export interface FeeBumpRetryOptions {
   feeMultiplier: number;
 }
 
+/**
+ * Canonical `ContractError` variants defined in `src/errors.rs`.
+ *
+ * Each member mirrors a `#[contracterror]` variant so callers can switch on a
+ * typed code instead of parsing opaque simulation failures.  The string value
+ * is the canonical contract error message (the `Display`/`Debug` name emitted
+ * by the contract), which `parseSimulationError` matches against.
+ */
+export type ContractErrorCode =
+  | 'CONTRACT_PAUSED'
+  | 'NOT_PENDING_ADMIN'
+  | 'NOT_PENDING_OWNER'
+  | 'OWNER_CANNOT_BE_ASSIGNEE'
+  | 'REWARD_TOKEN_NOT_ALLOWED'
+  | 'CLAIM_COOLDOWN_ACTIVE'
+  | 'APPEAL_WINDOW_CLOSED'
+  | 'MILESTONE_DEADLINE_PASSED'
+  | 'CORRUPTED_INDEX'
+  | 'UNAUTHORIZED'
+  | 'NOT_FOUND'
+  | 'INVALID_ARGUMENT'
+  | 'INVALID_STATE'
+  | 'ALREADY_INITIALIZED'
+  | 'NOT_INITIALIZED'
+  | 'BOUNTY_NOT_FOUND'
+  | 'BOUNTY_CLOSED'
+  | 'BOUNTY_EXPIRED'
+  | 'BOUNTY_NOT_OPEN'
+  | 'BOUNTY_NOT_CLAIMED'
+  | 'BOUNTY_ALREADY_CLAIMED'
+  | 'BOUNTY_FULL'
+  | 'DEADLINE_PASSED'
+  | 'DEADLINE_NOT_PASSED'
+  | 'INVALID_DEADLINE'
+  | 'INSUFFICIENT_REPUTATION'
+  | 'INSUFFICIENT_REWARD'
+  | 'INSUFFICIENT_BALANCE'
+  | 'INVALID_REWARD_AMOUNT'
+  | 'INVALID_REWARD_TOKEN'
+  | 'INVALID_SHARE'
+  | 'INVALID_THRESHOLD'
+  | 'INVALID_MILESTONE'
+  | 'MILESTONE_NOT_FOUND'
+  | 'MILESTONE_ALREADY_COMPLETED'
+  | 'MILESTONE_NOT_COMPLETED'
+  | 'INVALID_VERIFIER'
+  | 'VERIFIER_ALREADY_SET'
+  | 'VERIFIER_NOT_FOUND'
+  | 'APPROVAL_THRESHOLD_NOT_MET'
+  | 'ALREADY_APPROVED'
+  | 'NOT_APPROVED'
+  | 'APPEAL_NOT_FOUND'
+  | 'APPEAL_ALREADY_RESOLVED'
+  | 'APPEAL_WINDOW_ACTIVE'
+  | 'INVALID_APPEAL'
+  | 'DISPUTE_NOT_FOUND'
+  | 'DISPUTE_ALREADY_RESOLVED'
+  | 'INVALID_DISPUTE'
+  | 'CONTRIBUTOR_NOT_FOUND'
+  | 'CONTRIBUTOR_ALREADY_EXISTS'
+  | 'CONTRIBUTOR_INACTIVE'
+  | 'MAX_ASSIGNEES_REACHED'
+  | 'MAX_TAGS_EXCEEDED'
+  | 'TAG_TOO_LONG'
+  | 'TITLE_TOO_LONG'
+  | 'DESCRIPTION_TOO_LONG'
+  | 'SUBMISSION_TOO_LONG'
+  | 'ARITHMETIC_OVERFLOW'
+  | 'INVALID_INDEX';
+
 export type MergeMintErrorCode =
   | 'INVALID_CONFIG'
   | 'INVALID_CONTRACT_ID'
@@ -203,7 +273,8 @@ export type MergeMintErrorCode =
   | 'NOT_FOUND'
   | 'FEE_BUMP_FAILED'
   | 'INCOMPATIBLE_CONTRACT'
-  | 'VERSION_CHECK_FAILED';
+  | 'VERSION_CHECK_FAILED'
+  | ContractErrorCode;
 
 export class MergeMintSdkError extends Error {
   public readonly code: MergeMintErrorCode;
