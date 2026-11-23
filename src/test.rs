@@ -402,134 +402,13 @@ fn test_complete_bounty_after_assignee_dispute_panics() {
 }
 
 // ===========================================================================
-// Issue 4 — ContractError enum (smoke-test the canonical messages)
+// Issue 4 / #1224 — ContractError typed numeric error codes
 // ===========================================================================
 
+/// Every `ContractError` variant must map to a distinct, stable `u32` code.
 #[test]
-fn test_contract_error_messages() {
-    use crate::errors::{message, ContractError};
-
-    assert_eq!(message(ContractError::BountyNotFound), "bounty not found");
-    assert_eq!(
-        message(ContractError::BountyAlreadyAssigned),
-        "bounty already assigned"
-    );
-    assert_eq!(
-        message(ContractError::AlreadyClaimed),
-        "bounty already claimed by contributor"
-    );
-    assert_eq!(message(ContractError::BountyNotOpen), "bounty not open");
-    assert_eq!(
-        message(ContractError::BountyNotInProgress),
-        "bounty is not in progress"
-    );
-    assert_eq!(
-        message(ContractError::BountyHasNoAssignee),
-        "bounty has no assignee"
-    );
-    assert_eq!(
-        message(ContractError::RewardMustBePositive),
-        "reward_amount must be positive"
-    );
-    assert_eq!(
-        message(ContractError::NotBountyCreator),
-        "not bounty creator"
-    );
-    assert_eq!(
-        message(ContractError::VerifierCannotBeAssignee),
-        "verifier cannot be the assignee"
-    );
-    assert_eq!(
-        message(ContractError::CreatorCannotClaim),
-        "creator cannot claim"
-    );
-    assert_eq!(
-        message(ContractError::ContributorHasActiveClaim),
-        "contributor already has an active claim"
-    );
-    assert_eq!(
-        message(ContractError::BountyIsDisputed),
-        "bounty is disputed"
-    );
-    assert_eq!(message(ContractError::TooManyTags), "too many tags");
-    assert_eq!(
-        message(ContractError::OnlyCreatorOrAssigneeCanDispute),
-        "only creator or assignee can raise dispute"
-    );
-    assert_eq!(
-        message(ContractError::DeadlineNotPassed),
-        "deadline has not passed"
-    );
-    assert_eq!(
-        message(ContractError::BountyDeadlinePassed),
-        "bounty deadline passed"
-    );
-    assert_eq!(
-        message(ContractError::BountyNoDeadline),
-        "bounty has no deadline"
-    );
-    assert_eq!(
-        message(ContractError::ReputationTooLow),
-        "contributor reputation is too low"
-    );
-    assert_eq!(
-        message(ContractError::VerifierNotAuthorized),
-        "verifier is not in the required verifiers list"
-    );
-    assert_eq!(
-        message(ContractError::AlreadyApproved),
-        "verifier has already approved this bounty"
-    );
-    assert_eq!(
-        message(ContractError::BountyNotDisputed),
-        "bounty is not in disputed status"
-    );
-    assert_eq!(
-        message(ContractError::NotArbitrator),
-        "caller is not authorized to resolve this dispute"
-    );
-    assert_eq!(
-        message(ContractError::RewardBelowMinimum),
-        "reward_amount is below the minimum allowed"
-    );
-    assert_eq!(
-        message(ContractError::MaxAssigneesMustBePositive),
-        "max_assignees must be at least 1"
-    );
-    assert_eq!(
-        message(ContractError::ApprovalThresholdExceedsVerifiers),
-        "approval_threshold cannot exceed the number of required_verifiers"
-    );
-    assert_eq!(
-        message(ContractError::InvalidRewardToken),
-        "invalid reward_token address"
-    );
-    assert_eq!(
-        message(ContractError::MilestoneAlreadyCompleted),
-        "milestone is already completed"
-    );
-    assert_eq!(
-        message(ContractError::NotAllMilestonesCompleted),
-        "not all milestones are completed"
-    );
-    assert_eq!(
-        message(ContractError::InvalidMilestoneIndex),
-        "invalid milestone index"
-    );
-    assert_eq!(
-        message(ContractError::MilestoneRewardsMismatch),
-        "milestone rewards do not sum to reward_amount"
-    );
-    assert_eq!(
-        message(ContractError::MetadataEmpty),
-        "metadata must not be empty"
-    );
-}
-
-/// Every `ContractError` variant must map to a distinct panic message.
-#[test]
-fn test_contract_error_messages_are_unique() {
-    use crate::errors::{message, ContractError};
+fn test_contract_error_codes_are_unique() {
+    use crate::errors::ContractError;
 
     let variants = [
         ContractError::BountyNotFound,
@@ -561,28 +440,151 @@ fn test_contract_error_messages_are_unique() {
         ContractError::NotAllMilestonesCompleted,
         ContractError::InvalidMilestoneIndex,
         ContractError::MilestoneRewardsMismatch,
+        ContractError::MetadataEmpty,
     ];
 
     for (i, left) in variants.iter().enumerate() {
         for right in variants.iter().skip(i + 1) {
             assert_ne!(
-                message(*left),
-                message(*right),
-                "duplicate ContractError message between variants"
+                *left as u32, *right as u32,
+                "duplicate ContractError discriminant between variants"
             );
         }
     }
 }
 
+/// Extract the numeric `ContractError` code from a failed `try_*` invocation.
+fn error_code<T, E>(result: Result<T, Result<E, soroban_sdk::InvokeError>>) -> u32
+where
+    E: soroban_sdk::TryFromVal<Env, Val>,
+{
+    match result {
+        Ok(_) => panic!("expected contract error, call succeeded"),
+        Err(Ok(e)) => u32::try_from_val(&Env::default(), &Val::try_from_val(&Env::default(), &e).unwrap())
+            .unwrap_or_else(|_| panic!("error is not a numeric contract error")),
+        Err(Err(invoke)) => match invoke {
+            soroban_sdk::InvokeError::Contract(code) => code,
+            other => panic!("unexpected invoke error: {other:?}"),
+        },
+    }
+}
+
+/// `try_*` client methods surface the exact numeric `ContractError` codes.
+#[test]
+fn test_typed_error_codes_via_try_client() {
+    use crate::errors::ContractError;
+
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // BountyNotFound
+    let missing = fake_bounty_id(&env, 1234);
+    assert_eq!(
+        error_code(client.try_get_bounty(&missing)),
+        ContractError::BountyNotFound as u32
+    );
+
+    // RewardMustBePositive
+    assert_eq!(
+        error_code(client.try_create_bounty(
+            &creator,
+            &Symbol::new(&env, "zero_rew"),
+            &String::from_str(&env, "desc"),
+            &0,
+            &create_token_and_mint(&env, &creator, &contract_id, 0),
+            &0,
+            &None,
+            &Vec::new(&env),
+            &1,
+            &None,
+            &1,
+            &Vec::new(&env),
+        )),
+        ContractError::RewardMustBePositive as u32
+    );
+
+    // CreatorCannotClaim
+    let bounty_id = make_bounty(&client, &env, &creator, "typed_err", None);
+    assert_eq!(
+        error_code(client.try_claim_bounty(&creator, &bounty_id)),
+        ContractError::CreatorCannotClaim as u32
+    );
+
+    // AlreadyClaimed
+    client.claim_bounty(&contributor, &bounty_id);
+    assert_eq!(
+        error_code(client.try_claim_bounty(&contributor, &bounty_id)),
+        ContractError::AlreadyClaimed as u32
+    );
+
+    // BountyNotOpen
+    assert_eq!(
+        error_code(client.try_cancel_bounty(&creator, &bounty_id)),
+        ContractError::BountyNotOpen as u32
+    );
+
+    // NotBountyCreator
+    let other = Address::generate(&env);
+    let open_id = make_bounty(&client, &env, &creator, "typed_err2", None);
+    assert_eq!(
+        error_code(client.try_cancel_bounty(&other, &open_id)),
+        ContractError::NotBountyCreator as u32
+    );
+
+    // TooManyTags
+    let mut tags: Vec<Symbol> = Vec::new(&env);
+    for _ in 0..6 {
+        tags.push_back(Symbol::new(&env, "bug"));
+    }
+    assert_eq!(
+        error_code(client.try_create_bounty(
+            &creator,
+            &Symbol::new(&env, "overtags"),
+            &String::from_str(&env, "desc"),
+            &1000,
+            &create_token_and_mint(&env, &creator, &contract_id, 0),
+            &0,
+            &None,
+            &tags,
+            &1,
+            &None,
+            &1,
+            &Vec::new(&env),
+        )),
+        ContractError::TooManyTags as u32
+    );
+
+    // InvalidRewardToken
+    assert_eq!(
+        error_code(client.try_create_bounty(
+            &creator,
+            &Symbol::new(&env, "bad_token"),
+            &String::from_str(&env, "desc"),
+            &1000,
+            &Address::generate(&env),
+            &0,
+            &None,
+            &Vec::new(&env),
+            &1,
+            &None,
+            &1,
+            &Vec::new(&env),
+        )),
+        ContractError::InvalidRewardToken as u32
+    );
+}
+
 /// create_bounty rejects non-token reward_token addresses (issue #649).
 #[test]
-#[should_panic(expected = "invalid reward_token address")]
 fn test_create_bounty_rejects_invalid_reward_token() {
+    use crate::errors::ContractError;
+
     let (env, creator, _contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
 
-    client.create_bounty(
+    let res = client.try_create_bounty(
         &creator,
         &Symbol::new(&env, "bad_token"),
         &String::from_str(&env, "desc"),
@@ -596,22 +598,10 @@ fn test_create_bounty_rejects_invalid_reward_token() {
         &1,
         &Vec::new(&env),
     );
-}
-
-/// ContractError::TooManyTags is wired to the correct panic message.
-#[test]
-#[should_panic(expected = "too many tags")]
-fn test_fail_too_many_tags_message() {
-    use crate::errors::{fail, ContractError};
-    fail(ContractError::TooManyTags);
-}
-
-/// ContractError::BountyIsDisputed is wired to the correct panic message.
-#[test]
-#[should_panic(expected = "bounty is disputed")]
-fn test_fail_bounty_is_disputed_message() {
-    use crate::errors::{fail, ContractError};
-    fail(ContractError::BountyIsDisputed);
+    assert_eq!(
+        error_code(res),
+        ContractError::InvalidRewardToken as u32
+    );
 }
 
 // ===========================================================================
@@ -711,15 +701,16 @@ fn test_create_bounty() {
 // Issue 449 — create_bounty rejects non-positive reward_amount
 // ===========================================================================
 
-/// Creating a bounty with reward_amount = 0 must panic.
+/// Creating a bounty with reward_amount = 0 must fail with RewardMustBePositive.
 #[test]
-#[should_panic(expected = "reward_amount must be positive")]
 fn test_create_bounty_rejects_zero_reward() {
+    use crate::errors::ContractError;
+
     let (env, creator, _contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
 
-    client.create_bounty(
+    let res = client.try_create_bounty(
         &creator,
         &Symbol::new(&env, "zero_rew"),
         &String::from_str(&env, "desc"),
@@ -733,17 +724,22 @@ fn test_create_bounty_rejects_zero_reward() {
         &1,
         &Vec::new(&env),
     );
+    assert_eq!(
+        error_code(res),
+        ContractError::RewardMustBePositive as u32
+    );
 }
 
-/// Creating a bounty with a negative reward_amount must panic.
+/// Creating a bounty with a negative reward_amount must fail with RewardMustBePositive.
 #[test]
-#[should_panic(expected = "reward_amount must be positive")]
 fn test_create_bounty_rejects_negative_reward() {
+    use crate::errors::ContractError;
+
     let (env, creator, _contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
 
-    client.create_bounty(
+    let res = client.try_create_bounty(
         &creator,
         &Symbol::new(&env, "neg_rew"),
         &String::from_str(&env, "desc"),
@@ -757,17 +753,23 @@ fn test_create_bounty_rejects_negative_reward() {
         &1,
         &Vec::new(&env),
     );
+    assert_eq!(
+        error_code(res),
+        ContractError::RewardMustBePositive as u32
+    );
 }
 
-/// Creating a bounty with reward_amount below MIN_REWARD_AMOUNT (100) must panic.
+/// Creating a bounty with reward_amount below MIN_REWARD_AMOUNT (100) must fail
+/// with RewardBelowMinimum.
 #[test]
-#[should_panic(expected = "reward_amount is below the minimum allowed")]
 fn test_create_bounty_rejects_below_minimum_reward() {
+    use crate::errors::ContractError;
+
     let (env, creator, _contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
 
-    client.create_bounty(
+    let res = client.try_create_bounty(
         &creator,
         &Symbol::new(&env, "small_rew"),
         &String::from_str(&env, "desc"),
@@ -780,6 +782,10 @@ fn test_create_bounty_rejects_below_minimum_reward() {
         &None,
         &1,
         &Vec::new(&env),
+    );
+    assert_eq!(
+        error_code(res),
+        ContractError::RewardBelowMinimum as u32
     );
 }
 
@@ -854,8 +860,9 @@ fn test_claim_bounty() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected = "creator cannot claim")]
 fn test_creator_cannot_claim_own_bounty() {
+    use crate::errors::ContractError;
+
     let (env, creator, _contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
@@ -874,15 +881,19 @@ fn test_creator_cannot_claim_own_bounty() {
         &1,
         &Vec::new(&env),
     );
-    client.claim_bounty(&creator, &bounty_id);
+    assert_eq!(
+        error_code(client.try_claim_bounty(&creator, &bounty_id)),
+        ContractError::CreatorCannotClaim as u32
+    );
 }
 
 /// The creator self-claim guard fires even when the creator address is
 /// passed through an alias variable, confirming no bypass via indirection.
 /// Regression test for security/prevent-creator-claim.md.
 #[test]
-#[should_panic(expected = "creator cannot claim")]
 fn test_creator_self_claim_guard_no_alias_bypass() {
+    use crate::errors::ContractError;
+
     let (env, creator, _contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
@@ -904,7 +915,10 @@ fn test_creator_self_claim_guard_no_alias_bypass() {
 
     // Alias the creator address — the guard must still fire.
     let also_creator = creator.clone();
-    client.claim_bounty(&also_creator, &bounty_id);
+    assert_eq!(
+        error_code(client.try_claim_bounty(&also_creator, &bounty_id)),
+        ContractError::CreatorCannotClaim as u32
+    );
 }
 
 #[test]
@@ -1074,8 +1088,9 @@ fn test_raise_dispute_third_party_fails() {
 // ===========================================================================
 
 #[test]
-#[should_panic(expected = "contributor already has an active claim")]
 fn test_second_claim_rejected_while_active() {
+    use crate::errors::ContractError;
+
     let (env, creator, contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
@@ -1085,12 +1100,16 @@ fn test_second_claim_rejected_while_active() {
 
     client.claim_bounty(&contributor, &bounty_id_1);
     // Second claim on a different bounty must be rejected while the first is active.
-    client.claim_bounty(&contributor, &bounty_id_2);
+    assert_eq!(
+        error_code(client.try_claim_bounty(&contributor, &bounty_id_2)),
+        ContractError::ContributorHasActiveClaim as u32
+    );
 }
 
 #[test]
-#[should_panic(expected = "bounty already assigned")]
 fn test_second_contributor_cannot_claim_full_bounty() {
+    use crate::errors::ContractError;
+
     let (env, creator, contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
@@ -1100,25 +1119,33 @@ fn test_second_contributor_cannot_claim_full_bounty() {
 
     // A different contributor tries to claim a full single-slot bounty.
     let contributor2 = Address::generate(&env);
-    client.claim_bounty(&contributor2, &bounty_id);
+    assert_eq!(
+        error_code(client.try_claim_bounty(&contributor2, &bounty_id)),
+        ContractError::BountyAlreadyAssigned as u32
+    );
 }
 
 /// Issue #630 — complete_milestone must fail before touching milestone state.
 #[test]
-#[should_panic(expected = "bounty not found")]
 fn test_complete_milestone_nonexistent_bounty() {
+    use crate::errors::ContractError;
+
     let (env, _creator, _contributor, verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
 
     let fake_id = fake_bounty_id(&env, 42);
-    client.complete_milestone(&verifier, &fake_id, &0);
+    assert_eq!(
+        error_code(client.try_complete_milestone(&verifier, &fake_id, &0)),
+        ContractError::BountyNotFound as u32
+    );
 }
 
 /// Issue #629 — idempotency guard rejects duplicate claim by same contributor.
 #[test]
-#[should_panic(expected = "bounty already claimed by contributor")]
 fn test_claim_bounty_idempotency_rejects_double_claim() {
+    use crate::errors::ContractError;
+
     let (env, creator, contributor, _verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
     let client = MergeMintContractClient::new(&env, &contract_id);
@@ -1126,7 +1153,10 @@ fn test_claim_bounty_idempotency_rejects_double_claim() {
     let bounty_id = make_bounty(&client, &env, &creator, "idempotent", None);
     client.claim_bounty(&contributor, &bounty_id);
     // Second claim by the same contributor must fail with AlreadyClaimed.
-    client.claim_bounty(&contributor, &bounty_id);
+    assert_eq!(
+        error_code(client.try_claim_bounty(&contributor, &bounty_id)),
+        ContractError::AlreadyClaimed as u32
+    );
 }
 
 // ===========================================================================
@@ -1432,6 +1462,48 @@ fn test_update_contributor_metadata_overwrites() {
     assert_eq!(data.metadata.unwrap(), Symbol::new(&env, "new_uri"));
 }
 
+/// Issue #1221 — `update_contributor_metadata` must emit a
+/// `contributor_metadata_updated` event carrying the contributor address and
+/// the new metadata `Symbol` as its data payload.
+#[test]
+fn test_update_contributor_metadata_emits_event() {
+    use soroban_sdk::xdr::ContractEventBody;
+
+    let (env, _creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let uri = Symbol::new(&env, "ipfs_hash_evt");
+    client.update_contributor_metadata(&contributor, &uri);
+
+    let all = env.events().all();
+    let events = all.filter_by_contract(&contract_id).events();
+    assert_eq!(events.len(), 1, "exactly one event must be emitted");
+
+    let ContractEventBody::V0(body) = &events.get(0).unwrap().body;
+    // Topic 0 is the event name.
+    let topic0 = Val::try_from_val(&env, body.topics.first().unwrap()).unwrap();
+    assert_eq!(
+        Symbol::try_from_val(&env, &topic0).unwrap(),
+        Symbol::new(&env, "contributor_metadata_updated"),
+        "event topic must be contributor_metadata_updated"
+    );
+    // Topic 1 is the contributor address.
+    let topic1 = Val::try_from_val(&env, body.topics.get(1).unwrap()).unwrap();
+    assert_eq!(
+        Address::try_from_val(&env, &topic1).unwrap(),
+        contributor,
+        "event must carry the contributor address"
+    );
+    // Data payload is the new metadata Symbol.
+    let data = Val::try_from_val(&env, &body.data).unwrap();
+    assert_eq!(
+        Symbol::try_from_val(&env, &data).unwrap(),
+        uri,
+        "event data must be the stored metadata symbol"
+    );
+}
+
 /// An empty metadata Symbol must be rejected before writing to storage.
 #[test]
 #[should_panic(expected = "metadata must not be empty")]
@@ -1441,6 +1513,172 @@ fn test_update_contributor_metadata_rejects_empty_symbol() {
     let client = MergeMintContractClient::new(&env, &contract_id);
 
     client.update_contributor_metadata(&contributor, &Symbol::new(&env, ""));
+}
+
+// ===========================================================================
+// Issue #1220 — BountySummary retains reward_token after archive
+// ===========================================================================
+
+/// `get_bounty` and `get_bounty_summary` must preserve the original
+/// `reward_token` after `archive_bounty` instead of substituting the contract
+/// address as a placeholder.
+#[test]
+fn test_archived_bounty_preserves_reward_token() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token_addr) = make_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "arch_token",
+        1000,
+        None,
+    );
+
+    client.archive_bounty(&bounty_id);
+
+    let summary = client
+        .get_bounty_summary(&bounty_id)
+        .expect("archived bounty must have a summary");
+    assert_eq!(
+        summary.reward_token, token_addr,
+        "summary must retain the original reward token"
+    );
+    assert_ne!(
+        summary.reward_token, contract_id,
+        "summary must not substitute the contract address"
+    );
+
+    let archived = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(
+        archived.reward_token, token_addr,
+        "get_bounty must retain the original reward token after archive"
+    );
+}
+
+// ===========================================================================
+// Issue #1219 — migrate_legacy_indexes
+// ===========================================================================
+
+/// Seed legacy `DataKey::StatusIndex` and `DataKey::OpenBounties` blobs
+/// directly into contract storage, then verify `migrate_legacy_indexes`
+/// moves them losslessly into the paged shards, deletes the legacy keys and
+/// is idempotent on a second invocation.
+#[test]
+fn test_migrate_legacy_indexes_lossless_and_idempotent() {
+    let (env, _creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let open = Symbol::new(&env, "open");
+    let id1 = fake_bounty_id(&env, 1);
+    let id2 = fake_bounty_id(&env, 2);
+    let id3 = fake_bounty_id(&env, 3);
+
+    // Seed legacy blobs directly via env.as_contract.
+    env.as_contract(&contract_id, || {
+        let mut legacy_status: Vec<BountyId> = Vec::new(&env);
+        legacy_status.push_back(id1.clone());
+        legacy_status.push_back(id2.clone());
+        legacy_status.push_back(id3.clone());
+        env.storage().persistent().set(
+            &DataKey::StatusIndex(open.clone()),
+            &legacy_status,
+        );
+
+        let mut legacy_open: Vec<BountyId> = Vec::new(&env);
+        legacy_open.push_back(id1.clone());
+        legacy_open.push_back(id2.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::OpenBounties, &legacy_open);
+    });
+
+    client.migrate_legacy_indexes(&admin);
+
+    // Paged reads return the migrated entries in order.
+    let (status_page, _) = client.get_bounties_by_status(&open, &None, &50);
+    assert_eq!(status_page.len(), 3);
+    assert_eq!(status_page.get(0).unwrap(), id1);
+    assert_eq!(status_page.get(1).unwrap(), id2);
+    assert_eq!(status_page.get(2).unwrap(), id3);
+    assert_eq!(client.get_status_count(&open), 3);
+
+    let open_page = client.get_open_bounties_paged(&0, &50);
+    assert_eq!(open_page.len(), 2);
+    assert_eq!(open_page.get(0).unwrap(), id1);
+    assert_eq!(open_page.get(1).unwrap(), id2);
+    assert_eq!(client.get_open_bounties_count(), 2);
+
+    // Legacy keys are gone.
+    env.as_contract(&contract_id, || {
+        assert!(
+            !env.storage()
+                .persistent()
+                .has(&DataKey::StatusIndex(open.clone())),
+            "legacy StatusIndex key must be deleted"
+        );
+        assert!(
+            !env.storage().persistent().has(&DataKey::OpenBounties),
+            "legacy OpenBounties key must be deleted"
+        );
+    });
+
+    // Idempotent: a second run is a no-op and does not duplicate entries.
+    client.migrate_legacy_indexes(&admin);
+    let (status_page2, _) = client.get_bounties_by_status(&open, &None, &50);
+    assert_eq!(status_page2.len(), 3, "no duplicate entries after re-run");
+    assert_eq!(client.get_open_bounties_count(), 2);
+}
+
+// ===========================================================================
+// Issue #1222 — event wire compatibility with docs/event-schema.md
+// ===========================================================================
+
+/// Assert exact topic/data wire format for the migrated `#[contractevent]`
+/// emitters: topic 0 is the event name, topic 1 is the primary subject and
+/// the data payload matches the documented schema.
+#[test]
+fn test_event_wire_compatibility() {
+    use soroban_sdk::xdr::ContractEventBody;
+
+    fn last_event(env: &Env, contract_id: &Address) -> (Symbol, Val) {
+        let all = env.events().all();
+        let events = all.filter_by_contract(contract_id).events();
+        let ev = events.last().expect("expected at least one event");
+        let ContractEventBody::V0(body) = &ev.body;
+        let topic0 = Val::try_from_val(env, body.topics.first().unwrap()).unwrap();
+        let name = Symbol::try_from_val(env, &topic0).unwrap();
+        let data = Val::try_from_val(env, &body.data).unwrap();
+        (name, data)
+    }
+
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // bounty_created: topic 0 = "bounty_created", data = bounty id.
+    let bounty_id = make_bounty(&client, &env, &creator, "wire_evt", None);
+    let (name, data) = last_event(&env, &contract_id);
+    assert_eq!(name, Symbol::new(&env, "bounty_created"));
+    assert_eq!(
+        BountyId::try_from_val(&env, &data).unwrap(),
+        bounty_id,
+        "bounty_created data must be the bounty id"
+    );
+
+    // contributor_metadata_updated: topic 0 = name, data = metadata symbol.
+    let contributor = Address::generate(&env);
+    let uri = Symbol::new(&env, "wire_meta");
+    client.update_contributor_metadata(&contributor, &uri);
+    let (name, data) = last_event(&env, &contract_id);
+    assert_eq!(name, Symbol::new(&env, "contributor_metadata_updated"));
+    assert_eq!(Symbol::try_from_val(&env, &data).unwrap(), uri);
 }
 
 // ===========================================================================
@@ -4542,4 +4780,94 @@ fn test_admin_state_survives_ttl_threshold() {
     // The pending admin can still accept after the TTL threshold.
     client.accept_admin(&new_admin);
     assert_eq!(client.get_admin(), Some(new_admin));
+}
+
+// ── #1237: multi-page PAGE_SIZE boundary / swap-remove corruption tests ──
+
+fn page_test_id(env: &Env, n: u32) -> BountyId {
+    let mut b = [0u8; 32];
+    b[..4].copy_from_slice(&n.to_be_bytes());
+    BountyId(soroban_sdk::BytesN::from_array(env, &b))
+}
+
+/// Removal orders: forward, reverse, middle-out, and a deterministic LCG shuffle.
+fn page_test_orders(total: u32) -> std::vec::Vec<std::vec::Vec<u32>> {
+    let fwd: std::vec::Vec<u32> = (0..total).collect();
+    let rev: std::vec::Vec<u32> = (0..total).rev().collect();
+    let mut mid = fwd.clone();
+    mid.sort_by_key(|i| (*i as i64 - (total / 2) as i64).abs());
+    let mut rnd = fwd.clone();
+    let mut seed: u64 = 0x9E37_79B9 ^ total as u64;
+    for i in (1..rnd.len()).rev() {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        rnd.swap(i, (seed >> 33) as usize % (i + 1));
+    }
+    std::vec![fwd, rev, mid, rnd]
+}
+
+fn assert_unique_set(actual: &Vec<BountyId>, expected: &std::collections::BTreeSet<u32>) {
+    let mut seen = std::collections::BTreeSet::new();
+    for id in actual.iter() {
+        let n = u32::from_be_bytes(id.0.to_array()[..4].try_into().unwrap());
+        assert!(seen.insert(n), "duplicate id {n}");
+    }
+    assert_eq!(&seen, expected);
+}
+
+#[test]
+fn test_status_index_page_boundaries_all_orders() {
+    let env = Env::default();
+    let cid = env.register(MergeMintContract, ());
+    let status = Symbol::new(&env, "open");
+    for total in [49u32, 50, 51, 99, 100, 101, 151] {
+        for order in page_test_orders(total) {
+            env.as_contract(&cid, || {
+                for n in 0..total {
+                    storage::add_bounty_to_status(&env, &page_test_id(&env, n), &status);
+                }
+                let mut live: std::collections::BTreeSet<u32> = (0..total).collect();
+                for n in order {
+                    storage::remove_bounty_from_status(&env, &page_test_id(&env, n), &status);
+                    live.remove(&n);
+                    assert_eq!(storage::get_status_count(&env, &status), live.len() as u32);
+                    assert_unique_set(&storage::get_bounties_by_status(&env, &status), &live);
+                    let pages = (live.len() as u32).div_ceil(storage::PAGE_SIZE);
+                    assert!(!env
+                        .storage()
+                        .persistent()
+                        .has(&DataKey::StatusIndexPage(status.clone(), pages)));
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn test_open_bounties_page_boundaries_all_orders() {
+    let env = Env::default();
+    let cid = env.register(MergeMintContract, ());
+    for total in [49u32, 50, 51, 99, 100, 101, 151] {
+        for order in page_test_orders(total) {
+            env.as_contract(&cid, || {
+                for n in 0..total {
+                    storage::add_open_bounty(&env, &page_test_id(&env, n));
+                }
+                let mut live: std::collections::BTreeSet<u32> = (0..total).collect();
+                for n in order {
+                    storage::remove_open_bounty(&env, &page_test_id(&env, n));
+                    live.remove(&n);
+                    assert_eq!(storage::get_open_bounties_count(&env), live.len() as u32);
+                    assert_unique_set(&storage::get_open_bounties(&env), &live);
+                    let pages = (live.len() as u32).div_ceil(storage::PAGE_SIZE);
+                    assert!(!env
+                        .storage()
+                        .persistent()
+                        .has(&DataKey::OpenBountiesPage(pages)));
+                }
+            });
+        }
+    }
+}
 }

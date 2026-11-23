@@ -16,6 +16,7 @@ describe('Health Endpoint', () => {
       lastIndexedLedger: 1000,
       currentLedger: 1010,
       dbReachable: true,
+      indexerLag: 10,
       networkPassphrase: 'Test Passphrase',
     });
   });
@@ -63,9 +64,43 @@ describe('Health Endpoint', () => {
 
     expect(response.lastIndexedLedger).toBe(950);
     expect(response.currentLedger).toBe(1000);
-    // Lag would be 50 ledgers
-    const lag = response.currentLedger - response.lastIndexedLedger;
-    expect(lag).toBe(50);
+    expect(response.indexerLag).toBe(50);
+  });
+
+  it('should report ok=false when indexer lag exceeds the threshold', () => {
+    const response = buildHealthResponse(
+      'CONTRACT_ID',
+      900,
+      1000,
+      true,
+    );
+
+    expect(response.indexerLag).toBe(100);
+    expect(response.ok).toBe(true); // exactly at threshold, not exceeded
+  });
+
+  it('should report ok=false when indexer lag exceeds MAX_INDEXER_LAG_LEDGERS', () => {
+    const response = buildHealthResponse(
+      'CONTRACT_ID',
+      899,
+      1000,
+      true,
+    );
+
+    expect(response.indexerLag).toBe(101);
+    expect(response.ok).toBe(false);
+  });
+
+  it('should report ok=false when lastIndexedLedger exceeds currentLedger (negative lag anomaly)', () => {
+    const response = buildHealthResponse(
+      'CONTRACT_ID',
+      1010,
+      1000,
+      true,
+    );
+
+    expect(response.indexerLag).toBe(0);
+    expect(response.ok).toBe(false);
   });
 
   it('should support optional networkPassphrase parameter', () => {

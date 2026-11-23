@@ -1,6 +1,11 @@
-// On-chain title/description/metadata fields are stored as Soroban Symbols,
-// which cap out at 32 characters.
+// On-chain title is stored as a Soroban Symbol, which caps out at 32 characters
+// and only permits [a-zA-Z0-9_]. Description is a bounded UTF-8 String, so it
+// uses a separate (larger) length cap rather than the Symbol limit.
 export const SYMBOL_MAX_LENGTH = 32;
+
+export const DESCRIPTION_MAX_LENGTH = 256;
+
+export const TITLE_REGEX = /^[a-zA-Z0-9_]{1,32}$/;
 
 export const REWARD_AMOUNT_REGEX = /^\d+(\.\d{1,7})?$/;
 
@@ -28,23 +33,22 @@ export function isValidContractAddress(value: string): boolean {
 }
 
 /**
- * Validates that a description fits within the on-chain Symbol length cap.
+ * Validates that a description fits within the on-chain UTF-8 String length cap.
  * @param value The description string input
  * @returns True if non-empty and within cap, false otherwise
  */
 export function isValidDescriptionLength(value: string): boolean {
   const trimmed = value.trim();
-  return trimmed.length > 0 && trimmed.length <= SYMBOL_MAX_LENGTH;
+  return trimmed.length > 0 && trimmed.length <= DESCRIPTION_MAX_LENGTH;
 }
 
 /**
- * Validates that a title fits within the on-chain Symbol length cap.
+ * Validates that a title is a valid Soroban Symbol: 1-32 chars matching [a-zA-Z0-9_].
  * @param value The title string input
- * @returns True if non-empty and within cap, false otherwise
+ * @returns True if valid, false otherwise
  */
 export function isValidTitle(value: string): boolean {
-  const trimmed = value.trim();
-  return trimmed.length > 0 && trimmed.length <= SYMBOL_MAX_LENGTH;
+  return TITLE_REGEX.test(value.trim());
 }
 
 /**
@@ -79,15 +83,15 @@ export function validateDetailsStep(data: { title: string; description: string }
   const trimmedTitle = data.title.trim();
   if (!trimmedTitle) {
     errors.title = "Title is required.";
-  } else if (trimmedTitle.length > SYMBOL_MAX_LENGTH) {
-    errors.title = `Title must be ${SYMBOL_MAX_LENGTH} characters or less.`;
+  } else if (!isValidTitle(trimmedTitle)) {
+    errors.title = `Title must be 1-${SYMBOL_MAX_LENGTH} characters using only letters, numbers, and underscores.`;
   }
 
   const trimmedDescription = data.description.trim();
   if (!trimmedDescription) {
     errors.description = "Description is required.";
-  } else if (trimmedDescription.length > SYMBOL_MAX_LENGTH) {
-    errors.description = `Description must be ${SYMBOL_MAX_LENGTH} characters or less.`;
+  } else if (!isValidDescriptionLength(trimmedDescription)) {
+    errors.description = `Description must be ${DESCRIPTION_MAX_LENGTH} characters or less.`;
   }
 
   return {
