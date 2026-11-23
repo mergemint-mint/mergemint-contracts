@@ -627,6 +627,17 @@ pub struct OwnershipTransferStarted {
     pub new_owner: Address,
 }
 
+/// `config_changed` / `arbitrator` with `(old, new)`; `None` means the
+/// creator-as-arbitrator fallback is in effect (#1195).
+pub fn emit_config_changed_arbitrator(
+    env: &Env,
+    old_value: Option<Address>,
+    new_value: Option<Address>,
+) {
+    env.events()
+        .publish(config_changed_topic(env, "arbitrator"), (old_value, new_value));
+}
+
 pub fn emit_ownership_transfer_started(
     env: &Env,
     bounty_id: &BountyId,
