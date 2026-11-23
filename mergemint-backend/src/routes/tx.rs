@@ -181,19 +181,16 @@ fn add_rate_limit_headers(mut response: Response, snapshot: RateLimitSnapshot) -
     let headers = response.headers_mut();
     headers.insert(
         HeaderName::from_static("x-ratelimit-limit"),
-        HeaderValue::from_str(&SELF_CLAIM_RATE_LIMIT.to_string())
-            .expect("configured request limit is a valid header value"),
+        HeaderValue::from(SELF_CLAIM_RATE_LIMIT),
     );
     headers.insert(
         HeaderName::from_static("x-ratelimit-remaining"),
-        HeaderValue::from_str(&snapshot.remaining.to_string())
-            .expect("remaining request count is a valid header value"),
+        HeaderValue::from(snapshot.remaining),
     );
     if is_rate_limited {
         headers.insert(
             HeaderName::from_static("retry-after"),
-            HeaderValue::from_str(&snapshot.retry_after.to_string())
-                .expect("retry duration is a valid header value"),
+            HeaderValue::from(snapshot.retry_after),
         );
     }
     response
@@ -269,7 +266,9 @@ fn idempotency_check_from_entry(entry: &IdempotencyEntry) -> IdempotencyCheck {
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(body.clone()))
-                .expect("static response parts always build a valid response"),
+                .unwrap_or_else(|_| {
+                    AppError::internal("failed to build idempotency replay response").into_response()
+                }),
         ),
         IdempotencyEntry::InFlight => IdempotencyCheck::Conflict(
             AppError {
