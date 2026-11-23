@@ -233,6 +233,116 @@ pub fn bounties_due_for_deadline_reminder(
         .collect()
 }
 
+/// Update a bounty's status to `cancelled` after the indexer observes a cancellation.
+#[allow(dead_code)] // Called by the indexer, which the binary does not compile.
+pub fn mark_bounty_cancelled(db: &SharedDb, bounty_id: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.status = "cancelled".to_string();
+    }
+}
+
+/// Update a bounty's status to `expired` after the indexer observes an expiry.
+#[allow(dead_code)] // Called by the indexer, which the binary does not compile.
+pub fn mark_bounty_expired(db: &SharedDb, bounty_id: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.status = "expired".to_string();
+    }
+}
+
+/// Update a bounty's status to `completed` after the indexer observes completion.
+#[allow(dead_code)] // Called by the indexer, which the binary does not compile.
+pub fn mark_bounty_completed(db: &SharedDb, bounty_id: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.status = "completed".to_string();
+    }
+}
+
+/// Update a bounty's status to `disputed` after the indexer observes a dispute.
+#[allow(dead_code)] // Called by the indexer, which the binary does not compile.
+pub fn mark_bounty_disputed(db: &SharedDb, bounty_id: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.status = "disputed".to_string();
+    }
+}
+
+/// Update a bounty's assignee after a reassignment observed by the indexer.
+#[allow(dead_code)] // Called by the indexer, which the binary does not compile.
+pub fn mark_bounty_reassigned(db: &SharedDb, bounty_id: &str, new_assignee: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.assignee = Some(new_assignee.to_string());
+    }
+}
+
+/// Update a bounty's status to `open` after the indexer observes a reopen.
+#[allow(dead_code)] // Called by the indexer, which the binary does not compile.
+pub fn mark_bounty_reopened(db: &SharedDb, bounty_id: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.status = "open".to_string();
+        bounty.assignee = None;
+    }
+}
+
+/// Update a bounty's status to `archived` after the indexer observes archival.
+#[allow(dead_code)] // Called by the indexer, which the binary does not compile.
+pub fn mark_bounty_archived(db: &SharedDb, bounty_id: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.status = "archived".to_string();
+    }
+}
+
+/// Update a bounty's assignee to None after a stale claim is released.
+#[allow(dead_code)] // Called by the indexer, which the binary does not compile.
+pub fn mark_claim_released(db: &SharedDb, bounty_id: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.status = "open".to_string();
+        bounty.assignee = None;
+    }
+}
+
+/// Update a bounty's owner (creator field) after an ownership transfer.
+#[allow(dead_code)] // Called by the indexer, which the binary does not compile.
+pub fn mark_ownership_transferred(db: &SharedDb, bounty_id: &str, new_owner: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.creator = new_owner.to_string();
+    }
+}
+
 /// Record that a reminder was published. Returns false if already recorded.
 pub fn mark_deadline_reminder_sent(db: &SharedDb, bounty_id: String) -> bool {
     acquire_db(db).deadline_reminders_sent.insert(bounty_id)

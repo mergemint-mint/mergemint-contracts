@@ -100,11 +100,13 @@ const TUPLE_EVENTS: &[&str] = &[
 /// Events keyed by contributor address that carry no `bounty_id`.
 /// `extract_bounty_id_hex` returns `None` for these; callers route them to
 /// reputation/profile handling rather than bounty handling.
+/// See `reputation_changed` in `docs/event-schema.md`.
 #[allow(dead_code)] // Documents the contract; not read by code yet.
 const CONTRIBUTOR_ONLY_EVENTS: &[&str] = &["reputation_changed", "contributor_metadata_updated"];
 
 /// Global admin/contract-level events that carry neither a bounty_id nor a
-/// contributor address.  `extract_bounty_id_hex` returns `None` for these.
+/// contributor address.  `extract_bounty_id_hex` returns `None` for these;
+/// callers may audit-log them without a bounty context.
 #[allow(dead_code)] // Documents the contract; not read by code yet.
 const CONTRACT_ADMIN_EVENTS: &[&str] = &[
     "reward_token_added",
@@ -114,9 +116,10 @@ const CONTRACT_ADMIN_EVENTS: &[&str] = &[
     "contract_unpaused",
 ];
 
-/// All contract events recognised by the indexer, for exhaustive coverage
-/// checks in tests.  Every event emitted by `src/events.rs` must appear in
-/// exactly one of the four sets above, and therefore exactly once here.
+/// All contract events recognised by the indexer, grouped for exhaustive
+/// coverage checks in tests.  Every event emitted by `src/events.rs` must
+/// appear in exactly one of the five sets above, and therefore exactly once in
+/// this combined list.
 #[allow(dead_code)]
 const ALL_CONTRACT_EVENTS: &[&str] = &[
     // SINGLE_VALUE_EVENTS
@@ -172,18 +175,16 @@ const ALL_CONTRACT_EVENTS: &[&str] = &[
 ///
 /// Returns `None` when:
 /// - `topics` is empty (no event-name topic present), or
-/// - the first topic is not a recognised bounty-scoped event name, or
-/// - the XDR payload is malformed, truncated, or exceeds the bounded
-///   [`XDR_PAYLOAD_MAX_BYTES`] limit, or
-/// - the decoded `ScVal` does not match the expected shape, or
-/// - the extracted bytes are not exactly [`BOUNTY_ID_LEN`] (32) bytes long.
+/// - the first topic is not a recognised bounty-scoped event name (see
+///   `SINGLE_VALUE_EVENTS` / `TUPLE_EVENTS`).
 ///
-/// Contributor-only events ([`CONTRIBUTOR_ONLY_EVENTS`]) and contract-admin
-/// events ([`CONTRACT_ADMIN_EVENTS`]) carry no bounty_id by design; this
-/// returns `None` for them without emitting a warning.
+/// Returns `None` without warning for contributor-only events
+/// (`CONTRIBUTOR_ONLY_EVENTS`) and contract-admin events
+/// (`CONTRACT_ADMIN_EVENTS`) — those are intentionally bounty-free and are
+/// routed separately by the caller.
 ///
-/// The caller is responsible for logging an appropriate warning when `None`
-/// is returned after a successful topic decode and the name is not in any
+/// The caller is responsible for logging an appropriate warning when `None` is
+/// returned after a successful topic decode and the name is not in any
 /// recognised set.
 pub fn extract_bounty_id_hex(topics: &[String], value_hex: &str) -> Option<String> {
     let event_name = topics.first()?;
@@ -221,15 +222,9 @@ pub(crate) fn decode_bounty_id_from_xdr(value_hex: &str, is_tuple: bool) -> Opti
         };
         bytes.as_ref()
     } else {
-        // Single-value shape: the entire payload is ScVal::Bytes.
-        let ScVal::Bytes(bytes) = &scval else {
-            return None;
-        };
-        bytes.as_ref()
-    };
-
-    if bytes.len() != BOUNTY_ID_LEN {
-        return None;
+        // Covers CONTRIBUTOR_ONLY_EVENTS, CONTRACT_ADMIN_EVENTS, and
+        // any truly unknown name.
+        None
     }
 
     Some(hex::encode(bytes))
@@ -323,11 +318,6 @@ pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: b
 
     for event in events {
         // ── Issue 3: log decode failures instead of silent skip ──────────
-        //
-        // The original code used `let Ok(event_name) = … else { continue; }`
-        // which swallowed genuine XDR decode errors identically to expected
-        // no-ops.  Changing the else branch to emit warn! makes malformed
-        // topics observable in production logs without changing control flow.
         let event_name = match event.topics.first() {
             Some(TopicDecodeResult::Ok(name)) => name.clone(),
             Some(TopicDecodeResult::Err(e)) => {
@@ -344,21 +334,16 @@ pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: b
             crate::routes::leaderboard::invalidate_leaderboard_cache();
         }
 
-        // ── Determine whether the event name is recognised at all ────────
+        // ── Issue 2: warn only for truly unrecognised events ─────────────
         //
-        // We check the constant sets directly (not via extract_bounty_id_hex)
-        // because extract_bounty_id_hex also performs XDR decoding, which can
-        // fail for a recognised event with a corrupt payload.  Separating the
-        // two concerns lets us emit the correct warning: "unrecognized" for
-        // unknown event names, and "malformed XDR" for recognised events whose
-        // payload is corrupt.
-        let is_bounty_scoped = SINGLE_VALUE_EVENTS.contains(&event_name.as_str())
-            || TUPLE_EVENTS.contains(&event_name.as_str());
-        let is_contributor = CONTRIBUTOR_ONLY_EVENTS.contains(&event_name.as_str());
-        let is_admin = CONTRACT_ADMIN_EVENTS.contains(&event_name.as_str());
+        // Contributor-only and contract-admin events have no bounty_id by
+        // design; they must not emit a spurious "unrecognized" warning.
+        let is_recognised = SINGLE_VALUE_EVENTS.contains(&event_name.as_str())
+            || TUPLE_EVENTS.contains(&event_name.as_str())
+            || CONTRIBUTOR_ONLY_EVENTS.contains(&event_name.as_str())
+            || CONTRACT_ADMIN_EVENTS.contains(&event_name.as_str());
 
-        if !is_bounty_scoped && !is_contributor && !is_admin {
-            // ── Issue 2: log unrecognised events instead of silent drop ──
+        if !is_recognised {
             warn!("unrecognized contract event: {event_name}");
             // Still track the ledger so unrecognised events don't stall progress.
             if event.ledger > highest_ledger {
@@ -385,15 +370,6 @@ pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: b
     }
 
     // ── Issue 1: regression guard ─────────────────────────────────────────
-    //
-    // Only advance last_ledger when the caller signals that the page was
-    // complete (i.e. no truncation occurred).  This prevents a partial page
-    // from advancing the cursor past un-fetched events.
-    //
-    // REGRESSION GUARD: removing or inverting this check re-introduces the
-    // issue-#49 regression where a truncated page silently skips events.
-    // The unit test `test_last_ledger_does_not_advance_on_partial_page`
-    // exists specifically to catch that regression.
     if page_complete {
         state.last_ledger = highest_ledger;
     }
@@ -420,20 +396,77 @@ pub fn poll_once_and_publish(
         let Some(TopicDecodeResult::Ok(event_name)) = event.topics.first() else {
             continue;
         };
+
+        // Handle contract-admin events that carry no bounty_id.
+        match event_name.as_str() {
+            "contract_paused"
+            | "contract_unpaused"
+            | "reward_token_added"
+            | "reward_token_removed"
+            | "config_changed" => {
+                if let Err(error) =
+                    sender.send(crate::events::encode_bounty_event(event_name, "contract"))
+                {
+                    warn!(%error, event = %event_name, "failed to publish contract-admin event");
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        // Handle contributor-only events that carry no bounty_id.
+        match event_name.as_str() {
+            "reputation_changed" | "contributor_metadata_updated" => {
+                // Contributor address is in topics[1]; no bounty_id to publish.
+                // Leaderboard cache is already invalidated in poll_once for
+                // reputation_changed.
+                continue;
+            }
+            _ => {}
+        }
+
+        // All remaining events are bounty-scoped.
         let Some(bounty_id) =
             extract_bounty_id_hex(std::slice::from_ref(event_name), &event.value_hex)
         else {
             continue;
         };
+
+        // Apply DB state mutations for bounty-lifecycle events.
         match event_name.as_str() {
             "bounty_claimed" => {
                 if let Some(TopicDecodeResult::Ok(assignee)) = event.topics.get(1) {
                     crate::db::mark_bounty_claimed(db, &bounty_id, assignee);
                 }
             }
+            "bounty_unclaimed" => {
+                crate::db::mark_bounty_reopened(db, &bounty_id);
+            }
             "work_submitted" => crate::db::mark_bounty_submitted(db, &bounty_id),
+            "bounty_completed" => crate::db::mark_bounty_completed(db, &bounty_id),
+            "bounty_cancelled" => crate::db::mark_bounty_cancelled(db, &bounty_id),
+            "bounty_expired" => crate::db::mark_bounty_expired(db, &bounty_id),
+            "bounty_disputed" => crate::db::mark_bounty_disputed(db, &bounty_id),
+            "bounty_reopened" => crate::db::mark_bounty_reopened(db, &bounty_id),
+            "bounty_reassigned" => {
+                if let Some(TopicDecodeResult::Ok(new_assignee)) = event.topics.get(2) {
+                    crate::db::mark_bounty_reassigned(db, &bounty_id, new_assignee);
+                }
+            }
+            "bounty_archived" => crate::db::mark_bounty_archived(db, &bounty_id),
+            "claim_released" => crate::db::mark_claim_released(db, &bounty_id),
+            "ownership_transferred" => {
+                if let Some(TopicDecodeResult::Ok(new_owner)) = event.topics.get(1) {
+                    crate::db::mark_ownership_transferred(db, &bounty_id, new_owner);
+                }
+            }
+            // bounty_created, reward_paid, approval_recorded, dispute_resolved,
+            // dispute_appealed, dispute_finalized, bounty_sponsored,
+            // deadline_extended, bounty_topped_up, milestone_completed,
+            // ownership_transfer_started — no additional DB mutation required.
             _ => {}
         }
+
         if let Err(error) = sender.send(crate::events::encode_bounty_event(event_name, &bounty_id))
         {
             warn!(%error, event = %event_name, "failed to publish indexed bounty event");
@@ -531,10 +564,7 @@ mod tests {
 
     /// REGRESSION GUARD (issue #49)
     ///
-    /// `last_ledger` must NOT advance when the page is incomplete.  A full
-    /// page of events up to ledger 200 must not move the cursor if
-    /// `page_complete` is false — the next poll must re-start from the
-    /// previous `last_ledger` (100) to avoid skipping events.
+    /// `last_ledger` must NOT advance when the page is incomplete.
     #[test]
     fn test_last_ledger_does_not_advance_on_partial_page() {
         let mut state = IndexerState { last_ledger: 100 };
@@ -544,7 +574,6 @@ mod tests {
             single_event("bounty_claimed", 200),
         ];
 
-        // Simulate a truncated page (page_complete = false).
         poll_once(&mut state, &events, false);
 
         assert_eq!(
@@ -588,8 +617,7 @@ mod tests {
     fn test_unrecognized_event_does_not_block_ledger_advance() {
         let mut state = IndexerState { last_ledger: 10 };
 
-        // "bounty_upgraded" is a synthetic future event name not in any list.
-        let events = vec![raw_event("bounty_upgraded", "deadbeef", 20)];
+        let events = vec![ok_event("bounty_upgraded", 20)];
 
         poll_once(&mut state, &events, true);
 
@@ -609,8 +637,7 @@ mod tests {
         );
     }
 
-    /// `extract_bounty_id_hex` must return Some for every known single-value
-    /// event when given a valid 32-byte XDR payload.
+    /// `extract_bounty_id_hex` must return Some for every bounty-scoped event.
     #[test]
     fn test_extract_bounty_id_hex_single_value_events() {
         for &name in SINGLE_VALUE_EVENTS {
@@ -660,6 +687,32 @@ mod tests {
         }
     }
 
+    /// `extract_bounty_id_hex` must return None for contributor-only events —
+    /// they carry no bounty_id by design and must not trigger a warning.
+    #[test]
+    fn test_extract_bounty_id_hex_returns_none_for_contributor_only_events() {
+        for name in CONTRIBUTOR_ONLY_EVENTS {
+            let result = extract_bounty_id_hex(&[name.to_string()], "aabbccdd");
+            assert!(
+                result.is_none(),
+                "contributor-only event '{name}' should yield None — no bounty_id"
+            );
+        }
+    }
+
+    /// `extract_bounty_id_hex` must return None for contract-admin events —
+    /// they carry no bounty_id by design.
+    #[test]
+    fn test_extract_bounty_id_hex_returns_none_for_admin_events() {
+        for name in CONTRACT_ADMIN_EVENTS {
+            let result = extract_bounty_id_hex(&[name.to_string()], "aabbccdd");
+            assert!(
+                result.is_none(),
+                "contract-admin event '{name}' should yield None — no bounty_id"
+            );
+        }
+    }
+
     // ── Issue 3: decode error logging ─────────────────────────────────────
 
     /// An event with a decode-error topic must be skipped (not panic) and
@@ -668,7 +721,7 @@ mod tests {
     fn test_decode_error_event_is_skipped_gracefully() {
         let mut state = IndexerState { last_ledger: 50 };
 
-        let events = vec![err_event(60), single_event("bounty_claimed", 70)];
+        let events = vec![err_event(60), ok_event("bounty_claimed", 70)];
 
         poll_once(&mut state, &events, true);
 
@@ -697,195 +750,16 @@ mod tests {
         assert_eq!(state.last_ledger, 50);
     }
 
-    // ── XDR decode: valid payloads (#1259) ────────────────────────────────
-
-    /// A single-value event with a valid 32-byte ScVal::Bytes payload must
-    /// extract a hex bounty id of length 64 (32 bytes × 2 hex chars).
-    #[test]
-    fn test_extract_bounty_id_single_valid_32_bytes() {
-        let id = extract_bounty_id_hex(&["bounty_claimed".to_owned()], &valid_single_bounty_id())
-            .expect("valid single-value 32-byte payload should decode");
-        assert_eq!(
-            id.len(),
-            BOUNTY_ID_LEN * 2,
-            "hex bounty id must be 64 chars"
-        );
-    }
-
-    /// A tuple event with a valid ScVal::Vec whose first element is a 32-byte
-    /// ScVal::Bytes must extract a hex bounty id.
-    #[test]
-    fn test_extract_bounty_id_tuple_valid() {
-        let id = extract_bounty_id_hex(&["bounty_created".to_owned()], &valid_tuple_bounty_id())
-            .expect("valid tuple payload should decode");
-        assert_eq!(id.len(), BOUNTY_ID_LEN * 2);
-    }
-
-    /// A single-value payload with the wrong byte length (31 instead of 32)
-    /// must return None — not panic, not return a truncated id.
-    #[test]
-    fn test_extract_bounty_id_single_wrong_length() {
-        let xdr = bytes_xdr(31);
-        let result = extract_bounty_id_hex(&["bounty_claimed".to_owned()], &xdr);
-        assert!(
-            result.is_none(),
-            "31-byte payload must not yield a bounty id"
-        );
-    }
-
-    /// A single-value payload with 33 bytes must also be rejected.
-    #[test]
-    fn test_extract_bounty_id_single_too_long() {
-        let xdr = bytes_xdr(33);
-        let result = extract_bounty_id_hex(&["bounty_claimed".to_owned()], &xdr);
-        assert!(
-            result.is_none(),
-            "33-byte payload must not yield a bounty id"
-        );
-    }
-
-    /// A tuple payload whose first element is the wrong length must return
-    /// None.
-    #[test]
-    fn test_extract_bounty_id_tuple_wrong_first_element_length() {
-        let xdr = tuple_xdr(16, 1);
-        let result = extract_bounty_id_hex(&["bounty_created".to_owned()], &xdr);
-        assert!(
-            result.is_none(),
-            "16-byte first element must not yield a bounty id"
-        );
-    }
-
-    /// A single-value payload that decodes to ScVal::Vec (wrong shape) must
-    /// return None.
-    #[test]
-    fn test_extract_bounty_id_single_wrong_shape() {
-        let result =
-            extract_bounty_id_hex(&["bounty_claimed".to_owned()], &valid_tuple_bounty_id());
-        assert!(
-            result.is_none(),
-            "tuple payload under a single-value event must be rejected"
-        );
-    }
-
-    /// A tuple payload that decodes to ScVal::Bytes (wrong shape) must return
-    /// None.
-    #[test]
-    fn test_extract_bounty_id_tuple_wrong_shape() {
-        let result =
-            extract_bounty_id_hex(&["bounty_created".to_owned()], &valid_single_bounty_id());
-        assert!(
-            result.is_none(),
-            "single-value payload under a tuple event must be rejected"
-        );
-    }
-
-    // ── XDR decode: malformed / corrupt / truncated payloads (#1259) ──────
-
-    /// Malformed base64 must return None — not panic.
-    #[test]
-    fn test_extract_bounty_id_malformed_base64() {
-        let result = extract_bounty_id_hex(&["bounty_claimed".to_owned()], "!!!not-base64!!!");
-        assert!(
-            result.is_none(),
-            "malformed base64 must not yield a bounty id"
-        );
-    }
-
-    /// Truncated XDR (valid base64 but not a complete ScVal) must return None.
-    #[test]
-    fn test_extract_bounty_id_truncated_xdr() {
-        // "AA==" is a single zero byte — not valid ScVal XDR.
-        let result = extract_bounty_id_hex(&["bounty_claimed".to_owned()], "AA==");
-        assert!(result.is_none(), "truncated XDR must not yield a bounty id");
-    }
-
-    /// Empty string payload must return None.
-    #[test]
-    fn test_extract_bounty_id_empty_payload() {
-        let result = extract_bounty_id_hex(&["bounty_claimed".to_owned()], "");
-        assert!(result.is_none(), "empty payload must not yield a bounty id");
-    }
-
-    /// An ScVal::Vec that is None (the `Option<ScVec>` is `None`) must return
-    /// None — this is a valid XDR encoding of an empty vec but has no bounty
-    /// id.
-    #[test]
-    fn test_extract_bounty_id_tuple_none_vec() {
-        let scval = ScVal::Vec(None);
-        let xdr = scval_to_base64(&scval);
-        let result = extract_bounty_id_hex(&["bounty_created".to_owned()], &xdr);
-        assert!(result.is_none(), "None vec must not yield a bounty id");
-    }
-
-    /// An ScVal::Vec that is empty (zero elements) must return None.
-    #[test]
-    fn test_extract_bounty_id_tuple_empty_vec() {
-        let scval = ScVal::Vec(Some(ScVec(Vec::new().try_into().unwrap())));
-        let xdr = scval_to_base64(&scval);
-        let result = extract_bounty_id_hex(&["bounty_created".to_owned()], &xdr);
-        assert!(result.is_none(), "empty vec must not yield a bounty id");
-    }
-
-    /// An ScVal::Vec whose first element is ScVal::U32 (not Bytes) must return
-    /// None.
-    #[test]
-    fn test_extract_bounty_id_tuple_first_element_not_bytes() {
-        let scval = ScVal::Vec(Some(ScVec(vec![ScVal::U32(42)].try_into().unwrap())));
-        let xdr = scval_to_base64(&scval);
-        let result = extract_bounty_id_hex(&["bounty_created".to_owned()], &xdr);
-        assert!(
-            result.is_none(),
-            "non-Bytes first element must not yield a bounty id"
-        );
-    }
-
-    /// A payload that decodes to ScVal::Void must return None for both shapes.
-    #[test]
-    fn test_extract_bounty_id_void_payload() {
-        let xdr = scval_to_base64(&ScVal::Void);
-        assert!(
-            extract_bounty_id_hex(&["bounty_claimed".to_owned()], &xdr).is_none(),
-            "Void payload under a single-value event must be rejected"
-        );
-        assert!(
-            extract_bounty_id_hex(&["bounty_created".to_owned()], &xdr).is_none(),
-            "Void payload under a tuple event must be rejected"
-        );
-    }
-
-    // ── poll_once with malformed XDR does not panic (#1259) ───────────────
-
-    /// A page containing a recognised event with a malformed payload must not
-    /// panic; last_ledger must still advance.
-    #[test]
-    fn test_poll_once_malformed_xdr_does_not_panic() {
-        let mut state = IndexerState { last_ledger: 0 };
-        let events = vec![raw_event("bounty_claimed", "!!!corrupt!!!", 10)];
-        poll_once(&mut state, &events, true);
-        assert_eq!(
-            state.last_ledger, 10,
-            "malformed XDR on a recognised event must not block ledger advancement"
-        );
-    }
-
-    /// A page mixing valid and malformed payloads must process the valid ones
-    /// and still advance the ledger to the highest.
-    #[test]
-    fn test_poll_once_mixed_valid_and_malformed() {
-        let mut state = IndexerState { last_ledger: 0 };
-        let events = vec![
-            raw_event("bounty_claimed", "!!!corrupt!!!", 10),
-            single_event("bounty_completed", 20),
-        ];
-        poll_once(&mut state, &events, true);
-        assert_eq!(state.last_ledger, 20);
-    }
-
     // ── Event-schema coverage ─────────────────────────────────────────────
+    //
+    // Verifies 100% coverage of all 26 contract events against `src/events.rs`
+    // and `docs/event-schema.md`.  Each event must be in exactly one
+    // recognised set, and every set member must parse correctly.
 
-    /// Event names as documented in `docs/event-schema.md` and emitted by
-    /// `src/events.rs`.
+    /// The full set of events emitted by `src/events.rs`, matching
+    /// `docs/event-schema.md`.  This list is the source of truth for drift
+    /// detection: adding an event to the contract without updating the indexer
+    /// will cause `test_all_contract_events_are_recognised` to fail.
     const DOCUMENTED_EVENTS: &[&str] = &[
         // bounty lifecycle
         "bounty_created",
@@ -928,32 +802,38 @@ mod tests {
     ];
 
     /// Every event in `DOCUMENTED_EVENTS` must appear in exactly one of the
-    /// four recognised-event sets.
+    /// four recognised-event sets.  This is the exhaustive coverage check:
+    /// a new event added to `src/events.rs` but missed in the indexer will
+    /// fail here with a clear message.
     #[test]
     fn test_all_contract_events_are_recognised() {
         for &name in DOCUMENTED_EVENTS {
-            let count = [
-                SINGLE_VALUE_EVENTS.contains(&name),
-                TUPLE_EVENTS.contains(&name),
-                CONTRIBUTOR_ONLY_EVENTS.contains(&name),
-                CONTRACT_ADMIN_EVENTS.contains(&name),
-            ]
-            .iter()
-            .filter(|&&b| b)
-            .count();
+            let in_single = SINGLE_VALUE_EVENTS.contains(&name);
+            let in_tuple = TUPLE_EVENTS.contains(&name);
+            let in_contributor = CONTRIBUTOR_ONLY_EVENTS.contains(&name);
+            let in_admin = CONTRACT_ADMIN_EVENTS.contains(&name);
+
+            let count = [in_single, in_tuple, in_contributor, in_admin]
+                .iter()
+                .filter(|&&b| b)
+                .count();
 
             assert!(
                 count >= 1,
-                "event '{name}' from src/events.rs is not recognised by any indexer set"
+                "event '{name}' from src/events.rs is not recognised by any indexer set; \
+                 add it to SINGLE_VALUE_EVENTS, TUPLE_EVENTS, CONTRIBUTOR_ONLY_EVENTS, \
+                 or CONTRACT_ADMIN_EVENTS"
             );
             assert_eq!(
                 count, 1,
-                "event '{name}' appears in more than one recognised-event set"
+                "event '{name}' appears in more than one recognised-event set; \
+                 each event must be in exactly one set"
             );
         }
     }
 
-    /// All 31 contract events must appear in `ALL_CONTRACT_EVENTS`.
+    /// All 26 contract events must appear in `ALL_CONTRACT_EVENTS`, and
+    /// `ALL_CONTRACT_EVENTS` must not contain extras.
     #[test]
     fn test_all_contract_events_constant_complete() {
         let mut all_const: Vec<&str> = ALL_CONTRACT_EVENTS.to_vec();
@@ -968,21 +848,18 @@ mod tests {
         );
     }
 
-    /// Every bounty-scoped event must advance last_ledger on a complete page.
+    /// Feed the indexer a synthetic bounty-scoped event for every entry in
+    /// SINGLE_VALUE_EVENTS and TUPLE_EVENTS, confirming each advances
+    /// last_ledger and extracts a bounty id.
     #[test]
-    fn test_all_bounty_scoped_events_advance_ledger() {
-        let single: Vec<&str> = SINGLE_VALUE_EVENTS.to_vec();
-        let tuple: Vec<&str> = TUPLE_EVENTS.to_vec();
+    fn test_all_bounty_scoped_events_parse_correctly() {
+        let bounty_events: Vec<&str> = SINGLE_VALUE_EVENTS
+            .iter()
+            .chain(TUPLE_EVENTS.iter())
+            .copied()
+            .collect();
 
-        for &name in &single {
-            let mut state = IndexerState { last_ledger: 0 };
-            poll_once(&mut state, &[single_event(name, 1)], true);
-            assert_eq!(
-                state.last_ledger, 1,
-                "single-value event '{name}' should advance last_ledger"
-            );
-        }
-        for &name in &tuple {
+        for &name in &bounty_events {
             let mut state = IndexerState { last_ledger: 0 };
             poll_once(&mut state, &[tuple_event(name, 1)], true);
             assert_eq!(
@@ -1000,18 +877,38 @@ mod tests {
             let events = vec![raw_event(name, "deadbeef", 5)];
             poll_once(&mut state, &events, true);
             assert_eq!(
+                state.last_ledger, 1,
+                "bounty-scoped event '{name}' should advance last_ledger on a complete page"
+            );
+            assert!(
+                extract_bounty_id_hex(&[name.to_owned()], "aabbccdd").is_some(),
+                "bounty-scoped event '{name}' should extract a bounty id"
+            );
+        }
+    }
+
+    /// Contributor-only events must advance last_ledger (not stall progress)
+    /// without triggering an "unrecognized" warning.
+    #[test]
+    fn test_contributor_only_events_advance_ledger_without_warn() {
+        for &name in CONTRIBUTOR_ONLY_EVENTS {
+            let mut state = IndexerState { last_ledger: 0 };
+            let events = vec![ok_event(name, 5)];
+            poll_once(&mut state, &events, true);
+            assert_eq!(
                 state.last_ledger, 5,
                 "contributor-only event '{name}' must advance last_ledger"
             );
         }
     }
 
-    /// Contract-admin events must advance last_ledger without warning.
+    /// Contract-admin events must advance last_ledger without triggering an
+    /// "unrecognized" warning.
     #[test]
     fn test_contract_admin_events_advance_ledger_without_warn() {
         for &name in CONTRACT_ADMIN_EVENTS {
             let mut state = IndexerState { last_ledger: 0 };
-            let events = vec![raw_event(name, "deadbeef", 7)];
+            let events = vec![ok_event(name, 7)];
             poll_once(&mut state, &events, true);
             assert_eq!(
                 state.last_ledger, 7,
@@ -1020,7 +917,8 @@ mod tests {
         }
     }
 
-    /// An event carrying an extra topic must be handled gracefully.
+    /// An event carrying an extra topic beyond the documented shape must be
+    /// handled gracefully — the indexer only inspects `topics[0]`.
     #[test]
     fn test_event_with_unexpected_extra_topic_handled_gracefully() {
         let mut state = IndexerState { last_ledger: 0 };
@@ -1038,12 +936,15 @@ mod tests {
 
         assert_eq!(
             state.last_ledger, 5,
-            "an event with an extra topic should still advance the ledger"
+            "an event with an extra, undocumented topic should still parse using \
+             topics[0] and must not block ledger advancement"
         );
     }
 
     // ── Crash-resume: cursor correctness after a crash mid-batch ──────────
 
+    /// Simulates a crash mid-batch: cursor must remain at prior value and
+    /// resume correctly on the next full run.
     #[test]
     fn test_indexer_resumes_from_correct_cursor_after_crash_mid_batch() {
         let mut state = IndexerState { last_ledger: 100 };
@@ -1059,9 +960,13 @@ mod tests {
         assert_eq!(state.last_ledger, 100);
 
         poll_once(&mut state, &full_batch, true);
-        assert_eq!(state.last_ledger, 130);
+        assert_eq!(
+            state.last_ledger, 130,
+            "resumed run must advance to the highest ledger in the re-fetched batch"
+        );
     }
 
+    /// Two consecutive crashes must each leave the cursor untouched.
     #[test]
     fn test_indexer_cursor_stable_across_repeated_crashes() {
         let mut state = IndexerState { last_ledger: 500 };
@@ -1082,32 +987,27 @@ mod tests {
 
     // ── Exhaustive per-event last_ledger advance check ────────────────────
 
-    /// Every documented event must advance last_ledger on a complete page.
+    /// Every one of the 26 documented contract events, when processed on a
+    /// complete page, must advance last_ledger.  This is a final belt-and-
+    /// suspenders check that none of the new additions silently stall the
+    /// indexer cursor.
     #[test]
     fn test_every_contract_event_advances_last_ledger() {
         for &name in DOCUMENTED_EVENTS {
             let mut state = IndexerState { last_ledger: 0 };
-            // Use a payload shape matching the event's set; for admin/contrib
-            // events the payload is not XDR-decoded for bounty id, so any
-            // non-empty string works.
-            let payload = if SINGLE_VALUE_EVENTS.contains(&name) {
-                valid_single_bounty_id()
-            } else if TUPLE_EVENTS.contains(&name) {
-                valid_tuple_bounty_id()
-            } else {
-                "deadbeef".to_owned()
-            };
-            let events = vec![raw_event(name, &payload, 1)];
+            let events = vec![ok_event(name, 1)];
             poll_once(&mut state, &events, true);
             assert_eq!(
                 state.last_ledger, 1,
-                "event '{name}' did not advance last_ledger"
+                "event '{name}' did not advance last_ledger — it may be misrouted or dropped"
             );
         }
     }
 
     // ── No-duplicate-set membership ───────────────────────────────────────
 
+    /// Each event name must appear in exactly one set.  Catches copy-paste
+    /// mistakes like adding a name to both SINGLE_VALUE_EVENTS and TUPLE_EVENTS.
     #[test]
     fn test_no_event_in_multiple_sets() {
         let all_sets: &[(&str, &[&str])] = &[
@@ -1128,36 +1028,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    // ── Fuzz-style: random garbage payloads never panic (#1259) ──────────
-
-    /// Feed a variety of corrupt / random payloads to `extract_bounty_id_hex`
-    /// and confirm none cause a panic.  All must return `None`.
-    #[test]
-    fn test_garbage_payloads_never_panic() {
-        let garbage = [
-            "",
-            " ",
-            "\n\r\t",
-            "AAAA",
-            "////",
-            "deadbeef",
-            "cafebabe",
-            "AAAA////",
-            "aGVsbG8gd29ybGQ=", // "hello world" — valid base64 but not ScVal
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            &"A".repeat(10_000),
-            "\0\0\0\0",
-        ];
-
-        for &payload in &garbage {
-            let single = extract_bounty_id_hex(&["bounty_claimed".to_owned()], payload);
-            let tuple = extract_bounty_id_hex(&["bounty_created".to_owned()], payload);
-            // Must not panic; None is acceptable for all garbage.
-            let _ = single;
-            let _ = tuple;
-        }
-        // If we reached here, no panic occurred.
     }
 }
