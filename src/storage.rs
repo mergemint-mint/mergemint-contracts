@@ -317,6 +317,51 @@ pub fn get_bounties_by_status_page(env: &Env, status: &Symbol, page: u32) -> Vec
     get_status_page(env, status, page)
 }
 
+/// Read only the page window `[start_page ..= end_page]` for a status index,
+/// returning the concatenated IDs plus the exact `next_cursor`.
+///
+/// At most two contiguous pages are read regardless of the index size, so
+/// paginated queries never hydrate the full status list.
+pub fn get_bounties_by_status_window(
+    env: &Env,
+    status: &Symbol,
+    cursor: u32,
+    limit: u32,
+) -> (Vec<BountyId>, Option<u32>) {
+    let total = get_status_count(env, status);
+    let mut items: Vec<BountyId> = Vec::new(env);
+    if limit == 0 || cursor >= total {
+        return (items, None);
+    }
+    let start_page = cursor / PAGE_SIZE;
+    let end_offset = cursor.saturating_add(limit).min(total);
+    let end_page = (end_offset - 1) / PAGE_SIZE;
+
+    let mut p = start_page;
+    while p <= end_page {
+        let page = get_status_page(env, status, p);
+        let page_start = p * PAGE_SIZE;
+        let mut i = 0u32;
+        while i < page.len() {
+            let flat = page_start + i;
+            if flat >= cursor && flat < end_offset {
+                if let Some(id) = page.get(i) {
+                    items.push_back(id);
+                }
+            }
+            i += 1;
+        }
+        p += 1;
+    }
+
+    let next_cursor = if end_offset < total {
+        Some(end_offset)
+    } else {
+        None
+    };
+    (items, next_cursor)
+}
+
 /// Compatibility helper: returns **all** IDs across all pages for a status.
 ///
 /// For callers that still need the full list (e.g., small status sets in tests).
@@ -556,6 +601,52 @@ fn set_open_bounties_page(env: &Env, page: u32, items: &Vec<BountyId>) {
 /// Returns a single page of open bounty IDs. `page` is 0-indexed.
 pub fn get_open_bounties_page_data(env: &Env, page: u32) -> Vec<BountyId> {
     get_open_bounties_page(env, page)
+}
+
+/// Read only the page window `[start_page ..= end_page]` for the open-bounty
+/// index, returning the concatenated IDs plus the exact `next_cursor`.
+///
+/// `cursor` is a flat item offset; `limit` is the maximum number of IDs to
+/// return. At most two contiguous pages are read regardless of how many
+/// bounties are indexed, keeping ledger reads O(1) in the total index size.
+/// Returns `(items, None)` when the window reaches the end of the index.
+pub fn get_open_bounties_window(
+    env: &Env,
+    cursor: u32,
+    limit: u32,
+) -> (Vec<BountyId>, Option<u32>) {
+    let total = get_open_bounties_count(env);
+    let mut items: Vec<BountyId> = Vec::new(env);
+    if limit == 0 || cursor >= total {
+        return (items, None);
+    }
+    let start_page = cursor / PAGE_SIZE;
+    let end_offset = cursor.saturating_add(limit).min(total);
+    let end_page = (end_offset - 1) / PAGE_SIZE;
+
+    let mut p = start_page;
+    while p <= end_page {
+        let page = get_open_bounties_page(env, p);
+        let page_start = p * PAGE_SIZE;
+        let mut i = 0u32;
+        while i < page.len() {
+            let flat = page_start + i;
+            if flat >= cursor && flat < end_offset {
+                if let Some(id) = page.get(i) {
+                    items.push_back(id);
+                }
+            }
+            i += 1;
+        }
+        p += 1;
+    }
+
+    let next_cursor = if end_offset < total {
+        Some(end_offset)
+    } else {
+        None
+    };
+    (items, next_cursor)
 }
 
 /// Compatibility helper: returns **all** open bounty IDs across all pages.
@@ -1006,21 +1097,26 @@ pub fn set_submission(env: &Env, bounty_id: &BountyId, hash: &soroban_sdk::Bytes
 // ── Creator bounties index ────────────────────────────────────────────────────
 
 pub fn get_creator_bounties(env: &Env, creator: &Address) -> Vec<BountyId> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::ContributorBounties(creator.clone()))
-        .unwrap_or_else(|| Vec::new(env))
+    let key = DataKey::ContributorBounties(creator.clone());
+    let list: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
+    if list.is_some() {
+        extend(env, &key);
+    }
+    list.unwrap_or_else(|| Vec::new(env))
 }
 
 pub fn append_creator_bounty(env: &Env, creator: &Address, bounty_id: &BountyId) {
     let mut list = get_creator_bounties(env, creator);
     list.push_back(bounty_id.clone());
-    env.storage()
-        .persistent()
-        .set(&DataKey::ContributorBounties(creator.clone()), &list);
+    let key = DataKey::ContributorBounties(creator.clone());
+    env.storage().persistent().set(&key, &list);
+    extend(env, &key);
 }
 
 /// Remove `bounty_id` from `creator`'s index (used when ownership moves).
+///
+/// The key is deleted entirely once the index becomes empty so no stale
+/// empty vector keeps accruing TTL-extension rent.
 pub fn remove_creator_bounty(env: &Env, creator: &Address, bounty_id: &BountyId) {
     let list = get_creator_bounties(env, creator);
     let mut kept: Vec<BountyId> = Vec::new(env);
@@ -1029,9 +1125,13 @@ pub fn remove_creator_bounty(env: &Env, creator: &Address, bounty_id: &BountyId)
             kept.push_back(id);
         }
     }
-    env.storage()
-        .persistent()
-        .set(&DataKey::ContributorBounties(creator.clone()), &kept);
+    let key = DataKey::ContributorBounties(creator.clone());
+    if kept.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &kept);
+        extend(env, &key);
+    }
 }
 
 /// Returns the number of bounties currently indexed under `creator`.
@@ -1136,39 +1236,409 @@ pub fn set_min_reward(env: &Env, token: &Address, amount: i128) {
         .set(&DataKey::MinReward(token.clone()), &amount);
 }
 
-// ── Token bounties index ─────────────────────────────────────────────────────
+// ── Token bounties index — paged ─────────────────────────────────────────────
+//
+// Popular reward tokens (e.g. XLM/USDC) can accumulate thousands of bounties.
+// A single `Vec<BountyId>` blob would eventually exceed Soroban's ~64 KB
+// per-entry XDR cap, so the index is sharded into pages of at most PAGE_SIZE
+// entries. Layout:
+//   DataKey::TokenBountiesCount(token)        → u32  (total items, not pages)
+//   DataKey::TokenBountiesPage(token, page)   → Vec<BountyId>  (0-indexed)
+//
+// Appends go to the last page, creating a new page when full. Removal uses a
+// swap-remove: the very last item across all pages fills the hole and the last
+// page is trimmed by one, deleting it when it becomes empty.
 
-/// Returns every bounty ID paid in `token`, in creation order. Empty if
-/// `token` has never been used as a `reward_token`.
+fn get_token_bounties_page(env: &Env, token: &Address, page: u32) -> Vec<BountyId> {
+    let key = DataKey::TokenBountiesPage(token.clone(), page);
+    let result: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
+    if result.is_some() {
+        extend(env, &key);
+    }
+    result.unwrap_or_else(|| Vec::new(env))
+}
+
+fn set_token_bounties_page(env: &Env, token: &Address, page: u32, items: &Vec<BountyId>) {
+    let key = DataKey::TokenBountiesPage(token.clone(), page);
+    if items.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, items);
+        extend(env, &key);
+    }
+}
+
+/// Returns the total number of bounties indexed for `token` (not page count).
+pub fn get_token_bounties_count(env: &Env, token: &Address) -> u32 {
+    let key = DataKey::TokenBountiesCount(token.clone());
+    let count: Option<u32> = env.storage().persistent().get(&key);
+    if count.is_some() {
+        extend(env, &key);
+    }
+    count.unwrap_or(0)
+}
+
+fn set_token_bounties_count(env: &Env, token: &Address, count: u32) {
+    let key = DataKey::TokenBountiesCount(token.clone());
+    if count == 0 {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &count);
+        extend(env, &key);
+    }
+}
+
+/// Returns a single page of bounty IDs for `token`. `page` is 0-indexed.
+/// Returns an empty `Vec` when `page >= page_count`.
+pub fn get_token_bounties_page_data(env: &Env, token: &Address, page: u32) -> Vec<BountyId> {
+    get_token_bounties_page(env, token, page)
+}
+
+/// Compatibility helper: returns **all** bounty IDs paid in `token`, in
+/// creation order. Walks every page; prefer `get_token_bounties_page_data`
+/// for bounded reads.
 pub fn get_token_bounties(env: &Env, token: &Address) -> Vec<BountyId> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::TokenBounties(token.clone()))
-        .unwrap_or_else(|| Vec::new(env))
+    let total = get_token_bounties_count(env, token);
+    let mut result = Vec::new(env);
+    if total == 0 {
+        return result;
+    }
+    let page_count = total.div_ceil(PAGE_SIZE);
+    let mut i = 0u32;
+    while i < page_count {
+        let page = get_token_bounties_page(env, token, i);
+        for id in page.iter() {
+            result.push_back(id);
+        }
+        i += 1;
+    }
+    result
 }
 
 /// Append `bounty_id` to `token`'s index. Called once from `create_bounty`.
 pub fn append_token_bounty(env: &Env, token: &Address, bounty_id: &BountyId) {
-    let mut list = get_token_bounties(env, token);
-    list.push_back(bounty_id.clone());
-    env.storage()
-        .persistent()
-        .set(&DataKey::TokenBounties(token.clone()), &list);
+    let total = get_token_bounties_count(env, token);
+    let target_page_idx = if total == 0 {
+        0
+    } else if total.is_multiple_of(PAGE_SIZE) {
+        total / PAGE_SIZE
+    } else {
+        total.div_ceil(PAGE_SIZE) - 1
+    };
+    let mut page = get_token_bounties_page(env, token, target_page_idx);
+    page.push_back(bounty_id.clone());
+    set_token_bounties_page(env, token, target_page_idx, &page);
+    set_token_bounties_count(env, token, total + 1);
 }
 
 /// Remove `bounty_id` from `token`'s index. Called from `archive_bounty` so
 /// the index never points at a pruned full record.
 pub fn remove_token_bounty(env: &Env, token: &Address, bounty_id: &BountyId) {
-    let list = get_token_bounties(env, token);
-    let mut trimmed: Vec<BountyId> = Vec::new(env);
-    for id in list.iter() {
-        if id != *bounty_id {
-            trimmed.push_back(id);
+    let total = get_token_bounties_count(env, token);
+    if total == 0 {
+        return;
+    }
+    let page_count = total.div_ceil(PAGE_SIZE);
+
+    // Locate the target across pages.
+    let mut found_page: Option<u32> = None;
+    let mut found_pos: Option<u32> = None;
+    let mut p = 0u32;
+    'outer: while p < page_count {
+        let page = get_token_bounties_page(env, token, p);
+        for (pos, id) in page.iter().enumerate() {
+            if id == *bounty_id {
+                found_page = Some(p);
+                found_pos = Some(pos as u32);
+                break 'outer;
+            }
+        }
+        p += 1;
+    }
+
+    let (fp, fpos) = match (found_page, found_pos) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return,
+    };
+
+    let last_page_idx = page_count - 1;
+    let last_page = get_token_bounties_page(env, token, last_page_idx);
+    if last_page.is_empty() {
+        fail(ContractError::CorruptedIndex);
+    }
+    let last_item = match last_page.get(last_page.len() - 1) {
+        Some(item) => item,
+        None => fail(ContractError::CorruptedIndex),
+    };
+
+    if fp == last_page_idx && fpos == last_page.len() - 1 {
+        // Removing the very last item — just trim the last page.
+        let mut trimmed: Vec<BountyId> = Vec::new(env);
+        let mut i = 0u32;
+        while i < last_page.len() - 1 {
+            trimmed.push_back(
+                last_page
+                    .get(i)
+                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+            );
+            i += 1;
+        }
+        set_token_bounties_page(env, token, last_page_idx, &trimmed);
+    } else {
+        // Move the last item into the hole, then trim the last page.
+        let target_page = get_token_bounties_page(env, token, fp);
+        let mut new_target: Vec<BountyId> = Vec::new(env);
+        let mut i = 0u32;
+        while i < target_page.len() {
+            if i == fpos {
+                new_target.push_back(last_item.clone());
+            } else {
+                new_target.push_back(
+                    target_page
+                        .get(i)
+                        .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+                );
+            }
+            i += 1;
+        }
+        set_token_bounties_page(env, token, fp, &new_target);
+
+        // Shrink the freshly written copy when the target was on the last
+        // page; the pre-swap `last_page` would resurrect the removed id.
+        let source = if fp == last_page_idx {
+            new_target
+        } else {
+            last_page
+        };
+        let mut trimmed: Vec<BountyId> = Vec::new(env);
+        let mut i = 0u32;
+        while i < source.len() - 1 {
+            trimmed.push_back(
+                source
+                    .get(i)
+                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+            );
+            i += 1;
+        }
+        set_token_bounties_page(env, token, last_page_idx, &trimmed);
+    }
+
+    set_token_bounties_count(env, token, total - 1);
+}
+
+// ── Tag index — paged ────────────────────────────────────────────────────────
+//
+// Bounties are tagged with `Symbol`s. A full scan over every open bounty to
+// answer a tag query is O(N); instead each tag maintains its own paged index.
+// Layout:
+//   DataKey::TagIndexCount(tag)        → u32  (total items, not pages)
+//   DataKey::TagIndexPage(tag, page)   → Vec<BountyId>  (0-indexed)
+//
+// Same append / swap-remove / page-slice semantics as the other paged indexes.
+
+fn get_tag_index_page(env: &Env, tag: &Symbol, page: u32) -> Vec<BountyId> {
+    let key = DataKey::TagIndexPage(tag.clone(), page);
+    let result: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
+    if result.is_some() {
+        extend(env, &key);
+    }
+    result.unwrap_or_else(|| Vec::new(env))
+}
+
+fn set_tag_index_page(env: &Env, tag: &Symbol, page: u32, items: &Vec<BountyId>) {
+    let key = DataKey::TagIndexPage(tag.clone(), page);
+    if items.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, items);
+        extend(env, &key);
+    }
+}
+
+/// Returns the total number of bounties indexed under `tag` (not page count).
+pub fn get_tag_index_count(env: &Env, tag: &Symbol) -> u32 {
+    let key = DataKey::TagIndexCount(tag.clone());
+    let count: Option<u32> = env.storage().persistent().get(&key);
+    if count.is_some() {
+        extend(env, &key);
+    }
+    count.unwrap_or(0)
+}
+
+fn set_tag_index_count(env: &Env, tag: &Symbol, count: u32) {
+    let key = DataKey::TagIndexCount(tag.clone());
+    if count == 0 {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &count);
+        extend(env, &key);
+    }
+}
+
+/// Returns a single page of bounty IDs for `tag`. `page` is 0-indexed.
+pub fn get_tag_bounties_page_data(env: &Env, tag: &Symbol, page: u32) -> Vec<BountyId> {
+    get_tag_index_page(env, tag, page)
+}
+
+/// Append `bounty_id` to `tag`'s index. Idempotent: a bounty already present
+/// in the index is not added twice.
+pub fn append_tag_bounty(env: &Env, tag: &Symbol, bounty_id: &BountyId) {
+    let total = get_tag_index_count(env, tag);
+    if total > 0 {
+        let page_count = total.div_ceil(PAGE_SIZE);
+        let mut p = 0u32;
+        while p < page_count {
+            let page = get_tag_index_page(env, tag, p);
+            for id in page.iter() {
+                if id == *bounty_id {
+                    return;
+                }
+            }
+            p += 1;
         }
     }
-    env.storage()
-        .persistent()
-        .set(&DataKey::TokenBounties(token.clone()), &trimmed);
+    let target_page_idx = if total == 0 {
+        0
+    } else if total.is_multiple_of(PAGE_SIZE) {
+        total / PAGE_SIZE
+    } else {
+        total.div_ceil(PAGE_SIZE) - 1
+    };
+    let mut page = get_tag_index_page(env, tag, target_page_idx);
+    page.push_back(bounty_id.clone());
+    set_tag_index_page(env, tag, target_page_idx, &page);
+    set_tag_index_count(env, tag, total + 1);
+}
+
+/// Remove `bounty_id` from `tag`'s index using a swap-remove across pages.
+pub fn remove_tag_bounty(env: &Env, tag: &Symbol, bounty_id: &BountyId) {
+    let total = get_tag_index_count(env, tag);
+    if total == 0 {
+        return;
+    }
+    let page_count = total.div_ceil(PAGE_SIZE);
+
+    let mut found_page: Option<u32> = None;
+    let mut found_pos: Option<u32> = None;
+    let mut p = 0u32;
+    'outer: while p < page_count {
+        let page = get_tag_index_page(env, tag, p);
+        for (pos, id) in page.iter().enumerate() {
+            if id == *bounty_id {
+                found_page = Some(p);
+                found_pos = Some(pos as u32);
+                break 'outer;
+            }
+        }
+        p += 1;
+    }
+
+    let (fp, fpos) = match (found_page, found_pos) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return,
+    };
+
+    let last_page_idx = page_count - 1;
+    let last_page = get_tag_index_page(env, tag, last_page_idx);
+    if last_page.is_empty() {
+        fail(ContractError::CorruptedIndex);
+    }
+    let last_item = match last_page.get(last_page.len() - 1) {
+        Some(item) => item,
+        None => fail(ContractError::CorruptedIndex),
+    };
+
+    if fp == last_page_idx && fpos == last_page.len() - 1 {
+        let mut trimmed: Vec<BountyId> = Vec::new(env);
+        let mut i = 0u32;
+        while i < last_page.len() - 1 {
+            trimmed.push_back(
+                last_page
+                    .get(i)
+                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+            );
+            i += 1;
+        }
+        set_tag_index_page(env, tag, last_page_idx, &trimmed);
+    } else {
+        let target_page = get_tag_index_page(env, tag, fp);
+        let mut new_target: Vec<BountyId> = Vec::new(env);
+        let mut i = 0u32;
+        while i < target_page.len() {
+            if i == fpos {
+                new_target.push_back(last_item.clone());
+            } else {
+                new_target.push_back(
+                    target_page
+                        .get(i)
+                        .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+                );
+            }
+            i += 1;
+        }
+        set_tag_index_page(env, tag, fp, &new_target);
+
+        let source = if fp == last_page_idx {
+            new_target
+        } else {
+            last_page
+        };
+        let mut trimmed: Vec<BountyId> = Vec::new(env);
+        let mut i = 0u32;
+        while i < source.len() - 1 {
+            trimmed.push_back(
+                source
+                    .get(i)
+                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+            );
+            i += 1;
+        }
+        set_tag_index_page(env, tag, last_page_idx, &trimmed);
+    }
+
+    set_tag_index_count(env, tag, total - 1);
+}
+
+/// Read only the page window `[start_page ..= end_page]` for a tag index,
+/// returning the concatenated IDs plus the exact `next_cursor`.
+pub fn get_tag_bounties_window(
+    env: &Env,
+    tag: &Symbol,
+    cursor: u32,
+    limit: u32,
+) -> (Vec<BountyId>, Option<u32>) {
+    let total = get_tag_index_count(env, tag);
+    let mut items: Vec<BountyId> = Vec::new(env);
+    if limit == 0 || cursor >= total {
+        return (items, None);
+    }
+    let start_page = cursor / PAGE_SIZE;
+    let end_offset = cursor.saturating_add(limit).min(total);
+    let end_page = (end_offset - 1) / PAGE_SIZE;
+
+    let mut p = start_page;
+    while p <= end_page {
+        let page = get_tag_index_page(env, tag, p);
+        let page_start = p * PAGE_SIZE;
+        let mut i = 0u32;
+        while i < page.len() {
+            let flat = page_start + i;
+            if flat >= cursor && flat < end_offset {
+                if let Some(id) = page.get(i) {
+                    items.push_back(id);
+                }
+            }
+            i += 1;
+        }
+        p += 1;
+    }
+
+    let next_cursor = if end_offset < total {
+        Some(end_offset)
+    } else {
+        None
+    };
+    (items, next_cursor)
 }
 
 // ── Contributor bounty history — paged ───────────────────────────────────────

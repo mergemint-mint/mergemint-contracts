@@ -238,6 +238,9 @@ fn complete_bounty_inner(
             &bounty.assignees,
         );
         storage::decrement_creator_open_count(&env, &bounty.creator);
+        for tag in bounty.tags.iter() {
+            storage::remove_tag_bounty(&env, &tag, &bounty_id);
+        }
         events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
         return Ok(());
     }
@@ -257,6 +260,9 @@ fn complete_bounty_inner(
         &bounty.assignees,
     );
     storage::decrement_creator_open_count(&env, &bounty.creator);
+    for tag in bounty.tags.iter() {
+        storage::remove_tag_bounty(&env, &tag, &bounty_id);
+    }
 
     let token = TokenClient::new(&env, &bounty.reward_token);
     distribute_payout(
@@ -519,6 +525,12 @@ impl MergeMintContract {
         storage::increment_bounties_by_creator_count(&env, &creator);
         storage::increment_bounties_by_token_count(&env, &bounty.reward_token);
 
+        // Maintain the per-tag index so `get_bounties_by_tag` can page over
+        // open bounties without scanning every bounty in the contract.
+        for tag in bounty.tags.iter() {
+            storage::append_tag_bounty(&env, &tag, &id);
+        }
+
         events::emit_bounty_created(&env, &id, &creator, &reward_amount);
         Ok(id)
     }
@@ -647,8 +659,12 @@ impl MergeMintContract {
         contrib.active_claims += 1;
         storage::store_contributor(&env, &contributor, &contrib);
 
-        // Remove from open bounties list.
+        // Remove from open bounties list and the per-tag index: the bounty is
+        // no longer open, so `get_bounties_by_tag` must stop returning it.
         storage::remove_open_bounty(&env, &bounty_id);
+        for tag in bounty.tags.iter() {
+            storage::remove_tag_bounty(&env, &tag, &bounty_id);
+        }
 
         events::emit_bounty_claimed(&env, &bounty_id, &contributor);
         Ok(())
@@ -711,6 +727,9 @@ impl MergeMintContract {
                 &bounty.assignees,
             );
             storage::add_open_bounty(&env, &bounty_id);
+            for tag in bounty.tags.iter() {
+                storage::append_tag_bounty(&env, &tag, &bounty_id);
+            }
         } else {
             storage::store_bounty(&env, &bounty_id, &bounty);
         }
@@ -975,6 +994,9 @@ impl MergeMintContract {
                     &bounty.assignees,
                 );
                 storage::decrement_creator_open_count(&env, &bounty.creator);
+                for tag in bounty.tags.iter() {
+                    storage::remove_tag_bounty(&env, &tag, &bounty_id);
+                }
                 let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
                 events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
                 return;
@@ -1002,6 +1024,9 @@ impl MergeMintContract {
                 &bounty.assignees,
             );
             storage::decrement_creator_open_count(&env, &bounty.creator);
+            for tag in bounty.tags.iter() {
+                storage::remove_tag_bounty(&env, &tag, &bounty_id);
+            }
             events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
         }
     }
@@ -1049,6 +1074,9 @@ impl MergeMintContract {
             &bounty.assignees,
         );
         storage::decrement_creator_open_count(&env, &bounty.creator);
+        for tag in bounty.tags.iter() {
+            storage::remove_tag_bounty(&env, &tag, &bounty_id);
+        }
         events::emit_bounty_disputed(&env, &bounty_id, &caller);
     }
 
@@ -1365,6 +1393,9 @@ impl MergeMintContract {
             &bounty.assignees,
         );
         storage::decrement_creator_open_count(&env, &bounty.creator);
+        for tag in bounty.tags.iter() {
+            storage::remove_tag_bounty(&env, &tag, &bounty_id);
+        }
 
         events::emit_bounty_cancelled(&env, &bounty_id, &caller);
     }
@@ -1425,6 +1456,9 @@ impl MergeMintContract {
             &bounty.assignees,
         );
         storage::decrement_creator_open_count(&env, &bounty.creator);
+        for tag in bounty.tags.iter() {
+            storage::remove_tag_bounty(&env, &tag, &bounty_id);
+        }
 
         events::emit_bounty_expired(&env, &bounty_id, &bounty.creator);
     }
@@ -1764,6 +1798,9 @@ impl MergeMintContract {
             &bounty.assignees,
         );
         storage::add_open_bounty(&env, &bounty_id);
+        for tag in bounty.tags.iter() {
+            storage::append_tag_bounty(&env, &tag, &bounty_id);
+        }
         storage::clear_claimed_at_ledger(&env, &bounty_id);
 
         events::emit_claim_released(&env, &bounty_id, &caller);
@@ -2160,6 +2197,20 @@ impl MergeMintContract {
         }
 
         validate_tags(&env, &tags);
+
+        // Diff the old and new tag lists so the per-tag index only reflects
+        // the bounty's current tags. Each tag is validated against
+        // `SymbolKind::Tag` by `validate_tags` above.
+        for old_tag in bounty.tags.iter() {
+            if !tags.iter().any(|t| t == old_tag) {
+                storage::remove_tag_bounty(&env, &old_tag, &bounty_id);
+            }
+        }
+        for new_tag in tags.iter() {
+            if !bounty.tags.iter().any(|t| t == new_tag) {
+                storage::append_tag_bounty(&env, &new_tag, &bounty_id);
+            }
+        }
 
         bounty.tags = tags;
         storage::store_bounty(&env, &bounty_id, &bounty);
