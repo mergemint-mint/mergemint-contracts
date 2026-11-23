@@ -25,5 +25,8 @@ pub use contract::MergeMintContractClient;
 #[cfg(test)]
 mod test;
 
+#[cfg(test)]
+mod ownership_race_tests;
+
 #[cfg(all(test, feature = "fuzz"))]
 mod fuzz_tests;
