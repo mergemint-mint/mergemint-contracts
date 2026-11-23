@@ -25,3 +25,13 @@ CREATE TRIGGER bounties_search_vector_update
 
 CREATE INDEX IF NOT EXISTS idx_bounties_search_vector
     ON bounties USING GIN (search_vector);
+
+-- Index-backed pagination: stable ordering for cursor-based keyset scans.
+CREATE INDEX IF NOT EXISTS idx_bounties_created_at_id
+    ON bounties (created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bounties_updated_at_id
+    ON bounties (updated_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bounties_reward_id
+    ON bounties (reward DESC, id DESC);

@@ -442,6 +442,54 @@ pub fn migrate_bounties(env: &Env, admin: Address, ids: Vec<BytesN<32>>) {
 - Soroban instruction limits constrain how many entries can be migrated per invocation; large data sets require batched calls.
 - Risk of partial migration if the transaction fails mid-way.
 
+#### `migrate_legacy_indexes` — migrating legacy index blobs
+
+The paginated list queries (see [Part 1](#1-paginated-list-queries)) store their indexes in sharded pages (`StatusIndexPage` / `OpenBountiesPage`). Deployments that predate pagination still hold the old monolithic blobs under `DataKey::StatusIndex(Symbol)` and `DataKey::OpenBounties`. Those legacy keys are **not** read by the current code, so a deployment upgraded in place will appear to have empty status/open indexes until they are drained.
+
+`migrate_legacy_indexes` is the admin-only entrypoint that performs this drain:
+
+```rust
+pub fn migrate_legacy_indexes(
+    env: &Env,
+    admin: Address,
+    status: Option<Symbol>,
+    max_entries: u32,
+) -> u32
+```
+
+- `admin` must authorise the call (`require_admin`); any other caller aborts with `NotAdmin`.
+- `status: Some(s)` migrates only the legacy `DataKey::StatusIndex(s)` blob; `None` migrates the legacy `DataKey::OpenBounties` blob.
+- `max_entries` bounds how many IDs are moved in this invocation. It is clamped to an internal maximum so a single call always fits within one transaction's CPU and ledger-write budget. Pass a smaller value if you are close to the limit.
+- The return value is the number of IDs migrated by this call.
+
+**Chunking.** The legacy blob is read once, up to `max_entries` IDs are appended to the corresponding page shards, and the remaining IDs are written back to the legacy key. Repeat the call until it returns `0`; each call is a separate transaction, so the total migration cost is spread across as many invocations as needed. Because the legacy key is rewritten with the un-migrated remainder, progress is durable: a failed transaction leaves the legacy key untouched and the next call resumes from the same point.
+
+**Idempotency and deduplication.** IDs already present in the destination shards are skipped, so re-running the entrypoint (or replaying a transaction) never produces duplicate index entries. Once the legacy blob is fully drained, the entrypoint deletes the legacy key (`DataKey::StatusIndex(s)` or `DataKey::OpenBounties`) and subsequent calls are no-ops that return `0`.
+
+**Calling it**
+
+```bash
+# Drain the open-bounties index, 50 IDs per transaction.
+stellar contract invoke --id $CONTRACT_ID --network testnet --source-account admin -- \
+  migrate_legacy_indexes --admin $ADMIN --max_entries 50
+
+# Drain a single status index (e.g. "open").
+stellar contract invoke --id $CONTRACT_ID --network testnet --source-account admin -- \
+  migrate_legacy_indexes --admin $ADMIN --status open --max_entries 50
+```
+
+```rust
+// Loop until the legacy key is drained (returns 0).
+loop {
+    let moved = client.migrate_legacy_indexes(&admin, &None, &50);
+    if moved == 0 {
+        break;
+    }
+}
+```
+
+> Run the migration **before** routing user traffic to the upgraded contract, or accept that list views will be incomplete until it finishes. The migration is safe to run while the contract serves reads and writes: new bounties are written directly to the paged shards and are never added to the legacy keys.
+
 ---
 
 ### Option 4 — Contract replacement
@@ -465,6 +513,8 @@ Deploy a new contract instance, copy state via an export/import mechanism, and r
 - Reserve the admin migration function (Option 3) for cases where a large number of entries must be upgraded before a deadline (e.g., TTL pressure).
 - Reserve contract replacement (Option 4) for major architectural changes only.
 
+**Legacy index blobs.** The `StatusIndex` / `OpenBounties` → `StatusIndexPage` / `OpenBountiesPage` change is a `DataKey` rename plus a layout change, so it uses the admin migration path (Option 3). Run [`migrate_legacy_indexes`](#migrate_legacy_indexes--migrating-legacy-index-blobs) in bounded chunks until it returns `0`; the legacy keys are deleted once drained.
+
 ### Versioning policy
 
 | Change type | Strategy |
@@ -475,6 +525,7 @@ Deploy a new contract instance, copy state via an export/import mechanism, and r
 | Reorder fields | Versioned struct |
 | Change field type | Versioned struct |
 | Rename `DataKey` variant | Admin migration or contract replacement |
+| Replace monolithic index blob with paged shards | Admin migration (`migrate_legacy_indexes`) |
 
 ### When to use `Option<T>` instead of a new struct version
 

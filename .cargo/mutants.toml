@@ -1,0 +1,18 @@
+# cargo-mutants configuration (issue #1242).
+# Focus mutation testing on the security-critical guard modules and make sure
+# the dedicated boundary tests in src/mutation_guard_tests.rs are exercised.
+examine_globs = [
+    "src/contract/mutations.rs",
+    "src/symbols.rs",
+    "src/storage.rs",
+]
+exclude_globs = [
+    "src/test.rs",
+    "src/fuzz_tests.rs",
+    "src/*_tests.rs",
+    "src/verification_proofs.rs",
+]
+# Boundary mutants (>, >=, <, <=) on deadline, min_reputation, approval_threshold,
+# claim_window, MAX_TAGS and MAX_DISPUTE_EVIDENCE must be killed by tests.
+additional_cargo_test_args = []
+timeout_multiplier = 3.0
