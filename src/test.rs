@@ -5493,6 +5493,10 @@ fn test_cancel_bounty_all_milestones_completed_zero_refund() {
         &1,
         &milestones,
     );
+    assert!(result.is_err(), "insufficient balance must fail closed");
+    assert_eq!(token_balance(&env, &token, &creator), 10);
+    assert_eq!(token_balance(&env, &token, &contract_id), 0);
+}
 
     client.claim_bounty(&contributor, &bounty_id);
     // Complete the only milestone — 1 000 tokens paid to contributor.
@@ -6214,16 +6218,86 @@ fn test_non_token_reward_rejected() {
         &1,
         &milestones,
     );
-    client.claim_bounty(&contributor, &bounty_id);
-    client.submit_work(&contributor, &bounty_id, &BytesN::from_array(&env, &[7u8; 32]));
-
-    client.complete_milestone(&verifier, &bounty_id, &0);
-
-    assert!(client.get_bounty(&bounty_id).unwrap().milestones.get(0).unwrap().completed);
+    assert!(res.is_err(), "non-token reward must be rejected");
+    assert_eq!(client.get_bounty_count(), 0);
 }
 
 #[test]
-#[should_panic(expected = "bounty is not in progress")]
+fn test_escrow_conserved_on_complete() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "esc_c", 1000, None);
+    assert_eq!(token_balance(&env, &token, &contract_id), 1000);
+
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+
+    assert_eq!(token_balance(&env, &token, &contract_id), 0);
+    assert_eq!(token_balance(&env, &token, &contributor), 1000);
+}
+
+#[test]
+fn test_escrow_conserved_on_cancel() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "esc_x", 1000, None);
+    assert_eq!(token_balance(&env, &token, &contract_id), 1000);
+
+    client.cancel_bounty(&creator, &bounty_id);
+
+    assert_eq!(token_balance(&env, &token, &contract_id), 0);
+    assert_eq!(token_balance(&env, &token, &creator), 1000);
+}
+
+#[test]
+fn test_escrow_conserved_on_expire() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "esc_e", 1000, Some(50));
+    assert_eq!(token_balance(&env, &token, &contract_id), 1000);
+
+    env.ledger().set_sequence_number(100);
+    client.expire_bounty(&creator, &bounty_id);
+
+    assert_eq!(token_balance(&env, &token, &contract_id), 0);
+    assert_eq!(token_balance(&env, &token, &creator), 1000);
+}
+
+#[test]
+fn test_escrow_conserved_on_dispute_resolution() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let arbitrator = Address::generate(&env);
+
+    let (bounty_id, token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "esc_d", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+    assert_eq!(token_balance(&env, &token, &contract_id), 1000);
+
+    client.resolve_dispute(&arbitrator, &bounty_id, &Symbol::new(&env, "complete"));
+
+    assert_eq!(token_balance(&env, &token, &contract_id), 0);
+    assert_eq!(token_balance(&env, &token, &contributor), 1000);
+    assert_eq!(
+        token_balance(&env, &token, &arbitrator),
+        0,
+        "arbitrator must never fund the payout"
+    );
+    let _ = verifier;
+}
+
+#[test]
 fn test_1180_approve_completion_rejects_open_bounty() {
     let (env, creator, _contributor, verifier) = setup_test();
     let contract_id = env.register(MergeMintContract, ());
@@ -6315,6 +6389,356 @@ fn test_1181_completion_records_marker() {
         archive_marker(&env, &contract_id, &bounty_id),
         Some(500 + storage::ARCHIVE_GRACE_PERIOD_LEDGERS)
     );
+    let _ = verifier;
+}
+
+// ===========================================================================
+// Issue #1185 — milestone accounting: no premature active_claims decrement
+// ===========================================================================
+
+/// Build a bounty with two milestones (600 / 400) funded by a real token.
+fn make_milestone_bounty(
+    client: &MergeMintContractClient,
+    env: &Env,
+    creator: &Address,
+    contract_id: &Address,
+    tag: &str,
+) -> (BountyId, Address) {
+    let token = create_token_and_mint(env, creator, creator, 1000);
+    let mut milestones = Vec::new(env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(env, "m1"),
+        reward: 600,
+        completed: false,
+        deadline: None,
+    });
+    milestones.push_back(Milestone {
+        description: Symbol::new(env, "m2"),
+        reward: 400,
+        completed: false,
+        deadline: None,
+    });
+    let bounty_id = client.create_bounty(
+        creator,
+        &Symbol::new(env, tag),
+        &String::from_str(env, "desc"),
+        &1000,
+        &token,
+        &0,
+        &None,
+        &Vec::new(env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+    (bounty_id, token)
+}
+
+/// Intermediate milestone payouts must not release the contributor's active
+/// claim; only final completion does.
+#[test]
+fn test_multi_milestone_keeps_active_claim_until_final_completion() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, token) =
+        make_milestone_bounty(&client, &env, &creator, &contract_id, "ms_claim");
+    client.claim_bounty(&contributor, &bounty_id);
+    assert_eq!(
+        client.get_contributor_active_bounty(&contributor),
+        Some(bounty_id.clone())
+    );
+
+    client.complete_milestone(&verifier, &bounty_id, &0);
+    assert_eq!(
+        client.get_contributor_active_bounty(&contributor),
+        Some(bounty_id.clone()),
+        "active claim must survive an intermediate milestone"
+    );
+    assert_eq!(token_balance(&env, &token, &contributor), 600);
+    assert_eq!(token_balance(&env, &token, &contract_id), 400);
+
+    client.complete_milestone(&verifier, &bounty_id, &1);
+    assert_eq!(
+        client.get_contributor_active_bounty(&contributor),
+        None,
+        "final milestone must release the active claim"
+    );
+    assert_eq!(token_balance(&env, &token, &contributor), 1000);
+    assert_eq!(token_balance(&env, &token, &contract_id), 0);
+}
+
+/// Splitting a bounty into many milestones must not inflate reputation: the
+/// contributor earns the same reputation as a single completion.
+#[test]
+fn test_split_milestones_cannot_farm_reputation() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) =
+        make_milestone_bounty(&client, &env, &creator, &contract_id, "ms_rep");
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_milestone(&verifier, &bounty_id, &0);
+    let after_first = client.get_contributor(&contributor).unwrap();
+    client.complete_milestone(&verifier, &bounty_id, &1);
+    let after_final = client.get_contributor(&contributor).unwrap();
+
+    assert!(
+        after_final.reputation >= after_first.reputation,
+        "reputation must be monotonic"
+    );
+    assert_eq!(
+        after_final.contribution_count, 1,
+        "a multi-milestone bounty counts as exactly one contribution"
+    );
+    assert!(
+        after_final.reputation <= 10,
+        "milestone splitting must not award more than one completion's reputation"
+    );
+}
+
+// ===========================================================================
+// Issue #1186 — unclaim_bounty status guards, timestamp cleanup, rebalancing
+// ===========================================================================
+
+/// Create a bounty with `max_assignees` slots funded by a real token.
+fn make_multi_assignee_bounty(
+    client: &MergeMintContractClient,
+    env: &Env,
+    creator: &Address,
+    contract_id: &Address,
+    tag: &str,
+    max_assignees: u32,
+) -> (BountyId, Address) {
+    let token = create_token_and_mint(env, creator, contract_id, 1000);
+    let bounty_id = client.create_bounty(
+        creator,
+        &Symbol::new(env, tag),
+        &String::from_str(env, "desc"),
+        &1000,
+        &token,
+        &0,
+        &None,
+        &Vec::new(env),
+        &max_assignees,
+        &None,
+        &1,
+        &Vec::new(env),
+    );
+    (bounty_id, token)
+}
+
+/// Unclaiming a completed bounty must be rejected.
+#[test]
+#[should_panic(expected = "bounty is not in progress")]
+fn test_unclaim_rejected_on_completed_bounty() {
+    let (env, creator, contributor, verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "uc_c", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+    client.unclaim_bounty(&contributor, &bounty_id);
+}
+
+/// Unclaiming a cancelled bounty must be rejected.
+#[test]
+#[should_panic(expected = "bounty is not in progress")]
+fn test_unclaim_rejected_on_cancelled_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "uc_x", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.cancel_bounty(&creator, &bounty_id);
+    client.unclaim_bounty(&contributor, &bounty_id);
+}
+
+/// Unclaiming a disputed bounty must be rejected.
+#[test]
+#[should_panic(expected = "bounty is not in progress")]
+fn test_unclaim_rejected_on_disputed_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "uc_d", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+    client.unclaim_bounty(&contributor, &bounty_id);
+}
+
+/// Unclaiming a bounty with submitted work must be rejected.
+#[test]
+#[should_panic(expected = "bounty is not in progress")]
+fn test_unclaim_rejected_on_submitted_bounty() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "uc_s", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.submit_work(
+        &contributor,
+        &bounty_id,
+        &BytesN::from_array(&env, &[3u8; 32]),
+    );
+    client.unclaim_bounty(&contributor, &bounty_id);
+}
+
+/// When the last assignee unclaims, the claim timestamp is cleared so the
+/// bounty can be claimed again without a stale cooldown.
+#[test]
+fn test_unclaim_last_assignee_clears_claimed_at_ledger() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bounty_id = make_bounty(&client, &env, &creator, "uc_ts", None);
+    client.claim_bounty(&contributor, &bounty_id);
+    env.as_contract(&contract_id, || {
+        assert!(env
+            .storage()
+            .persistent()
+            .has(&DataKey::ClaimedAtLedger(bounty_id.clone())));
+    });
+
+    client.unclaim_bounty(&contributor, &bounty_id);
+    env.as_contract(&contract_id, || {
+        assert!(
+            !env.storage()
+                .persistent()
+                .has(&DataKey::ClaimedAtLedger(bounty_id.clone())),
+            "ClaimedAtLedger must be cleared when the last assignee unclaims"
+        );
+    });
+    assert!(client.get_bounty(&bounty_id).unwrap().assignees.is_empty());
+}
+
+/// After a partial unclaim on a multi-assignee bounty, the remaining
+/// assignees' shares must still sum to exactly 10_000 bps.
+#[test]
+fn test_partial_unclaim_rebalances_shares_to_10000_bps() {
+    let (env, creator, contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    let contributor2 = Address::generate(&env);
+
+    let (bounty_id, _token) =
+        make_multi_assignee_bounty(&client, &env, &creator, &contract_id, "uc_rb", 2);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.claim_bounty(&contributor2, &bounty_id);
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    let total: u32 = bounty
+        .assignees
+        .iter()
+        .map(|(_, share)| share)
+        .sum();
+    assert_eq!(total, 10_000);
+
+    client.unclaim_bounty(&contributor, &bounty_id);
+
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.assignees.len(), 1);
+    let (remaining, share) = bounty.assignees.get(0).unwrap();
+    assert_eq!(remaining, contributor2);
+    assert_eq!(
+        share, 10_000,
+        "sole remaining assignee must hold the full share"
+    );
+    let total: u32 = bounty
+        .assignees
+        .iter()
+        .map(|(_, share)| share)
+        .sum();
+    assert_eq!(total, 10_000, "shares must conserve 10_000 bps");
+}
+
+// ===========================================================================
+// Issue #1188 — no lazy admin takeover in config setters
+// ===========================================================================
+
+/// Without `init_admin`, `set_appeal_window` must fail closed with NotAdmin.
+#[test]
+#[should_panic(expected = "caller is not the contract admin")]
+fn test_set_appeal_window_uninitialized_fails_closed() {
+    let (env, _creator, caller, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    client.set_appeal_window(&caller, &10);
+}
+
+/// Without `init_admin`, `set_creator_open_limit` must fail closed with NotAdmin.
+#[test]
+#[should_panic(expected = "caller is not the contract admin")]
+fn test_set_creator_open_limit_uninitialized_fails_closed() {
+    let (env, _creator, caller, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    client.set_creator_open_limit(&caller, &3);
+}
+
+/// Without `init_admin`, `set_claim_cooldown` must fail closed with NotAdmin.
+#[test]
+#[should_panic(expected = "caller is not the contract admin")]
+fn test_set_claim_cooldown_uninitialized_fails_closed() {
+    let (env, _creator, caller, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    client.set_claim_cooldown(&caller, &10);
+}
+
+/// The uninitialized setters must not lazily install the caller as admin.
+#[test]
+fn test_uninitialized_setters_do_not_install_admin() {
+    let (env, _creator, caller, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    assert!(client.try_set_appeal_window(&caller, &10).is_err());
+    assert!(client.try_set_creator_open_limit(&caller, &3).is_err());
+    assert!(client.try_set_claim_cooldown(&caller, &10).is_err());
+    assert_eq!(
+        client.get_admin(),
+        None,
+        "failed setters must not bootstrap an admin"
+    );
+}
+
+/// After `init_admin`, only the bootstrapped admin may mutate config; an
+/// outsider is rejected and the admin succeeds.
+#[test]
+fn test_only_bootstrapped_admin_can_mutate_config() {
+    let (env, _creator, admin, outsider) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+
+    assert!(client.try_set_appeal_window(&outsider, &10).is_err());
+    assert!(client.try_set_creator_open_limit(&outsider, &3).is_err());
+    assert!(client.try_set_claim_cooldown(&outsider, &10).is_err());
+
+    client.set_appeal_window(&admin, &10);
+    client.set_creator_open_limit(&admin, &3);
+    client.set_claim_cooldown(&admin, &10);
+
+    let config = client.get_config();
+    assert_eq!(config.appeal_window, 10);
+    assert_eq!(config.creator_open_limit, 3);
+    assert_eq!(config.claim_cooldown, 10);
 }
 
 /// Bounties finished before markers were recorded at the transition can be

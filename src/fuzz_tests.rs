@@ -1040,6 +1040,229 @@ fn test_fuzz_create_bounty_10k_cases() {
 }
 
 proptest! {
+    /// Property test: escrow balance conservation across create/complete/cancel/
+    /// expire/dispute paths.
+    ///
+    /// For every generated path, the contract's token balance must equal the
+    /// escrowed reward immediately after `create_bounty`, and must return to
+    /// zero once the bounty reaches a terminal state (completed, cancelled) or
+    /// is refunded via expiry.
+    #[test]
+    fn prop_escrow_balance_conservation(
+        reward in 100i128..=1_000_000i128,
+        path in 0u8..=4,
+        num_assignees in 1u32..=3,
+    ) {
+        let (env, client, creator, token_addr) = create_test_env();
+        let contract_id = client.address.clone();
+        let token = soroban_sdk::token::TokenClient::new(&env, &token_addr);
+        let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        // Fund the creator so the escrow transfer can succeed.
+        token_admin.mint(&creator, &reward);
+
+        let id = client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "bug"),
+            &SorobanString::from_str(&env, "desc"),
+            &reward,
+            &token_addr,
+            &0,
+            &None,
+            &SorobanVec::new(&env),
+            &num_assignees,
+            &None,
+            &1,
+            &SorobanVec::new(&env),
+        );
+
+        // Escrow must hold exactly the reward right after creation.
+        prop_assert_eq!(token.balance(&contract_id), reward);
+        prop_assert_eq!(token.balance(&creator), 0);
+
+        match path {
+            0 => {
+                // complete: in_progress -> completed, pays out to assignee.
+                let contributor = Address::generate(&env);
+                client.claim_bounty(&contributor, &id);
+                client.complete_bounty(&creator, &id);
+                prop_assert_eq!(token.balance(&contract_id), 0);
+                prop_assert_eq!(token.balance(&contributor), reward);
+            }
+            1 => {
+                // cancel: open -> cancelled, refunds creator.
+                client.cancel_bounty(&creator, &id);
+                prop_assert_eq!(token.balance(&contract_id), 0);
+                prop_assert_eq!(token.balance(&creator), reward);
+            }
+            2 => {
+                // expire: requires a past deadline; recreate with one.
+                let env2 = &env;
+                let creator2 = Address::generate(env2);
+                let sac2 = env2.register_stellar_asset_contract_v2(creator2.clone());
+                let token_addr2 = sac2.address();
+                let token2 = soroban_sdk::token::TokenClient::new(env2, &token_addr2);
+                let admin2 = soroban_sdk::token::StellarAssetClient::new(env2, &token_addr2);
+                admin2.mint(&creator2, &reward);
+                let deadline = env2.ledger().sequence() + 10;
+                let id2 = client.create_bounty(
+                    &creator2,
+                    &Symbol::new(env2, "bug"),
+                    &SorobanString::from_str(env2, "desc"),
+                    &reward,
+                    &token_addr2,
+                    &0,
+                    &Some(deadline),
+                    &SorobanVec::new(env2),
+                    &1,
+                    &None,
+                    &1,
+                    &SorobanVec::new(env2),
+                );
+                prop_assert_eq!(token2.balance(&contract_id), reward);
+                env2.ledger().set_sequence_number(deadline + 1);
+                client.expire_bounty(&creator2, &id2);
+                prop_assert_eq!(token2.balance(&contract_id), 0);
+                prop_assert_eq!(token2.balance(&creator2), reward);
+            }
+            3 => {
+                // dispute -> resolve complete: escrow pays the assignee.
+                let contributor = Address::generate(&env);
+                client.claim_bounty(&contributor, &id);
+                client.raise_dispute(&contributor, &id);
+                prop_assert_eq!(token.balance(&contract_id), reward);
+                client.resolve_dispute(&creator, &id, &Symbol::new(&env, "complete"));
+                prop_assert_eq!(token.balance(&contract_id), 0);
+                prop_assert_eq!(token.balance(&contributor), reward);
+            }
+            _ => {
+                // dispute -> resolve cancel: escrow refunds the creator.
+                let contributor = Address::generate(&env);
+                client.claim_bounty(&contributor, &id);
+                client.raise_dispute(&contributor, &id);
+                prop_assert_eq!(token.balance(&contract_id), reward);
+                client.resolve_dispute(&creator, &id, &Symbol::new(&env, "cancel"));
+                prop_assert_eq!(token.balance(&contract_id), 0);
+                prop_assert_eq!(token.balance(&creator), reward);
+            }
+        }
+    }
+
+    /// Property test: partial unclaims preserve full 10,000 bps share
+    /// conservation among remaining assignees.
+    #[test]
+    fn prop_unclaim_share_conservation(
+        num_assignees in 2u32..=5u32,
+        unclaim_count in 1u32..=4u32,
+    ) {
+        let (env, client, creator, token_addr) = create_test_env();
+        let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+        token_admin.mint(&creator, &1000);
+
+        let id = client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "bug"),
+            &SorobanString::from_str(&env, "desc"),
+            &1000,
+            &token_addr,
+            &0,
+            &None,
+            &SorobanVec::new(&env),
+            &num_assignees,
+            &None,
+            &1,
+            &SorobanVec::new(&env),
+        );
+
+        let mut assignees = std::vec::Vec::new();
+        for _ in 0..num_assignees {
+            let a = Address::generate(&env);
+            client.claim_bounty(&a, &id);
+            assignees.push(a);
+        }
+
+        let to_unclaim = std::cmp::min(unclaim_count, num_assignees - 1) as usize;
+        for a in assignees.iter().take(to_unclaim) {
+            client.unclaim_bounty(a, &id);
+        }
+
+        let bounty = client.get_bounty(&id).expect("bounty exists");
+        let remaining = num_assignees - to_unclaim as u32;
+        prop_assert_eq!(bounty.assignees.len(), remaining);
+
+        let mut total_bps: u32 = 0;
+        for i in 0..bounty.assignees.len() {
+            let a = bounty.assignees.get(i).unwrap();
+            let share = client.get_assignee_share(&id, &a);
+            total_bps = total_bps.checked_add(share).expect("bps overflow");
+        }
+        prop_assert_eq!(total_bps, 10_000);
+    }
+
+    /// Property test: unclaim is rejected on terminal/disputed statuses.
+    #[test]
+    fn prop_unclaim_rejected_on_terminal_status(
+        path in 0u8..=3,
+    ) {
+        let (env, client, creator, token_addr) = create_test_env();
+        let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+        token_admin.mint(&creator, &1000);
+
+        let id = client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "bug"),
+            &SorobanString::from_str(&env, "desc"),
+            &1000,
+            &token_addr,
+            &0,
+            &None,
+            &SorobanVec::new(&env),
+            &2,
+            &None,
+            &1,
+            &SorobanVec::new(&env),
+        );
+
+        let contributor = Address::generate(&env);
+        client.claim_bounty(&contributor, &id);
+
+        match path {
+            0 => {
+                client.complete_bounty(&creator, &id);
+            }
+            1 => {
+                // cancel requires open; use a fresh bounty instead.
+                let id2 = client.create_bounty(
+                    &creator,
+                    &Symbol::new(&env, "bug"),
+                    &SorobanString::from_str(&env, "desc"),
+                    &1000,
+                    &token_addr,
+                    &0,
+                    &None,
+                    &SorobanVec::new(&env),
+                    &2,
+                    &None,
+                    &1,
+                    &SorobanVec::new(&env),
+                );
+                client.cancel_bounty(&creator, &id2);
+                prop_assert!(client.try_unclaim_bounty(&contributor, &id2).is_err());
+                return Ok(());
+            }
+            2 => {
+                client.raise_dispute(&contributor, &id);
+            }
+            _ => {
+                // submitted state: complete via verifier-less flow is not
+                // available here, so exercise the disputed path again.
+                client.raise_dispute(&contributor, &id);
+            }
+        }
+
+        prop_assert!(client.try_unclaim_bounty(&contributor, &id).is_err());
+    }
+
     /// Property test: after any sequence of mutations, `get_status_count` for
     /// every status must equal a full scan of the stored bounties' statuses.
     ///
