@@ -14,8 +14,13 @@ Changes that have landed on `main` but are not yet associated with a tagged rele
 ### Changed
 
 - `resolve_dispute` now validates its `resolution` argument (`"complete"` / `"cancel"`) through the shared `symbols::validate_symbol` allow-list, panicking with `resolution must be 'complete' or 'cancel'` on an unrecognised value (#651).
+- `BountySummary` now carries `reward_token: Address`. `get_bounty` returns the bounty's true reward token for archived bounties instead of substituting `env.current_contract_address()` as a placeholder, and `archive_bounty` populates it from the live `Bounty` record. This is a schema change to the archived summary payload: off-chain consumers that assumed the placeholder contract address must read the real token address, and any cached summaries serialized before this change should be re-fetched (#1220).
+- `update_contributor_metadata` now emits the `contributor_metadata_updated` event on every successful update, with the payload aligned to the stored `Contributor.metadata` type (`BytesN<32>`) and documented in `docs/event-schema.md` (#1221).
+- `src/events.rs` migrated from the deprecated `env.events().publish(...)` API to Soroban SDK 29's typed `#[contractevent]` macros, preserving wire-compatible topics and data. The blanket `#![allow(dead_code, deprecated, unused_imports)]` in `src/lib.rs` was removed and the resulting dead-code warnings cleaned up (#1222).
 
 ### Added
+
+- `migrate_legacy_indexes`: admin-only, bounded and idempotent migration entrypoint that drains the legacy `DataKey::StatusIndex(Symbol)` and `DataKey::OpenBounties` storage blobs into `StatusIndexPage` / `OpenBountiesPage` shards, deduplicating entries and deleting the legacy keys once fully migrated so the work fits within a single transaction's CPU/write budget (#1219).
 
 - `sdk`: typed `reopenBounty`, `reassignBounty` and `submitWork` methods wrapping the new lifecycle entrypoints, with `ReopenBountyParams` / `ReassignBountyParams` / `SubmitWorkParams` types, `ReopenNotAllowedError` / `SubmissionNotFoundError` typed errors, and recipe examples `11-reopen-bounty.ts`, `12-reassign-bounty.ts`, `13-submit-work.ts` (#1085).
 - `BountyRefresh`: failed refresh tasks are now retried up to `MAX_TASK_RETRIES` (3) times, each retry emitting `TaskRetried(batchId, taskId, attempt)`. `_executeRefresh` is now restricted to self-calls (`onlySelf`); previously its `onlyOwner` guard made every self-invoked task fail.

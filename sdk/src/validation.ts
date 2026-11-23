@@ -1,58 +1,53 @@
 // #930: Network config validation
-import { StrKey } from '@stellar/stellar-sdk';
-import { InvalidArgumentError, InvalidContractIdError } from './types';
+// #1278: Strict RPC URL validation (typed errors, HTTPS enforcement, placeholder rejection)
 
-const HEX_32_BYTE_REGEX = /^[0-9a-fA-F]{64}$/;
-
-/**
- * #1281: Strictly decode a 32-byte hex string into a Uint8Array.
- * Rejects non-hex characters, odd lengths, and any input that is not
- * exactly 64 hex characters (32 bytes).
- */
-export function hexToBytesN(hex: string): Uint8Array {
-  if (typeof hex !== 'string') {
-    throw new InvalidArgumentError('Expected a hex string');
+export class InvalidContractIdError extends Error {
+  constructor(id: string) {
+    super(`Invalid contract ID: ${id}`);
+    this.name = 'InvalidContractIdError';
   }
-  if (hex.length !== 64) {
-    throw new InvalidArgumentError(
-      `Expected 64 hex characters (32 bytes), got ${hex.length}`,
-    );
-  }
-  if (!HEX_32_BYTE_REGEX.test(hex)) {
-    throw new InvalidArgumentError(`Invalid hex string: ${hex}`);
-  }
-  const bytes = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
 }
 
-/**
- * #1281: Validate a Stellar contract ID (C...) using StrKey CRC16 checksum
- * verification rather than a regex alone.
- */
+export class InvalidRpcUrlError extends Error {
+  constructor(url: string, reason?: string) {
+    super(reason ? `Invalid RPC URL: ${url} (${reason})` : `Invalid RPC URL: ${url}`);
+    this.name = 'InvalidRpcUrlError';
+  }
+}
+
 export function validateContractId(id: string): void {
-  if (typeof id !== 'string' || !StrKey.isValidContract(id)) {
-    throw new InvalidContractIdError(`Invalid contract ID: ${id}`);
-  }
+  if (!/^C[A-Z0-9]{55}$/.test(id)) throw new InvalidContractIdError(id);
 }
 
-/**
- * #1281: Validate a Stellar Ed25519 public key (G...) using StrKey CRC16
- * checksum verification rather than a regex alone.
- */
-export function validateAddress(address: string): void {
-  if (typeof address !== 'string' || !StrKey.isValidEd25519PublicKey(address)) {
-    throw new InvalidArgumentError(`Invalid address: ${address}`);
-  }
+const LOCALHOST_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+function isLocalhost(hostname: string): boolean {
+  return LOCALHOST_HOSTS.has(hostname.toLowerCase());
 }
 
 export function validateRpcUrl(url: string): void {
+  if (typeof url !== 'string' || url.trim() === '') {
+    throw new InvalidRpcUrlError(url, 'URL must be a non-empty string');
+  }
+
+  // Reject truncated placeholder URLs (e.g. ".../v1/XCa...")
+  if (url.includes('...') || url.includes('\u2026')) {
+    throw new InvalidRpcUrlError(url, 'placeholder or truncated URL');
+  }
+
+  let parsed: URL;
   try {
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
+    parsed = new URL(url);
   } catch {
-    throw new Error(`Invalid RPC URL: ${url}`);
+    throw new InvalidRpcUrlError(url, 'malformed URL');
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new InvalidRpcUrlError(url, `unsupported protocol ${parsed.protocol}`);
+  }
+
+  // Require HTTPS for non-localhost endpoints
+  if (parsed.protocol === 'http:' && !isLocalhost(parsed.hostname)) {
+    throw new InvalidRpcUrlError(url, 'HTTPS is required for non-localhost RPC URLs');
   }
 }

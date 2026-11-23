@@ -144,8 +144,8 @@ impl std::error::Error for WebhookDeliveryError {}
 
 /// Compute the HMAC-SHA256 hex digest for a secret and raw payload bytes.
 pub fn compute_hmac_sha256(secret: &str, payload: &[u8]) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can accept key of any size");
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .unwrap_or_else(|_| HmacSha256::new_from_slice(b"").expect("empty key is valid"));
     mac.update(payload);
     hex::encode(mac.finalize().into_bytes())
 }

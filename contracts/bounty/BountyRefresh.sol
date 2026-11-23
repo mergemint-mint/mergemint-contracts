@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
+import "./IBountyManager.sol";
 
 /**
  * @title BountyRefresh
@@ -15,6 +16,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     error UnauthorizedCaller();
     error InvalidContributor();
     error InvalidBountyId();
+    error DuplicateRefreshPair();
     error ContributorsAndBountyIdsMismatch();
     error EmptyBatch();
     error BatchAlreadyProcessing();
@@ -34,6 +36,10 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     uint256 public batchCounter;
 
     // Structs
+    // NOTE: the struct layouts below are returned verbatim by getTask/getBatch
+    // and the public getters, so narrowing/reordering fields (e.g. uint64
+    // timestamps, packed bools) would change the external ABI. Packing is
+    // intentionally deferred to a versioned ABI change.
     struct BountyRefreshTask {
         uint256 id;
         address contributor;
@@ -97,6 +103,18 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         if (contributors.length != bountyIds.length) revert ContributorsAndBountyIdsMismatch();
         if (contributors.length == 0) revert EmptyBatch();
 
+        // Reject malformed entries up front so they cannot revert the whole
+        // processBatchParallel call after batch creation gas has been spent.
+        for (uint256 i = 0; i < contributors.length; ++i) {
+            if (contributors[i] == address(0)) revert InvalidContributor();
+            if (bountyIds[i] == 0) revert InvalidBountyId();
+            for (uint256 j = i + 1; j < contributors.length; ++j) {
+                if (contributors[i] == contributors[j] && bountyIds[i] == bountyIds[j]) {
+                    revert DuplicateRefreshPair();
+                }
+            }
+        }
+
         uint256 batchId = batchCounter++;
         RefreshBatch storage batch = batches[batchId];
         batch.id = batchId;
@@ -143,8 +161,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
             _processRefreshTask(
                 batchId,
                 contributors[i],
-                bountyIds[i],
-                i
+                bountyIds[i]
             );
         }
     }
@@ -155,7 +172,6 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
      * @param batchId The batch ID
      * @param contributor The contributor address
      * @param bountyId The bounty ID
-     * @param index The index in the batch
      */
     // The only external call here is `this._executeRefresh`, a self-call to an
     // onlySelf function reached from the nonReentrant processBatchParallel, so
@@ -164,8 +180,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     function _processRefreshTask(
         uint256 batchId,
         address contributor,
-        uint256 bountyId,
-        uint256 index
+        uint256 bountyId
     ) internal {
         if (contributor == address(0)) revert InvalidContributor();
         if (bountyId == 0) revert InvalidBountyId();
@@ -219,11 +234,30 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         virtual
         onlySelf
     {
-        // This is a placeholder for the actual refresh logic
-        // In production, this would call the actual bounty refresh mechanism
         require(contributor != address(0), "Invalid contributor");
         require(bountyId > 0, "Invalid bounty ID");
-        // Actual refresh implementation goes here
+        // When no manager is configured the refresh is a no-op. A reverting
+        // manager is caught and retried by _processRefreshTask.
+        if (address(bountyManager) != address(0)) {
+            bountyManager.updateContributorMetrics(contributor, bountyId);
+        }
+    }
+
+    /// @notice Configured bounty manager that receives metric updates.
+    IBountyManager public bountyManager;
+
+    error InvalidBountyManager();
+
+    event BountyManagerUpdated(address indexed previousManager, address indexed newManager);
+
+    /**
+     * @dev Set the bounty manager used by _executeRefresh.
+     * @param newManager Non-zero address of an IBountyManager implementation
+     */
+    function setBountyManager(address newManager) external onlyOwner {
+        if (newManager == address(0)) revert InvalidBountyManager();
+        emit BountyManagerUpdated(address(bountyManager), newManager);
+        bountyManager = IBountyManager(newManager);
     }
 
     /**
