@@ -56,7 +56,7 @@ impl SecurityHeadersConfig {
             value.push_str("; includeSubDomains");
         }
         Self {
-            hsts: Some(HeaderValue::from_str(&value).expect("valid HSTS header value")),
+            hsts: HeaderValue::from_str(&value).ok(),
         }
     }
 
