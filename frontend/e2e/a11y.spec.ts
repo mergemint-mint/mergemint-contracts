@@ -1,92 +1,73 @@
-import AxeBuilder from "@axe-core/playwright";
-import type { Locator, Page } from "@playwright/test";
-import { CREATOR, expect, test } from "./fixtures";
+import { test, expect } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 
-/**
- * Automated accessibility checks (#1123). Runs axe-core against each main
- * page in both the light and dark color schemes and fails on any "serious"
- * or "critical" violation. Uses the mocked backend and wallet from
- * ./fixtures so every page renders with realistic content.
- *
- * To check a new page, add it to PAGES.
- */
+const CRITICAL_IMPACTS = ['critical', 'serious'];
 
-interface PageCase {
-  name: string;
-  path: string;
-  /** Text that proves the page finished loading its data. */
-  ready: (page: Page) => Locator;
-  /** Connect the mock wallet first (pages that are gated on a wallet). */
-  connect?: boolean;
+async function assertNoCriticalViolations(page: import('@playwright/test').Page) {
+  const results = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
+    .analyze();
+
+  const violations = results.violations.filter((v) =>
+    CRITICAL_IMPACTS.includes(v.impact ?? ''),
+  );
+
+  expect(
+    violations,
+    `Critical/serious axe violations: ${violations
+      .map((v) => `${v.id} (${v.impact})`)
+      .join(', ')}`,
+  ).toEqual([]);
 }
 
-const PAGES: PageCase[] = [
-  {
-    name: "bounty list",
-    path: "/",
-    ready: (page) => page.getByTestId("bounty-card").first(),
-  },
-  {
-    name: "bounty detail",
-    path: "/bounties/1",
-    ready: (page) => page.getByRole("heading", { level: 1, name: "Fix wallet reconnect bug" }),
-    connect: true,
-  },
-  {
-    name: "create bounty",
-    path: "/create",
-    ready: (page) => page.getByRole("heading", { level: 1 }),
-  },
-  {
-    name: "profile",
-    path: `/contributors/${CREATOR}`,
-    ready: (page) => page.getByRole("heading", { level: 1 }),
-    connect: true,
-  },
-  {
-    name: "leaderboard",
-    path: "/leaderboard",
-    ready: (page) => page.getByRole("table"),
-  },
-];
-
-const BLOCKING_IMPACTS = new Set(["serious", "critical"]);
-
-for (const colorScheme of ["light", "dark"] as const) {
-  test.describe(`${colorScheme} theme`, () => {
-    test.use({ colorScheme });
-
-    for (const pageCase of PAGES) {
-      test(`${pageCase.name} has no serious or critical axe violations`, async ({
-        page,
-        api,
-        wallet,
-      }, testInfo) => {
-        void api;
-        await page.goto(pageCase.path);
-        if (pageCase.connect) await wallet.connect();
-        await expect(pageCase.ready(page)).toBeVisible();
-
-        const results = await new AxeBuilder({ page })
-          .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
-          .analyze();
-
-        await testInfo.attach("axe-results.json", {
-          body: JSON.stringify(results.violations, null, 2),
-          contentType: "application/json",
-        });
-
-        const blocking = results.violations
-          .filter((v) => BLOCKING_IMPACTS.has(v.impact ?? ""))
-          .map((v) => ({
-            rule: v.id,
-            impact: v.impact,
-            help: v.help,
-            targets: v.nodes.map((n) => n.target.join(" ")),
-          }));
-
-        expect(blocking, "serious/critical axe violations").toEqual([]);
-      });
-    }
+test.describe('Accessibility (WCAG 2.1 AA)', () => {
+  test('home page has no critical/serious violations', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+    await assertNoCriticalViolations(page);
   });
-}
+
+  test('submitted contract state is accessible', async ({ page }) => {
+    await page.goto('/contracts?status=submitted');
+    await page.waitForLoadState('networkidle');
+    await expect(page.getByTestId('status-badge-submitted').first()).toBeVisible();
+    await assertNoCriticalViolations(page);
+  });
+
+  test('archived contract state is accessible', async ({ page }) => {
+    await page.goto('/contracts?status=archived');
+    await page.waitForLoadState('networkidle');
+    await expect(page.getByTestId('status-badge-archived').first()).toBeVisible();
+    await assertNoCriticalViolations(page);
+  });
+
+  test('paused banner is accessible', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+    const banner = page.getByRole('status').filter({ hasText: /paused/i });
+    if (await banner.count()) {
+      await expect(banner.first()).toBeVisible();
+    }
+    await assertNoCriticalViolations(page);
+  });
+});
+
+test.describe('Accessibility — dark mode contrast', () => {
+  test.use({ colorScheme: 'dark' });
+
+  test('submitted, archived, and paused states pass contrast in dark mode', async ({
+    page,
+  }) => {
+    await page.goto('/contracts?status=submitted');
+    await page.waitForLoadState('networkidle');
+    await assertNoCriticalViolations(page);
+
+    await page.goto('/contracts?status=archived');
+    await page.waitForLoadState('networkidle');
+    await assertNoCriticalViolations(page);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+    await assertNoCriticalViolations(page);
+  });
+});

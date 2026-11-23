@@ -7,29 +7,71 @@ interface CliConfig {
   contractId: string;
   rpcUrl?: string;
   json: boolean;
+  dryRun: boolean;
+  secretEnv?: string;
 }
 
-function parseArgs(): { command: string; args: string[]; config: CliConfig } {
-  const args = process.argv.slice(2);
+const NETWORKS = ["testnet", "mainnet"] as const;
+
+function bigintReplacer(_key: string, value: unknown): unknown {
+  return typeof value === "bigint" ? value.toString() : value;
+}
+
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(value, bigintReplacer, 2));
+}
+
+function requireFlagValue(args: string[], i: number, flag: string): string {
+  const value = args[i + 1];
+  if (value === undefined || value.startsWith("--")) {
+    throw new Error(`Missing value for ${flag}`);
+  }
+  return value;
+}
+
+function parseNetwork(value: string): "testnet" | "mainnet" {
+  if (!(NETWORKS as readonly string[]).includes(value)) {
+    throw new Error(
+      `Invalid network: ${value}. Expected one of: ${NETWORKS.join(", ")}`
+    );
+  }
+  return value as "testnet" | "mainnet";
+}
+
+function parseArgs(argv: string[] = process.argv.slice(2)): {
+  command: string;
+  args: string[];
+  config: CliConfig;
+} {
   const config: CliConfig = {
-    network: (process.env.MERGEMINT_NETWORK as any) ?? "testnet",
+    network: parseNetwork(process.env.MERGEMINT_NETWORK ?? "testnet"),
     contractId: process.env.MERGEMINT_CONTRACT_ID ?? "",
     rpcUrl: process.env.MERGEMINT_RPC_URL,
     json: false,
+    dryRun: false,
+    secretEnv: undefined,
   };
 
   let command = "";
   const commandArgs: string[] = [];
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
 
     if (arg === "--network") {
-      config.network = args[++i] as any;
+      config.network = parseNetwork(requireFlagValue(argv, i, arg));
+      i++;
     } else if (arg === "--contract-id") {
-      config.contractId = args[++i];
+      config.contractId = requireFlagValue(argv, i, arg);
+      i++;
     } else if (arg === "--rpc-url") {
-      config.rpcUrl = args[++i];
+      config.rpcUrl = requireFlagValue(argv, i, arg);
+      i++;
+    } else if (arg === "--secret-env") {
+      config.secretEnv = requireFlagValue(argv, i, arg);
+      i++;
+    } else if (arg === "--dry-run") {
+      config.dryRun = true;
     } else if (arg === "--json") {
       config.json = true;
     } else if (arg === "--help" || arg === "-h") {
@@ -57,11 +99,17 @@ Commands:
   get <bounty-id>     Get a specific bounty
   create <params>     Create a new bounty (JSON params)
   cancel <bounty-id>  Cancel a bounty
+  claim <bounty-id>   Claim a bounty
+  submit <bounty-id>  Submit work for a bounty
+  complete <bounty-id> Complete a bounty
+  status <bounty-id>  Show bounty status
 
 Options:
   --network <name>    Network: testnet or mainnet (default: MERGEMINT_NETWORK or testnet)
   --contract-id <id>  Contract ID (default: MERGEMINT_CONTRACT_ID)
   --rpc-url <url>     RPC URL (default: MERGEMINT_RPC_URL or network default)
+  --secret-env <name> Env var holding the signer secret (never pass secrets on argv)
+  --dry-run           Simulate and print XDR without submitting
   --json              Output as JSON
   --help, -h          Show this help
 
@@ -75,7 +123,21 @@ Examples:
   mergemint list GABC...
   mergemint get abc123def...
   mergemint create '{"creator":"GABC...","title":"Bounty","rewardAmount":"1000000",...}'
+  mergemint claim abc123def... --secret-env MERGEMINT_SECRET
   `);
+}
+
+function resolveSigner(config: CliConfig): string | undefined {
+  if (!config.secretEnv) {
+    return undefined;
+  }
+  const secret = process.env[config.secretEnv];
+  if (!secret) {
+    throw new Error(
+      `Environment variable ${config.secretEnv} is not set (required by --secret-env)`
+    );
+  }
+  return secret;
 }
 
 async function executeCommand(
@@ -104,7 +166,7 @@ async function executeCommand(
       if (creator) {
         const bountyIds = await sdk.getBountiesByCreator(creator);
         if (config.json) {
-          console.log(JSON.stringify({ bountyIds }, null, 2));
+          printJson({ bountyIds });
         } else {
           console.log(`Bounties by ${creator}:`);
           bountyIds.forEach((id) => console.log(`  ${id}`));
@@ -112,7 +174,7 @@ async function executeCommand(
       } else {
         const count = await sdk.getBountyCount();
         if (config.json) {
-          console.log(JSON.stringify({ totalBounties: count.toString() }, null, 2));
+          printJson({ totalBounties: count.toString() });
         } else {
           console.log(`Total bounties: ${count}`);
         }
@@ -129,9 +191,26 @@ async function executeCommand(
       const meta = await sdk.getBountyMeta(bountyId);
       const result = { ...bounty, ...meta };
       if (config.json) {
-        console.log(JSON.stringify(result, (k, v) => (typeof v === "bigint" ? v.toString() : v), 2));
+        printJson(result);
       } else {
-        console.log(JSON.stringify(result, null, 2));
+        printJson(result);
+      }
+      break;
+    }
+
+    case "status": {
+      const bountyId = args[0];
+      if (!bountyId) {
+        throw new Error("Bounty ID is required");
+      }
+      const bounty = await sdk.getBounty(bountyId);
+      const meta = await sdk.getBountyMeta(bountyId);
+      const result = { bountyId, ...bounty, ...meta };
+      if (config.json) {
+        printJson(result);
+      } else {
+        console.log(`Bounty ${bountyId}:`);
+        printJson(result);
       }
       break;
     }
@@ -142,11 +221,20 @@ async function executeCommand(
         throw new Error("Parameters JSON is required");
       }
       const params = JSON.parse(paramsJson);
-      console.log("Creating bounty (dry-run mode):");
+      const signer = resolveSigner(config);
+      const result = await sdk.createBounty(params, {
+        signer,
+        simulate: config.dryRun || !signer,
+      });
       if (config.json) {
-        console.log(JSON.stringify({ status: "ready", params }, null, 2));
+        printJson(result);
       } else {
-        console.log(JSON.stringify(params, null, 2));
+        console.log(
+          config.dryRun || !signer
+            ? "Bounty creation simulated (dry-run):"
+            : "Bounty created:"
+        );
+        printJson(result);
       }
       break;
     }
@@ -156,9 +244,89 @@ async function executeCommand(
       if (!bountyId) {
         throw new Error("Bounty ID is required");
       }
-      console.log(`Cancelling bounty ${bountyId} (dry-run mode)`);
+      const signer = resolveSigner(config);
+      const result = await sdk.cancelBounty(bountyId, {
+        signer,
+        simulate: config.dryRun || !signer,
+      });
       if (config.json) {
-        console.log(JSON.stringify({ status: "ready", bountyId }, null, 2));
+        printJson(result);
+      } else {
+        console.log(
+          config.dryRun || !signer
+            ? `Cancellation of bounty ${bountyId} simulated (dry-run):`
+            : `Bounty ${bountyId} cancelled:`
+        );
+        printJson(result);
+      }
+      break;
+    }
+
+    case "claim": {
+      const bountyId = args[0];
+      if (!bountyId) {
+        throw new Error("Bounty ID is required");
+      }
+      const signer = resolveSigner(config);
+      const result = await sdk.claimBounty(bountyId, {
+        signer,
+        simulate: config.dryRun || !signer,
+      });
+      if (config.json) {
+        printJson(result);
+      } else {
+        console.log(
+          config.dryRun || !signer
+            ? `Claim of bounty ${bountyId} simulated (dry-run):`
+            : `Bounty ${bountyId} claimed:`
+        );
+        printJson(result);
+      }
+      break;
+    }
+
+    case "submit": {
+      const bountyId = args[0];
+      if (!bountyId) {
+        throw new Error("Bounty ID is required");
+      }
+      const signer = resolveSigner(config);
+      const result = await sdk.submitWork(bountyId, {
+        signer,
+        simulate: config.dryRun || !signer,
+      });
+      if (config.json) {
+        printJson(result);
+      } else {
+        console.log(
+          config.dryRun || !signer
+            ? `Submission for bounty ${bountyId} simulated (dry-run):`
+            : `Work submitted for bounty ${bountyId}:`
+        );
+        printJson(result);
+      }
+      break;
+    }
+
+    case "complete": {
+      const bountyId = args[0];
+      if (!bountyId) {
+        throw new Error("Bounty ID is required");
+      }
+      const signer = resolveSigner(config);
+      const result = await sdk.completeBounty(bountyId, {
+        signer,
+        simulate: config.dryRun || !signer,
+      });
+      if (config.json) {
+        printJson(result);
+      } else {
+        console.log(
+          config.dryRun || !signer
+            ? `Completion of bounty ${bountyId} simulated (dry-run):`
+            : `Bounty ${bountyId} completed:`
+        );
+        printJson(result);
       }
       break;
     }
@@ -185,4 +353,8 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+export { parseArgs, executeCommand, bigintReplacer, parseNetwork };
