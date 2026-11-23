@@ -2703,16 +2703,14 @@ fn test_three_assignees_payout_sum_with_divisible_reward() {
 }
 
 /// Three assignees with an uneven reward_amount (9_999):
-/// Each share_bp: 3_334, 3_333, 3_333 (same as above).
-/// payout = 9_999 * share_bp / 10_000 (integer division truncates):
-///   First:  9_999 * 3_334 / 10_000 = 33_326_666 / 10_000 = 3_332 (truncated)
-///   Second: 9_999 * 3_333 / 10_000 = 33_323_667 / 10_000 = 3_332 (truncated)
-///   Third:  9_999 * 3_333 / 10_000 = 33_323_667 / 10_000 = 3_332 (truncated)
-///   Sum = 9_996 — 3 tokens lost to integer division in the payout formula.
-///
-/// This test documents the known integer-division remainder loss so future
-/// implementors can choose whether to recover the dust (e.g. send it to the
-/// primary assignee or back to the verifier).
+/// Each share_bp: 3_334, 3_333, 3_333.
+/// Base payouts:
+///   First:  9_999 * 3_334 / 10_000 = 3_333
+///   Second: 9_999 * 3_333 / 10_000 = 3_332
+///   Third:  9_999 * 3_333 / 10_000 = 3_332
+/// Base sum = 9_997. Remainder dust = 9_999 - 9_997 = 2 tokens.
+/// Primary assignee absorbs the 2 remainder tokens → payout1 = 3_335.
+/// Sum = 3_335 + 3_332 + 3_332 = 9_999 (exact sum equals reward_amount).
 #[test]
 fn test_three_assignees_payout_integer_division_loss_documented() {
     let (env, creator, contributor1, verifier) = setup_test();
@@ -2743,31 +2741,30 @@ fn test_three_assignees_payout_integer_division_loss_documented() {
     let payout2 = token_client.balance(&contributor2);
     let payout3 = token_client.balance(&contributor3);
 
-    // 9_999 * 3_334 / 10_000 = 3_333 (truncated from 3_333.6666)
-    assert_eq!(payout1, 3_333, "first assignee payout (truncated)");
-    // 9_999 * 3_333 / 10_000 = 3_332 (truncated from 3_332.6667)
-    assert_eq!(payout2, 3_332, "second assignee payout (truncated)");
-    assert_eq!(payout3, 3_332, "third assignee payout (truncated)");
+    // Primary assignee receives base share (3_333) + dust (2) = 3_335
+    assert_eq!(
+        payout1, 3_335,
+        "first assignee payout absorbs remainder dust"
+    );
+    assert_eq!(payout2, 3_332, "second assignee payout");
+    assert_eq!(payout3, 3_332, "third assignee payout");
 
     let total_paid = payout1 + payout2 + payout3;
     let integer_division_loss = reward_amount - total_paid;
 
-    // Document the known loss: 9_999 - 9_997 = 2 tokens unaccounted for.
     assert_eq!(
-        integer_division_loss, 2,
-        "integer-division loss is 2 tokens for reward_amount=9_999 with 3 assignees"
+        integer_division_loss, 0,
+        "integer-division loss is 0 as dust is allocated to primary assignee"
     );
-    // The total paid is strictly less than reward_amount in this case.
-    assert!(
-        total_paid < reward_amount,
-        "payout sum is less than reward_amount due to integer division"
-    );
+    assert_eq!(total_paid, reward_amount, "payout sum equals reward_amount");
 }
 
 /// Two assignees with uneven reward_amount=9_999:
 /// base_share = 5_000, remainder = 0 → both get 5_000.
-/// payout = 9_999 * 5_000 / 10_000 = 4_999 (truncated from 4_999.5).
-/// Sum = 9_998 — 1 token lost to truncation.
+/// Base payout: 9_999 * 5_000 / 10_000 = 4_999.
+/// Base sum = 9_998. Dust = 9_999 - 9_998 = 1 token.
+/// Primary assignee absorbs 1 token dust → payout1 = 5_000, payout2 = 4_999.
+/// Sum = 5_000 + 4_999 = 9_999 (exact sum equals reward_amount).
 #[test]
 fn test_two_assignees_uneven_reward_integer_division_loss() {
     let (env, creator, contributor1, verifier) = setup_test();
@@ -2794,17 +2791,105 @@ fn test_two_assignees_uneven_reward_integer_division_loss() {
     let payout1 = token_client.balance(&contributor1);
     let payout2 = token_client.balance(&contributor2);
 
-    // 9_999 * 5_000 / 10_000 = 4_999 (truncated from 4_999.5)
-    assert_eq!(payout1, 4_999, "first assignee payout");
+    assert_eq!(
+        payout1, 5_000,
+        "first assignee payout absorbs remainder dust"
+    );
     assert_eq!(payout2, 4_999, "second assignee payout");
 
     let total_paid = payout1 + payout2;
     let integer_division_loss = reward_amount - total_paid;
 
-    // Document: 1 token lost.
     assert_eq!(
-        integer_division_loss, 1,
-        "integer-division loss is 1 token for reward_amount=9_999 with 2 assignees"
+        integer_division_loss, 0,
+        "integer-division loss is 0 as dust is allocated to primary assignee"
+    );
+    assert_eq!(total_paid, reward_amount, "payout sum equals reward_amount");
+}
+
+/// Issue #1184: Verify that distribute_payout does not overflow on large reward amounts
+/// where reward_amount * share_bp exceeds i128::MAX.
+#[test]
+fn test_distribute_payout_large_reward_no_overflow() {
+    let (env, creator, contributor1, verifier) = setup_test();
+    let contributor2 = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // reward_amount * 5_000 would exceed i128::MAX (~1.7e38) if multiplied directly.
+    // i128::MAX / 10_000 = ~1.7e34.
+    // Let's use 100_000_000_000_000_000_000_000_000_000_000_001 (1e34 + 1).
+    // 1e34 * 5_000 = 5e37, which with another order of magnitude exceeds i128::MAX.
+    // Let's use 50_000_000_000_000_000_000_000_000_000_000_001_i128 (~5e34).
+    // 5e34 * 5_000 = 2.5e38 > i128::MAX (1.7e38), so direct multiplication overflows!
+    let reward_amount: i128 = 50_000_000_000_000_000_000_000_000_000_000_001_i128;
+    let (bounty_id, token_addr) = make_multi_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "large_overflow",
+        reward_amount,
+        2,
+    );
+
+    client.claim_bounty(&contributor1, &bounty_id);
+    client.claim_bounty(&contributor2, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+
+    let token_client = StellarAssetClient::new(&env, &token_addr);
+    let payout1 = token_client.balance(&contributor1);
+    let payout2 = token_client.balance(&contributor2);
+
+    assert_eq!(
+        payout1 + payout2,
+        reward_amount,
+        "sum of payouts equals reward_amount without overflow"
+    );
+}
+
+/// Issue #1184: Verify that apply_dispute_resolution also allocates dust to primary assignee.
+#[test]
+fn test_dispute_resolution_payout_allocates_dust_to_primary_assignee() {
+    let (env, creator, contributor1, _verifier) = setup_test();
+    let contributor2 = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let reward_amount: i128 = 9_999;
+    let (bounty_id, token_addr) = make_multi_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "dispute_dust",
+        reward_amount,
+        2,
+    );
+
+    client.claim_bounty(&contributor1, &bounty_id);
+    client.claim_bounty(&contributor2, &bounty_id);
+
+    client.raise_dispute(&creator, &bounty_id);
+
+    // Creator acts as arbitrator to resolve with "complete"
+    let token_admin = StellarAssetClient::new(&env, &token_addr);
+    token_admin.mint(&creator, &reward_amount);
+
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "complete"));
+
+    let payout1 = token_admin.balance(&contributor1);
+    let payout2 = token_admin.balance(&contributor2);
+
+    assert_eq!(
+        payout1, 5_000,
+        "primary assignee absorbs 1 token remainder dust"
+    );
+    assert_eq!(payout2, 4_999, "second assignee payout");
+    assert_eq!(
+        payout1 + payout2,
+        reward_amount,
+        "payout sum equals reward_amount"
     );
 }
 
