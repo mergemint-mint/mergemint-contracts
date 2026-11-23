@@ -4644,6 +4644,9 @@ fn pause_cases() -> std::vec::Vec<PauseCase> {
         ("set_appeal_window", |c| c
             .client
             .set_appeal_window(&c.admin, &10)),
+        ("set_arbitrator", |c| c
+            .client
+            .set_arbitrator(&c.admin, &Some(c.other.clone()))),
         ("add_dispute_evidence", |c| {
             c.client.add_dispute_evidence(
                 &c.creator,
@@ -5017,6 +5020,25 @@ fn test_create_bounty_insufficient_balance_leaves_no_escrow() {
 }
 
 // ===========================================================================
+// #1195 — independent dispute arbitrator
+// ===========================================================================
+
+struct ArbCtx {
+    env: Env,
+    client: MergeMintContractClient<'static>,
+    contract_id: Address,
+    admin: Address,
+    creator: Address,
+    contributor: Address,
+    arbitrator: Address,
+    token: Address,
+    bounty_id: BountyId,
+}
+
+/// A claimed-then-disputed bounty with an admin and an independent arbitrator
+/// designated through `set_arbitrator`.
+fn arbitrator_ctx() -> ArbCtx {
+    let (env, creator, contributor, arbitrator) = setup_test();
 // Issue #1203 — SEP-41 probe in add_reward_token / set_min_reward
 // ===========================================================================
 
@@ -5030,9 +5052,23 @@ fn test_add_reward_token_rejects_eoa() {
     let client = MergeMintContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     client.init_admin(&admin);
-
-    let eoa = Address::generate(&env);
-    client.add_reward_token(&admin, &eoa);
+    client.set_arbitrator(&admin, &Some(arbitrator.clone()));
+    assert_invocation_emits(&env, &contract_id, &["config_changed"]);
+    let (bounty_id, token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "bug", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&contributor, &bounty_id);
+    ArbCtx {
+        env,
+        client,
+        contract_id,
+        admin,
+        creator,
+        contributor,
+        arbitrator,
+        token,
+        bounty_id,
+    }
 }
 
 /// `add_reward_token` rejects a deployed contract that does not implement the
@@ -5380,7 +5416,6 @@ fn test_admin_state_survives_ttl_threshold() {
     client.accept_admin(&new_admin);
     assert_eq!(client.get_admin(), Some(new_admin));
 }
-
 // --- #1231: reward-split dust invariants ---
 #[test]
 fn test_split_reward_dust_invariants() {
@@ -5507,6 +5542,137 @@ fn test_status_index_page_boundaries_all_orders() {
             });
         }
     }
+}
+
+#[test]
+fn designated_arbitrator_resolves_complete_from_escrow() {
+    let c = arbitrator_ctx();
+    let token = StellarAssetClient::new(&c.env, &c.token);
+    let escrow_before = token.balance(&c.contract_id);
+
+    c.client
+        .resolve_dispute(&c.arbitrator, &c.bounty_id, &Symbol::new(&c.env, "complete"));
+
+    assert_eq!(
+        c.client.get_bounty(&c.bounty_id).unwrap().status,
+        Symbol::new(&c.env, "completed")
+    );
+    // Paid from escrow, not from the arbitrator's own wallet.
+    assert_eq!(token.balance(&c.contributor), 1000);
+    assert_eq!(token.balance(&c.contract_id), escrow_before - 1000);
+    assert_eq!(token.balance(&c.arbitrator), 0);
+}
+
+#[test]
+fn designated_arbitrator_resolves_cancel_refunding_creator() {
+    let c = arbitrator_ctx();
+    c.client
+        .resolve_dispute(&c.arbitrator, &c.bounty_id, &Symbol::new(&c.env, "cancel"));
+    let token = StellarAssetClient::new(&c.env, &c.token);
+    assert_eq!(token.balance(&c.creator), 1000);
+    assert_eq!(
+        c.client.get_bounty(&c.bounty_id).unwrap().status,
+        Symbol::new(&c.env, "cancelled")
+    );
+}
+
+#[test]
+#[should_panic(expected = "caller is not authorized to resolve this dispute")]
+fn creator_cannot_resolve_once_arbitrator_is_designated() {
+    let c = arbitrator_ctx();
+    c.client
+        .resolve_dispute(&c.creator, &c.bounty_id, &Symbol::new(&c.env, "cancel"));
+}
+
+#[test]
+#[should_panic(expected = "caller is not authorized to resolve this dispute")]
+fn unrelated_party_cannot_resolve() {
+    let c = arbitrator_ctx();
+    let stranger = Address::generate(&c.env);
+    c.client
+        .resolve_dispute(&stranger, &c.bounty_id, &Symbol::new(&c.env, "complete"));
+}
+
+#[test]
+#[should_panic(expected = "arbitrator cannot be the bounty creator or an assignee")]
+fn designated_arbitrator_rejected_on_own_bounty() {
+    let c = arbitrator_ctx();
+    // The arbitrator creates a bounty of its own and disputes it.
+    let (bounty_id, _token) = make_bounty_with_token(
+        &c.client,
+        &c.env,
+        &c.arbitrator,
+        &c.contract_id,
+        "bug",
+        1000,
+        None,
+    );
+    let worker = Address::generate(&c.env);
+    c.client.claim_bounty(&worker, &bounty_id);
+    c.client.raise_dispute(&worker, &bounty_id);
+    c.client
+        .resolve_dispute(&c.arbitrator, &bounty_id, &Symbol::new(&c.env, "cancel"));
+}
+
+#[test]
+#[should_panic(expected = "arbitrator cannot be the bounty creator or an assignee")]
+fn designated_arbitrator_rejected_when_assignee() {
+    let c = arbitrator_ctx();
+    let (bounty_id, _token) =
+        make_bounty_with_token(&c.client, &c.env, &c.creator, &c.contract_id, "bug", 1000, None);
+    c.client.claim_bounty(&c.arbitrator, &bounty_id);
+    c.client.raise_dispute(&c.creator, &bounty_id);
+    c.client
+        .resolve_dispute(&c.arbitrator, &bounty_id, &Symbol::new(&c.env, "cancel"));
+}
+
+#[test]
+fn designated_arbitrator_subject_to_min_reputation() {
+    let c = arbitrator_ctx();
+    let token = create_token_and_mint(&c.env, &c.creator, &c.contract_id, 1000);
+    let bounty_id = c.client.create_bounty(
+        &c.creator,
+        &Symbol::new(&c.env, "bug"),
+        &String::from_str(&c.env, "desc"),
+        &1000,
+        &token,
+        &0,
+        &None,
+        &Vec::new(&c.env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&c.env),
+    );
+    // Raise the floor after the claim so only the arbitrator is gated by it.
+    let worker = Address::generate(&c.env);
+    c.client.claim_bounty(&worker, &bounty_id);
+    c.client.raise_dispute(&worker, &bounty_id);
+    let mut bounty = c.client.get_bounty(&bounty_id).unwrap();
+    bounty.min_reputation = 50;
+    c.env.as_contract(&c.contract_id, || storage::store_bounty(&c.env, &bounty_id, &bounty));
+
+    let err = panic_message(|| {
+        c.client
+            .resolve_dispute(&c.arbitrator, &bounty_id, &Symbol::new(&c.env, "cancel"))
+    });
+    assert!(
+        err.as_deref()
+            .is_some_and(|m| m.contains("contributor reputation is too low")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn clearing_arbitrator_restores_creator_fallback() {
+    let c = arbitrator_ctx();
+    c.client.set_arbitrator(&c.admin, &None);
+    c.client
+        .resolve_dispute(&c.creator, &c.bounty_id, &Symbol::new(&c.env, "cancel"));
+    assert_eq!(
+        c.client.get_bounty(&c.bounty_id).unwrap().status,
+        Symbol::new(&c.env, "cancelled")
+    );
 }
 
 #[test]
@@ -5963,6 +6129,129 @@ fn test_only_bootstrapped_admin_can_mutate_config() {
     assert_eq!(config.appeal_window, 10);
     assert_eq!(config.creator_open_limit, 3);
     assert_eq!(config.claim_cooldown, 10);
+}
+
+#[test]
+#[should_panic(expected = "caller is not the contract admin")]
+fn non_admin_cannot_set_arbitrator() {
+    let c = arbitrator_ctx();
+    c.client.set_arbitrator(&c.creator, &Some(c.creator.clone()));
+}
+
+// ===========================================================================
+// #1197 — creator_open_count accounting
+// ===========================================================================
+
+fn open_limit_ctx(limit: u32) -> (Env, MergeMintContractClient<'static>, Address, Address, Address) {
+    let (env, creator, contributor, admin) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+    client.init_admin(&admin);
+    client.set_creator_open_limit(&admin, &limit);
+    (env, client, contract_id, creator, contributor)
+}
+
+#[test]
+fn disputing_own_bounty_does_not_free_a_quota_slot() {
+    let (env, client, contract_id, creator, contributor) = open_limit_ctx(1);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "bug", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&creator, &bounty_id);
+    assert_eq!(client.get_creator_open_count(&creator), 1);
+
+    let token = create_token_and_mint(&env, &creator, &contract_id, 1000);
+    let err = panic_message(|| {
+        client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "bug"),
+            &String::from_str(&env, "desc"),
+            &1000,
+            &token,
+            &0,
+            &None,
+            &Vec::new(&env),
+            &1,
+            &None,
+            &1,
+            &Vec::new(&env),
+        );
+    });
+    assert!(
+        err.as_deref()
+            .is_some_and(|m| m.contains("creator has reached the open bounty limit")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn dispute_resolution_releases_exactly_one_slot() {
+    for resolution in ["complete", "cancel"] {
+        let (env, client, contract_id, creator, contributor) = open_limit_ctx(5);
+        let (bounty_id, token) =
+            make_bounty_with_token(&client, &env, &creator, &contract_id, "bug", 1000, None);
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "docs", 1000, None);
+        // Fund the creator-as-arbitrator payout for the "complete" path.
+        StellarAssetClient::new(&env, &token).mint(&creator, &1000);
+        assert_eq!(client.get_creator_open_count(&creator), 2);
+
+        client.claim_bounty(&contributor, &bounty_id);
+        client.raise_dispute(&contributor, &bounty_id);
+        assert_eq!(client.get_creator_open_count(&creator), 2);
+
+        client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, resolution));
+        assert_eq!(client.get_creator_open_count(&creator), 1, "{resolution}");
+    }
+}
+
+#[test]
+fn deferred_dispute_finalization_releases_slot_once() {
+    let (env, client, contract_id, creator, contributor) = open_limit_ctx(5);
+    let admin = client.get_config().admin.unwrap();
+    client.set_appeal_window(&admin, &10);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "bug", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&contributor, &bounty_id);
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "cancel"));
+    // Pending decision: still active.
+    assert_eq!(client.get_creator_open_count(&creator), 1);
+    env.ledger().with_mut(|l| l.sequence_number += 10);
+    client.finalize_dispute(&contributor, &bounty_id);
+    assert_eq!(client.get_creator_open_count(&creator), 0);
+}
+
+#[test]
+fn ownership_transfer_of_disputed_bounty_moves_the_slot() {
+    let (env, client, contract_id, creator, contributor) = open_limit_ctx(5);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "bug", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&contributor, &bounty_id);
+
+    let new_owner = Address::generate(&env);
+    client.transfer_bounty_ownership(&creator, &bounty_id, &new_owner);
+    client.accept_bounty_ownership(&new_owner, &bounty_id);
+    assert_eq!(client.get_creator_open_count(&creator), 0);
+    assert_eq!(client.get_creator_open_count(&new_owner), 1);
+
+    client.resolve_dispute(&new_owner, &bounty_id, &Symbol::new(&env, "cancel"));
+    assert_eq!(client.get_creator_open_count(&new_owner), 0);
+}
+
+#[test]
+#[should_panic(expected = "creator has reached the open bounty limit")]
+fn ownership_transfer_of_disputed_bounty_respects_limit() {
+    let (env, client, contract_id, creator, contributor) = open_limit_ctx(1);
+    let (bounty_id, _token) =
+        make_bounty_with_token(&client, &env, &creator, &contract_id, "bug", 1000, None);
+    client.claim_bounty(&contributor, &bounty_id);
+    client.raise_dispute(&contributor, &bounty_id);
+
+    let new_owner = Address::generate(&env);
+    make_bounty_with_token(&client, &env, &new_owner, &contract_id, "docs", 1000, None);
+    client.transfer_bounty_ownership(&creator, &bounty_id, &new_owner);
+    client.accept_bounty_ownership(&new_owner, &bounty_id);
 }
 
 #[test]
