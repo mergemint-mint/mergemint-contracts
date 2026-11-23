@@ -4417,6 +4417,72 @@ fn non_admin_cannot_unpause() {
     c.client.unpause(&c.other);
 }
 
+// --- #1231: reward-split dust invariants ---
+#[test]
+fn test_split_reward_dust_invariants() {
+    use crate::types::split_reward;
+    assert_eq!(split_reward(1000, 0), (0, 1000));
+    for (reward, count) in [(1000i128, 3u32), (7, 7), (1, 2), (i128::MAX, u32::MAX)] {
+        let (share, dust) = split_reward(reward, count);
+        assert_eq!(share * count as i128 + dust, reward);
+        assert!(dust >= 0 && dust < count as i128);
+    }
+}
+
+// --- #1230: real Val round-trips ---
+#[test]
+fn test_val_round_trip_types() {
+    use soroban_sdk::IntoVal;
+    let env = Env::default();
+    let id = BountyId(BytesN::from_array(&env, &[7u8; 32]));
+    let addr = Address::generate(&env);
+    let keys = [
+        DataKey::BountyCount,
+        DataKey::Bounty(id.clone()),
+        DataKey::BountyMeta(id.clone()),
+        DataKey::Contributor(addr.clone()),
+        DataKey::ContributorBounties(addr.clone()),
+        DataKey::ContributorHistory(addr),
+        DataKey::StatusIndex(Symbol::new(&env, "open")),
+    ];
+    for k in keys {
+        let v: Val = k.clone().into_val(&env);
+        assert_eq!(DataKey::try_from_val(&env, &v).unwrap(), k);
+    }
+    for (amt, idx) in [(i128::MIN, 0u32), (i128::MAX, u32::MAX)] {
+        let v: Val = (amt, idx, Vec::<u32>::new(&env)).into_val(&env);
+        let back = <(i128, u32, Vec<u32>)>::try_from_val(&env, &v).unwrap();
+        assert_eq!(back.0, amt);
+        assert_eq!(back.1, idx);
+    }
+}
+
+// --- #1232: metering budget bounds ---
+#[test]
+fn test_create_bounty_budget_bounds() {
+    let (env, creator, _, _) = setup_test();
+    let client = MergeMintContractClient::new(&env, &env.register(MergeMintContract, ()));
+    env.cost_estimate().budget().reset_default();
+    make_bounty(&client, &env, &creator, "budget", None);
+    let budget = env.cost_estimate().budget();
+    // Baseline ceilings; >10% unexplained growth must update these deliberately.
+    assert!(budget.cpu_instruction_cost() < 10_000_000);
+    assert!(budget.memory_bytes_cost() < 5_000_000);
+}
+
+// --- #1233: non-token reward contract fails closed ---
+mod not_a_token {
+    use soroban_sdk::{contract, contractimpl};
+    #[contract]
+    pub struct NotAToken;
+    #[contractimpl]
+    impl NotAToken {
+        pub fn ping() -> u32 {
+            1
+        }
+    }
+}
+
 // ── #1237: multi-page PAGE_SIZE boundary / swap-remove corruption tests ──
 
 fn page_test_id(env: &Env, n: u32) -> BountyId {
@@ -4477,6 +4543,33 @@ fn test_status_index_page_boundaries_all_orders() {
             });
         }
     }
+}
+
+#[test]
+fn test_non_token_reward_rejected() {
+    let (env, creator, _, _) = setup_test();
+    let client = MergeMintContractClient::new(&env, &env.register(MergeMintContract, ()));
+    let fake = env.register(not_a_token::NotAToken, ());
+    let res = client.try_create_bounty(
+        &creator,
+        &Symbol::new(&env, "bad"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &fake,
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+    assert_eq!(
+        res.err().unwrap().unwrap(),
+        soroban_sdk::Error::from_contract_error(
+            crate::errors::ContractError::InvalidRewardToken as u32
+        )
+    );
 }
 
 #[test]
