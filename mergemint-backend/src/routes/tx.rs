@@ -21,11 +21,11 @@ use soroban_client::{
 use sqlx::{Postgres, QueryBuilder, Row};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::db::{
-    acquire_idempotency, read_db, read_idempotency, write_audit_log, AuditLog, IdempotencyEntry,
+    acquire_idempotency, read_db, write_audit_log, AuditLog, IdempotencyEntry, IdempotencyGuard,
     SharedDb, SharedIdempotencyStore,
 };
 
@@ -208,9 +208,10 @@ const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 enum IdempotencyCheck {
     /// No key was supplied; proceed without dedup (back-compat default).
     NotRequested,
-    /// A fresh key was reserved as in-flight; the caller must finalize it
-    /// via `finalize_idempotency_key` once the request completes.
-    Proceed(String),
+    /// A fresh key was reserved as in-flight. The guard is held across the
+    /// handler's `await` points and finalized via `finalize_idempotency_key`;
+    /// dropping the future cancels the reservation automatically (#1262).
+    Proceed(IdempotencyGuard),
     /// A prior request with this key already completed; replay its response
     /// instead of resubmitting the transaction.
     Replay(Response),
@@ -239,38 +240,35 @@ fn check_idempotency_key(headers: &HeaderMap, store: &SharedIdempotencyStore) ->
         return IdempotencyCheck::NotRequested;
     };
 
-    // Fast path: a read lock is enough to detect an already-completed or
-    // already-in-flight key without taking the write lock.
-    if let Some(entry) = read_idempotency(store).entries.get(key) {
-        return idempotency_check_from_entry(entry);
+    // Take the write lock once so TTL eviction and the in-flight reservation
+    // are a single atomic operation: no other request can observe the key
+    // between pruning an expired entry and reserving it again (#1262).
+    let now = Instant::now();
+    let mut entries = acquire_idempotency(store);
+    entries.prune_expired(now);
+
+    if let Some(entry) = entries.entries.get(key).cloned() {
+        return idempotency_check_from_entry(&entry);
     }
 
-    let mut guard = acquire_idempotency(store);
-    // Re-check under the write lock in case another request reserved the
-    // key between our read above and acquiring the write lock.
-    match guard.entries.get(key) {
-        Some(entry) => idempotency_check_from_entry(entry),
-        None => {
-            guard
-                .entries
-                .insert(key.to_string(), IdempotencyEntry::InFlight);
-            IdempotencyCheck::Proceed(key.to_string())
-        }
-    }
+    let token = entries.reserve(key.to_string(), now);
+    drop(entries);
+    IdempotencyCheck::Proceed(IdempotencyGuard::new(store, key.to_string(), token))
 }
 
 fn idempotency_check_from_entry(entry: &IdempotencyEntry) -> IdempotencyCheck {
     match entry {
-        IdempotencyEntry::Completed(body) => IdempotencyCheck::Replay(
+        IdempotencyEntry::Completed { body, .. } => IdempotencyCheck::Replay(
             Response::builder()
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(body.clone()))
                 .unwrap_or_else(|_| {
-                    AppError::internal("failed to build idempotency replay response").into_response()
+                    AppError::internal("failed to build idempotency replay response")
+                        .into_response()
                 }),
         ),
-        IdempotencyEntry::InFlight => IdempotencyCheck::Conflict(
+        IdempotencyEntry::InFlight { .. } => IdempotencyCheck::Conflict(
             AppError {
                 code: 409,
                 message: "a request with this Idempotency-Key is already in progress".to_string(),
@@ -280,22 +278,27 @@ fn idempotency_check_from_entry(entry: &IdempotencyEntry) -> IdempotencyCheck {
     }
 }
 
-/// Records the final outcome of a request that reserved `key` via
-/// `check_idempotency_key`.
+/// Finalize the request that reserved an idempotency key (#1262).
 ///
-/// On success the response body is cached so retries replay it. On failure
-/// the reservation is removed entirely -- no transaction was submitted, so
-/// the key is free to be reused once the client fixes the request.
-fn finalize_idempotency_key(store: &SharedIdempotencyStore, key: String, result: Option<String>) {
-    let mut guard = acquire_idempotency(store);
-    match result {
-        Some(body) => {
-            guard.entries.insert(key, IdempotencyEntry::Completed(body));
-        }
-        None => {
-            guard.entries.remove(&key);
+/// On success the guard caches the response body so retries replay it. On
+/// failure -- or if serializing the response fails -- the guard is dropped and
+/// releases the reservation so the client can retry with the same key.
+/// Because the guard is owned by this future, dropping the future mid-flight
+/// (timeout, client disconnect, panic) releases the key too.
+fn finalize_idempotency_key(
+    guard: Option<IdempotencyGuard>,
+    result: &Result<ResolveDisputeResponse, (StatusCode, Json<AppError>)>,
+) {
+    let Some(guard) = guard else {
+        return;
+    };
+    if let Ok(response) = result {
+        match serde_json::to_string(response) {
+            Ok(body) => guard.complete(body),
+            Err(_) => drop(guard),
         }
     }
+    // An `Err` result drops the guard here, releasing the reservation.
 }
 
 // ---------------------------------------------------------------------------
@@ -996,9 +999,9 @@ pub async fn self_claim(
     headers: HeaderMap,
     Json(req): Json<SelfClaimRequest>,
 ) -> Response {
-    let idempotency_key = match check_idempotency_key(&headers, &state.idempotency) {
+    let idempotency_guard = match check_idempotency_key(&headers, &state.idempotency) {
         IdempotencyCheck::NotRequested => None,
-        IdempotencyCheck::Proceed(key) => Some(key),
+        IdempotencyCheck::Proceed(guard) => Some(guard),
         IdempotencyCheck::Replay(response) | IdempotencyCheck::Conflict(response) => {
             let snapshot = state.check_self_claim_rate_limit(&req.claimant, false);
             return add_rate_limit_headers(response, snapshot);
@@ -1018,13 +1021,7 @@ pub async fn self_claim(
 
     let result = self_claim_inner(&state, &req).await;
 
-    if let Some(key) = idempotency_key {
-        let cached_body = result
-            .as_ref()
-            .ok()
-            .and_then(|resp| serde_json::to_string(resp).ok());
-        finalize_idempotency_key(&state.idempotency, key, cached_body);
-    }
+    finalize_idempotency_key(idempotency_guard, &result);
 
     let response = match result {
         Ok(resp) => Json(resp).into_response(),
@@ -1519,7 +1516,7 @@ mod tests {
             .entries
             .insert(
                 "concurrent-key".to_string(),
-                crate::db::IdempotencyEntry::InFlight,
+                crate::db::IdempotencyEntry::in_flight(Instant::now(), 1),
             );
 
         let response = self_claim(
@@ -1563,6 +1560,176 @@ mod tests {
                 .contains_key("error-key"),
             "a failed request must not leave the key reserved"
         );
+    }
+
+    /// Reserve a key exactly as `self_claim` does, then suspend indefinitely.
+    ///
+    /// The handler itself is effectively synchronous today, so this helper
+    /// supplies the mid-flight `await` point that `TimeoutLayer` or a client
+    /// disconnect would cancel while the RAII guard is alive.
+    async fn reserve_then_suspend(store: SharedIdempotencyStore, key: &str) -> IdempotencyGuard {
+        let headers = idempotency_headers(key);
+        match check_idempotency_key(&headers, &store) {
+            IdempotencyCheck::Proceed(guard) => {
+                std::future::pending::<()>().await;
+                guard
+            }
+            _ => panic!("expected a fresh reservation"),
+        }
+    }
+
+    /// Dropping the future of an in-flight request must release its key so a
+    /// retry is not permanently rejected with 409 (#1262).
+    #[tokio::test]
+    async fn cancelled_handler_future_releases_idempotency_key() {
+        let state = claimable_state("bounty-cancel");
+        let store = Arc::clone(&state.idempotency);
+        let future = reserve_then_suspend(store, "cancel-key");
+
+        // `biased` polls the handler future first so it reserves the key, then
+        // cancels it via the second branch — exactly what a timeout does.
+        tokio::select! {
+            biased;
+            _ = future => panic!("the suspended handler must not complete"),
+            _ = tokio::task::yield_now() => {}
+        }
+
+        assert!(
+            !crate::db::read_idempotency(&state.idempotency)
+                .entries
+                .contains_key("cancel-key"),
+            "cancelling the handler future must release the reservation"
+        );
+
+        // The retry can reserve the same key and complete normally.
+        let retry = self_claim(
+            State(Arc::clone(&state)),
+            idempotency_headers("cancel-key"),
+            Json(SelfClaimRequest {
+                bounty_id: "bounty-cancel".to_string(),
+                claimant: "claimant-address".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+    }
+
+    /// A `TimeoutLayer`-style cancellation also drops the guard (#1262).
+    #[tokio::test]
+    async fn timeout_cancellation_releases_idempotency_key() {
+        let state = claimable_state("bounty-timeout");
+        let store = Arc::clone(&state.idempotency);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            reserve_then_suspend(store, "timeout-key"),
+        )
+        .await;
+        assert!(result.is_err(), "the suspended handler should time out");
+
+        assert!(
+            !crate::db::read_idempotency(&state.idempotency)
+                .entries
+                .contains_key("timeout-key"),
+            "a timed-out request must not leave the key stuck in-flight"
+        );
+    }
+
+    /// Panic unwinding drops in-flight guards too (#1262).
+    #[tokio::test]
+    async fn panic_mid_request_releases_idempotency_key() {
+        let state = claimable_state("bounty-panic");
+        let store = Arc::clone(&state.idempotency);
+
+        let panicking = tokio::spawn(async move {
+            let headers = idempotency_headers("panic-key");
+            let _guard = match check_idempotency_key(&headers, &store) {
+                IdempotencyCheck::Proceed(guard) => guard,
+                _ => panic!("expected a fresh reservation"),
+            };
+            panic!("simulated handler panic while holding the guard");
+        });
+        assert!(panicking.await.is_err());
+        assert!(
+            !crate::db::read_idempotency(&state.idempotency)
+                .entries
+                .contains_key("panic-key"),
+            "panic unwinding must release the reservation"
+        );
+    }
+
+    /// Completed responses are replayed only until their TTL elapses (#1262).
+    /// With the TTL expired, the retry re-executes the handler instead.
+    #[tokio::test]
+    async fn completed_idempotency_key_expires_after_ttl() {
+        let state = claimable_state("bounty-ttl");
+        let req = SelfClaimRequest {
+            bounty_id: "bounty-ttl".to_string(),
+            claimant: "claimant-address".to_string(),
+        };
+
+        let first = self_claim(
+            State(Arc::clone(&state)),
+            idempotency_headers("ttl-key"),
+            Json(SelfClaimRequest {
+                bounty_id: req.bounty_id.clone(),
+                claimant: req.claimant.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // Force the cached response to expire and delete the bounty so that a
+        // re-executed handler is observably different from a replay.
+        crate::db::acquire_idempotency(&state.idempotency).completed_ttl =
+            std::time::Duration::ZERO;
+        crate::db::acquire_db(&state.db)
+            .records
+            .remove("bounty-ttl");
+
+        let retry = self_claim(
+            State(Arc::clone(&state)),
+            idempotency_headers("ttl-key"),
+            Json(req),
+        )
+        .await;
+        assert_eq!(
+            retry.status(),
+            StatusCode::NOT_FOUND,
+            "an expired completed entry must not be replayed"
+        );
+        assert!(
+            !crate::db::read_idempotency(&state.idempotency)
+                .entries
+                .contains_key("ttl-key"),
+            "a failed retry must leave no reservation behind"
+        );
+    }
+
+    /// The in-flight TTL is a backstop for reservations whose owner vanished
+    /// without running destructors (#1262).
+    #[tokio::test]
+    async fn expired_in_flight_key_can_be_reclaimed() {
+        let state = claimable_state("bounty-stale");
+        {
+            let mut entries = crate::db::acquire_idempotency(&state.idempotency);
+            entries.in_flight_ttl = std::time::Duration::ZERO;
+            entries.entries.insert(
+                "stale-key".to_string(),
+                IdempotencyEntry::in_flight(Instant::now(), 42),
+            );
+        }
+
+        let response = self_claim(
+            State(Arc::clone(&state)),
+            idempotency_headers("stale-key"),
+            Json(SelfClaimRequest {
+                bounty_id: "bounty-stale".to_string(),
+                claimant: "claimant-address".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     // ---------------------------------------------------------------------
