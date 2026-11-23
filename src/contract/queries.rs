@@ -100,12 +100,10 @@ impl MergeMintContract {
             Bounty {
                 creator: summary.creator,
                 reward_amount: summary.reward,
-                // The original reward_token is not retained in the summary;
-                // this placeholder (the contract's own address) is never a
-                // real payout destination and must not be used for
-                // transfers. Callers that need the real token should use
-                // off-chain indexer history instead.
-                reward_token: env.current_contract_address(),
+                // The original reward_token is retained in the summary, so
+                // archived bounties report the true payout token rather than
+                // a placeholder.
+                reward_token: summary.reward_token,
                 assignees,
                 max_assignees: 1,
                 status: summary.status,
@@ -128,9 +126,14 @@ impl MergeMintContract {
 
     /// Return the off-chain-facing metadata (title, description) for each of
     /// `ids`, in the same order. Entries are `None` for IDs with no stored meta.
+    ///
+    /// The number of IDs processed per call is capped at `MAX_LIMIT` (50),
+    /// matching `get_bounties_by_ids`; any IDs beyond the cap are ignored so
+    /// callers cannot construct oversized batch reads that exceed RPC
+    /// simulation budgets.
     pub fn get_bounty_metas(env: Env, ids: Vec<BountyId>) -> Vec<Option<BountyMeta>> {
         let mut result: Vec<Option<BountyMeta>> = Vec::new(&env);
-        for id in ids.iter() {
+        for id in ids.iter().take(MAX_LIMIT as usize) {
             result.push_back(storage::get_bounty_meta(&env, &id));
         }
         result
@@ -140,13 +143,24 @@ impl MergeMintContract {
     /// list pages that would otherwise call `get_bounty` once per card.
     ///
     /// Unknown IDs are skipped (not included in the result, not an error).
+    /// Never-allocated IDs are skipped; archived bounties fall back to a
+    /// degenerate `BountyMeta` reconstructed from the `BountySummary` (empty
+    /// title/description), consistent with `get_bounty`'s archive fallback.
     /// The number of IDs processed per call is capped at `MAX_LIMIT` (50);
     /// any IDs beyond the cap are ignored.
     pub fn get_bounties_by_ids(env: Env, ids: Vec<BountyId>) -> Vec<BountyMeta> {
         let mut result: Vec<BountyMeta> = Vec::new(&env);
         for id in ids.iter().take(MAX_LIMIT as usize) {
+            if !storage::bounty_id_was_allocated(&env, &id) {
+                continue;
+            }
             if let Some(meta) = storage::get_bounty_meta(&env, &id) {
                 result.push_back(meta);
+            } else if storage::get_bounty_archive(&env, &id).is_some() {
+                result.push_back(BountyMeta {
+                    title: String::new(&env),
+                    description: String::new(&env),
+                });
             }
         }
         result
@@ -169,9 +183,14 @@ impl MergeMintContract {
 
     /// Return each bounty in `ids`, in the same order. Entries are `None`
     /// for IDs that do not exist.
+    ///
+    /// The number of IDs processed per call is capped at `MAX_LIMIT` (50),
+    /// matching `get_bounties_by_ids`; any IDs beyond the cap are ignored so
+    /// callers cannot construct oversized batch reads that exceed RPC
+    /// simulation budgets.
     pub fn get_bounties(env: Env, ids: Vec<BountyId>) -> Vec<Option<Bounty>> {
         let mut result = Vec::new(&env);
-        for id in ids.iter() {
+        for id in ids.iter().take(MAX_LIMIT as usize) {
             result.push_back(storage::get_bounty(&env, &id));
         }
         result
@@ -300,20 +319,51 @@ impl MergeMintContract {
     /// end; `limit` is capped at 50 (`MAX_LIMIT`), and `0` means the cap.
     /// Returns an empty `Vec` if the contributor has no completed or
     /// cancelled bounties, or if `offset` is past the end of the history.
+    ///
+    /// The history is stored in fixed-size pages (see
+    /// `storage::ContributorHistoryPage`), so this walks pages from the tail
+    /// backwards and only reads the pages that overlap the requested window;
+    /// it never materialises the whole history in a temporary `Vec`.
     pub fn get_contributor_bounty_history(
         env: Env,
         address: Address,
         offset: u32,
         limit: u32,
     ) -> Vec<BountyId> {
-        let all = storage::get_contributor_history(&env, &address);
-        let mut newest_first = Vec::new(&env);
-        let mut i = all.len();
-        while i > 0 {
-            i -= 1;
-            newest_first.push_back(all.get(i).unwrap_or_else(|| fail(ContractError::CorruptedIndex)));
+        let effective_limit = if limit == 0 || limit > MAX_LIMIT {
+            MAX_LIMIT
+        } else {
+            limit
+        };
+        let total = storage::get_contributor_history_count(&env, &address);
+        let mut result = Vec::new(&env);
+        if offset >= total || effective_limit == 0 {
+            return result;
         }
-        paginate(&env, newest_first, Some(offset), limit).0
+        // Number of newest-first entries still available after `offset`.
+        let available = total - offset;
+        let take = if effective_limit > available {
+            available
+        } else {
+            effective_limit
+        };
+        let page_size = storage::PAGE_SIZE;
+        // Newest-first index `offset + i` maps to ascending index
+        // `total - 1 - (offset + i)`.
+        let mut i = 0u32;
+        while i < take {
+            let newest_index = offset + i;
+            let ascending_index = total - 1 - newest_index;
+            let page = ascending_index / page_size;
+            let slot = ascending_index % page_size;
+            let ids = storage::get_contributor_history_page(&env, &address, page);
+            match ids.get(slot) {
+                Some(id) => result.push_back(id),
+                None => fail(ContractError::CorruptedIndex),
+            }
+            i += 1;
+        }
+        result
     }
 
     /// Return the submission hash recorded by `submit_work` for `bounty_id`,
@@ -395,6 +445,17 @@ impl MergeMintContract {
         paginate(&env, all, cursor, limit)
     }
 
+    /// Return the total number of bounties created by `creator`.
+    ///
+    /// O(1): reads a single persistent counter maintained alongside the
+    /// `DataKey::ContributorBounties(creator)` index, so callers can render
+    /// total page counts without scanning every page. Mirrors
+    /// `get_open_bounties_count` and `get_status_count`. Returns `0` for an
+    /// address that has never created a bounty.
+    pub fn get_bounties_by_creator_count(env: Env, creator: Address) -> u32 {
+        storage::get_creator_bounties_count(&env, &creator)
+    }
+
     /// Return a bounded page of bounty IDs paid in a specific reward token.
     ///
     /// `cursor` is the zero-based offset; `limit` capped at `MAX_LIMIT` (50),
@@ -422,6 +483,17 @@ impl MergeMintContract {
         storage::read_index_window(&env, count, start, effective_limit(limit), |page| {
             storage::get_token_bounties_page(&env, &token, page)
         })
+    }
+
+    /// Return the total number of bounties paid in `token`.
+    ///
+    /// O(1): reads a single persistent counter maintained alongside the
+    /// `DataKey::TokenBounties(token)` index, so callers can render total
+    /// page counts without scanning every page. Mirrors
+    /// `get_open_bounties_count` and `get_status_count`. Returns `0` for a
+    /// token that has never been used as a `reward_token`.
+    pub fn get_bounties_by_token_count(env: Env, token: Address) -> u32 {
+        storage::get_token_bounties_count(&env, &token)
     }
 
     /// Return the admin-configured cap on concurrent open+claimed bounties
@@ -479,13 +551,31 @@ impl MergeMintContract {
 
     /// Return the pending (undecided-until-finalized) dispute resolution for
     /// `bounty_id`, if one has been recorded.
+    ///
+    /// Read-only. Returns `None` when no resolution is pending (the default,
+    /// including for never-allocated IDs). Lets UIs and indexers compute the
+    /// remaining appeal-window countdown from `recorded_at_ledger` and
+    /// `get_appeal_window` without scanning events.
     pub fn get_pending_resolution(env: Env, bounty_id: BountyId) -> Option<PendingResolution> {
         storage::get_pending_resolution(&env, &bounty_id)
     }
 
     /// Return whether `bounty_id`'s dispute has already used its one
     /// allowed appeal.
+    ///
+    /// Read-only. Returns `false` when no appeal has been recorded (the
+    /// default, including for never-allocated IDs).
     pub fn get_dispute_appealed(env: Env, bounty_id: BountyId) -> bool {
         storage::get_dispute_appealed(&env, &bounty_id)
+    }
+
+    /// Return the ledger sequence at which `bounty_id` was most recently
+    /// claimed, or `None` if it has never been claimed.
+    ///
+    /// Read-only. Combined with `get_claim_window`, lets clients compute the
+    /// exact stale-claim countdown (`claimed_at_ledger + claim_window`) used
+    /// by `release_stale_claim` without scanning events.
+    pub fn get_claimed_at_ledger(env: Env, bounty_id: BountyId) -> Option<u32> {
+        storage::get_claimed_at_ledger(&env, &bounty_id)
     }
 }

@@ -48,6 +48,13 @@ mkdir -p "$OUT_DIR"
 cp "$BUILD_DIR/$TARGET/release/mergemint_contracts.wasm" "$OUT_DIR/$NAME"
 (cd "$OUT_DIR" && sha256sum "$NAME" > "$NAME.sha256")
 
+# Verify the freshly written checksum before publishing it, so a corrupt copy
+# or a bad checksum file fails the build instead of shipping.
+if ! (cd "$OUT_DIR" && sha256sum -c "$NAME.sha256" >/dev/null); then
+  echo "error: SHA-256 verification failed for $OUT_DIR/$NAME" >&2
+  exit 1
+fi
+
 SHA256="$(cut -d' ' -f1 "$OUT_DIR/$NAME.sha256")"
 echo "WASM:   $OUT_DIR/$NAME ($(wc -c < "$OUT_DIR/$NAME") bytes)"
 echo "SHA256: $SHA256"

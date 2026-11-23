@@ -1,0 +1,144 @@
+# Strict static-analysis gate for contracts/bounty/ (production contracts only).
+#
+# Complements solidity-static-analysis.yml: pins tool versions, fails on any
+# Medium/High Slither finding, runs Aderyn and fails on High findings, and
+# uploads SARIF to GitHub Code Scanning. Test mocks under test/bounty/mocks/
+# are excluded from the gate (--filter-paths) so only production code is judged.
+#
+# Every `slither-disable-next-line` in contracts/bounty/ must carry a comment
+# justifying it; the "Check suppressions are justified" step enforces that.
+
+name: Bounty Static Analysis
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/bounty/**"
+      - ".github/workflows/static-analysis-bounty.yml"
+  pull_request:
+    paths:
+      - "contracts/bounty/**"
+      - ".github/workflows/static-analysis-bounty.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: static-analysis-bounty-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SLITHER_VERSION: "0.10.4"
+  ADERYN_VERSION: "0.6.4"
+  OZ_VERSION: "4.9.6"
+
+jobs:
+  slither:
+    name: Slither (contracts/bounty)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned Slither and solc
+        run: |
+          pip install "slither-analyzer==${SLITHER_VERSION}" solc-select
+          solc-select install 0.8.0
+          solc-select use 0.8.0
+
+      - name: Install Solidity dependencies
+        run: npm install --no-save "@openzeppelin/contracts@${OZ_VERSION}"
+
+      - name: Check suppressions are justified
+        run: |
+          # each suppression must be preceded by a comment line explaining it
+          status=0
+          while IFS=: read -r file line _; do
+            prev=$((line - 1))
+            if ! sed -n "${prev}p" "$file" | grep -qE '^\s*//'; then
+              echo "::error file=${file},line=${line}::slither-disable without a justification comment on the preceding line"
+              status=1
+            fi
+          done < <(grep -rn "slither-disable" contracts/bounty || true)
+          exit $status
+
+      - name: Run Slither (fail on Medium/High, emit SARIF)
+        run: |
+          slither contracts/bounty \
+            --filter-paths "node_modules|test/" \
+            --solc-remaps "@openzeppelin=node_modules/@openzeppelin" \
+            --exclude-informational --exclude-low --exclude-optimization \
+            --sarif slither.sarif \
+            --json slither-report.json || true
+          # Fail on any Medium/High result that is not suppressed.
+          count=$(jq '[.results.detectors[]? | select(.impact=="High" or .impact=="Medium")] | length' slither-report.json)
+          echo "Medium/High findings: ${count}"
+          test "${count}" -eq 0
+
+      - name: Upload SARIF to Code Scanning
+        if: always() && hashFiles('slither.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: slither.sarif
+          category: slither-bounty
+
+      - name: Upload Slither report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: slither-bounty-report
+          path: |
+            slither.sarif
+            slither-report.json
+
+  aderyn:
+    name: Aderyn (contracts/bounty)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Install Solidity dependencies
+        run: npm install --no-save "@openzeppelin/contracts@${OZ_VERSION}"
+
+      - name: Install pinned Aderyn
+        run: npm install -g "@cyfrin/aderyn@${ADERYN_VERSION}"
+
+      - name: Run Aderyn on contracts/bounty only
+        run: |
+          aderyn . --src contracts/bounty --path-excludes "node_modules,test" -o aderyn.sarif
+          aderyn . --src contracts/bounty --path-excludes "node_modules,test" -o aderyn.json
+          high=$(jq '.high_issues.issues | length' aderyn.json)
+          echo "Aderyn High findings: ${high}"
+          test "${high}" -eq 0
+
+      - name: Upload SARIF to Code Scanning
+        if: always() && hashFiles('aderyn.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: aderyn.sarif
+          category: aderyn-bounty
+
+      - name: Upload Aderyn report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: aderyn-bounty-report
+          path: |
+            aderyn.sarif
+            aderyn.json

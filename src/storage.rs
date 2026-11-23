@@ -25,20 +25,24 @@
 //! | Status index page | `StatusIndexPage(Symbol, u32)` | `Vec<BountyId>` | Paged shard (`PAGE_SIZE` IDs) |
 //! | Open-bounty totals | `OpenBountiesCount` | `u32` | Count of claimable bounties |
 //! | Open-bounty page | `OpenBountiesPage(u32)` | `Vec<BountyId>` | Paged open-bounty shard |
+//! | Contributor history totals | `ContributorHistoryCount(Address)` | `u32` | Terminal-bounty count per contributor |
+//! | Contributor history page | `ContributorHistoryPage(Address, u32)` | `Vec<BountyId>` | Paged history shard |
 //! | Multi-sig votes | `Approvals(BountyId)` | `Vec<Address>` | Per-bounty verifier approvals |
 //!
 //! ## Legacy variants (read-only)
 //!
 //! - `StatusIndex(Symbol)` — pre-pagination status blob; do not write.
 //! - `OpenBounties` — pre-pagination open list; do not write.
+//! - `ContributorHistory(Address)` — pre-pagination history blob; do not write.
 //!
 //! ## Paged indexes
 //!
-//! `StatusIndexPage` and `OpenBountiesPage` shard large lists into pages of at
-//! most [`PAGE_SIZE`] entries to stay within Soroban's per-entry size limit.
-//! Each index also maintains a companion count key (`StatusCount` /
-//! `OpenBountiesCount`). See the inline layout comments in this file for
-//! append and swap-remove semantics.
+//! `StatusIndexPage`, `OpenBountiesPage` and `ContributorHistoryPage` shard
+//! large lists into pages of at most [`PAGE_SIZE`] entries to stay within
+//! Soroban's per-entry size limit. Each index also maintains a companion count
+//! key (`StatusCount` / `OpenBountiesCount` / `ContributorHistoryCount`). See
+//! the inline layout comments in this file for append and swap-remove
+//! semantics.
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::errors::{fail, ContractError};
@@ -523,11 +527,19 @@ pub fn remove_bounty_from_status(env: &Env, bounty_id: &BountyId, status: &Symbo
     decrement_status_count(env, status);
 }
 
+/// Move `bounty_id` from `old_status` to `new_status` in the paged status
+/// index, recording each assignee in their contributor history when the new
+/// status is terminal.
+///
+/// `assignees` is passed in by the caller (which already holds the loaded
+/// `Bounty`) so this function never re-reads `DataKey::Bounty(id)` — saving a
+/// persistent deserialization on every completion and cancellation.
 pub fn move_bounty_status(
     env: &Env,
     bounty_id: &BountyId,
     old_status: &Symbol,
     new_status: &Symbol,
+    assignees: &Vec<(Address, u32)>,
 ) {
     if old_status != new_status {
         remove_bounty_from_status(env, bounty_id, old_status);
@@ -536,10 +548,8 @@ pub fn move_bounty_status(
         if *new_status == Symbol::new(env, STATUS_COMPLETED)
             || *new_status == Symbol::new(env, STATUS_CANCELLED)
         {
-            if let Some(bounty) = get_bounty(env, bounty_id) {
-                for (assignee, _) in bounty.assignees.iter() {
-                    append_contributor_history(env, &assignee, bounty_id);
-                }
+            for (assignee, _) in assignees.iter() {
+                append_contributor_history(env, &assignee, bounty_id);
             }
         }
     }
@@ -763,6 +773,219 @@ pub fn remove_open_bounty(env: &Env, bounty_id: &BountyId) {
     set_open_bounties_count(env, total - 1);
 }
 
+// ── Legacy index migration ────────────────────────────────────────────────────
+//
+// Pre-pagination deployments stored the full status index and open-bounty list
+// in single blobs (`DataKey::StatusIndex(Symbol)` / `DataKey::OpenBounties`).
+// `migrate_legacy_indexes` drains those blobs into the paged shards in bounded
+// chunks so a single invocation stays within the transaction CPU/write budget.
+//
+// The migration is idempotent: IDs already present in the paged shards are
+// skipped, and the legacy key is deleted only once every entry has been
+// migrated. Re-running after completion is a no-op.
+
+/// Maximum number of legacy IDs migrated per `migrate_legacy_indexes` call.
+///
+/// Each migrated ID costs at most one page read + one page write, so a chunk
+/// of this size keeps the write footprint well below the per-transaction
+/// budget even when both legacy indexes are drained in the same call.
+pub const MIGRATION_CHUNK_SIZE: u32 = 25;
+
+/// Returns the raw legacy `StatusIndex(status)` blob, if present.
+pub fn get_legacy_status_index(env: &Env, status: &Symbol) -> Option<Vec<BountyId>> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::StatusIndex(status.clone()))
+}
+
+/// Returns the raw legacy `OpenBounties` blob, if present.
+pub fn get_legacy_open_bounties(env: &Env) -> Option<Vec<BountyId>> {
+    env.storage().persistent().get(&DataKey::OpenBounties)
+}
+
+/// Returns `true` when `bounty_id` already appears in any status page.
+fn status_index_contains(env: &Env, status: &Symbol, bounty_id: &BountyId) -> bool {
+    let total = get_status_count(env, status);
+    if total == 0 {
+        return false;
+    }
+    let pages = total.div_ceil(PAGE_SIZE);
+    let mut p = 0u32;
+    while p < pages {
+        let page = get_status_page(env, status, p);
+        for id in page.iter() {
+            if id == *bounty_id {
+                return true;
+            }
+        }
+        p += 1;
+    }
+    false
+}
+
+/// Returns `true` when `bounty_id` already appears in any open-bounty page.
+fn open_bounties_contains(env: &Env, bounty_id: &BountyId) -> bool {
+    let total = get_open_bounties_count(env);
+    if total == 0 {
+        return false;
+    }
+    let pages = total.div_ceil(PAGE_SIZE);
+    let mut p = 0u32;
+    while p < pages {
+        let page = get_open_bounties_page(env, p);
+        for id in page.iter() {
+            if id == *bounty_id {
+                return true;
+            }
+        }
+        p += 1;
+    }
+    false
+}
+
+/// Append `bounty_id` to the status shard, skipping duplicates.
+fn append_status_index_unique(env: &Env, status: &Symbol, bounty_id: &BountyId) {
+    if status_index_contains(env, status, bounty_id) {
+        return;
+    }
+    let total = get_status_count(env, status);
+    let target_page_idx = if total == 0 {
+        0
+    } else if total.is_multiple_of(PAGE_SIZE) {
+        total / PAGE_SIZE
+    } else {
+        total.div_ceil(PAGE_SIZE) - 1
+    };
+    let mut page = get_status_page(env, status, target_page_idx);
+    page.push_back(bounty_id.clone());
+    set_status_page(env, status, target_page_idx, &page);
+    increment_status_count(env, status);
+}
+
+/// Append `bounty_id` to the open-bounty shard, skipping duplicates.
+fn append_open_bounty_unique(env: &Env, bounty_id: &BountyId) {
+    if open_bounties_contains(env, bounty_id) {
+        return;
+    }
+    let total = get_open_bounties_count(env);
+    let target_page_idx = if total == 0 {
+        0
+    } else if total.is_multiple_of(PAGE_SIZE) {
+        total / PAGE_SIZE
+    } else {
+        total.div_ceil(PAGE_SIZE) - 1
+    };
+    let mut page = get_open_bounties_page(env, target_page_idx);
+    page.push_back(bounty_id.clone());
+    set_open_bounties_page(env, target_page_idx, &page);
+    set_open_bounties_count(env, total + 1);
+}
+
+/// Migrate up to `chunk_size` entries from the legacy `StatusIndex(status)`
+/// blob into the paged shard. Returns the number of entries drained.
+///
+/// The legacy key is deleted once the blob is fully drained. Entries already
+/// present in the paged shard are skipped (deduplication) but still count as
+/// drained so the migration always makes forward progress.
+pub fn migrate_legacy_status_index(env: &Env, status: &Symbol, chunk_size: u32) -> u32 {
+    let legacy = match get_legacy_status_index(env, status) {
+        Some(list) => list,
+        None => return 0,
+    };
+    let len = legacy.len();
+    if len == 0 {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StatusIndex(status.clone()));
+        return 0;
+    }
+
+    let limit = chunk_size.min(len);
+    let mut i = 0u32;
+    while i < limit {
+        if let Some(id) = legacy.get(i) {
+            append_status_index_unique(env, status, &id);
+        }
+        i += 1;
+    }
+
+    if limit >= len {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StatusIndex(status.clone()));
+    } else {
+        let mut remaining: Vec<BountyId> = Vec::new(env);
+        let mut j = limit;
+        while j < len {
+            if let Some(id) = legacy.get(j) {
+                remaining.push_back(id);
+            }
+            j += 1;
+        }
+        let key = DataKey::StatusIndex(status.clone());
+        env.storage().persistent().set(&key, &remaining);
+        extend(env, &key);
+    }
+    limit
+}
+
+/// Migrate up to `chunk_size` entries from the legacy `OpenBounties` blob into
+/// the paged shard. Returns the number of entries drained.
+pub fn migrate_legacy_open_bounties(env: &Env, chunk_size: u32) -> u32 {
+    let legacy = match get_legacy_open_bounties(env) {
+        Some(list) => list,
+        None => return 0,
+    };
+    let len = legacy.len();
+    if len == 0 {
+        env.storage().persistent().remove(&DataKey::OpenBounties);
+        return 0;
+    }
+
+    let limit = chunk_size.min(len);
+    let mut i = 0u32;
+    while i < limit {
+        if let Some(id) = legacy.get(i) {
+            append_open_bounty_unique(env, &id);
+        }
+        i += 1;
+    }
+
+    if limit >= len {
+        env.storage().persistent().remove(&DataKey::OpenBounties);
+    } else {
+        let mut remaining: Vec<BountyId> = Vec::new(env);
+        let mut j = limit;
+        while j < len {
+            if let Some(id) = legacy.get(j) {
+                remaining.push_back(id);
+            }
+            j += 1;
+        }
+        let key = DataKey::OpenBounties;
+        env.storage().persistent().set(&key, &remaining);
+        extend(env, &key);
+    }
+    limit
+}
+
+/// Drain the legacy `StatusIndex(status)` and `OpenBounties` blobs into the
+/// paged shards, migrating at most `chunk_size` entries from each blob.
+///
+/// Returns the total number of entries drained across both indexes. Safe to
+/// call repeatedly: once a legacy key has been fully drained it is deleted and
+/// subsequent calls are no-ops for that index.
+pub fn migrate_legacy_indexes(env: &Env, status: &Symbol, chunk_size: u32) -> u32 {
+    let chunk = if chunk_size == 0 {
+        MIGRATION_CHUNK_SIZE
+    } else {
+        chunk_size
+    };
+    let mut drained = migrate_legacy_status_index(env, status, chunk);
+    drained += migrate_legacy_open_bounties(env, chunk);
+    drained
+}
+
 // Legacy set_open_bounties kept for any callers that haven't been migrated yet.
 // It rebuilds the paged structure from a flat Vec — use only in tests / migration.
 pub fn set_open_bounties(env: &Env, bounties: &Vec<BountyId>) {
@@ -908,6 +1131,43 @@ pub fn remove_creator_bounty(env: &Env, creator: &Address, bounty_id: &BountyId)
     } else {
         env.storage().persistent().set(&key, &kept);
         extend(env, &key);
+    }
+}
+
+/// Returns the number of bounties currently indexed under `creator`.
+///
+/// Storage key: `DataKey::BountiesByCreatorCount(creator)`
+/// Stored type: `u32`
+/// Default value: `0`
+///
+/// O(1) read backed by a persistent counter, so callers can compute page
+/// counts without scanning every page of the creator index.
+pub fn get_bounties_by_creator_count(env: &Env, creator: &Address) -> u32 {
+    let key = DataKey::BountiesByCreatorCount(creator.clone());
+    let count: Option<u32> = env.storage().persistent().get(&key);
+    if count.is_some() {
+        extend(env, &key);
+    }
+    count.unwrap_or(0)
+}
+
+fn set_bounties_by_creator_count(env: &Env, creator: &Address, count: u32) {
+    let key = DataKey::BountiesByCreatorCount(creator.clone());
+    env.storage().persistent().set(&key, &count);
+    extend(env, &key);
+}
+
+/// Increment `creator`'s bounty index counter by one.
+pub fn increment_bounties_by_creator_count(env: &Env, creator: &Address) {
+    let current = get_bounties_by_creator_count(env, creator);
+    set_bounties_by_creator_count(env, creator, current + 1);
+}
+
+/// Decrement `creator`'s bounty index counter by one, saturating at zero.
+pub fn decrement_bounties_by_creator_count(env: &Env, creator: &Address) {
+    let current = get_bounties_by_creator_count(env, creator);
+    if current > 0 {
+        set_bounties_by_creator_count(env, creator, current - 1);
     }
 }
 
@@ -1381,25 +1641,160 @@ pub fn get_tag_bounties_window(
     (items, next_cursor)
 }
 
-// ── Contributor bounty history ───────────────────────────────────────────────
+// ── Contributor bounty history — paged ───────────────────────────────────────
+//
+// Layout:
+//   DataKey::ContributorHistoryCount(address)        → u32
+//   DataKey::ContributorHistoryPage(address, page)   → Vec<BountyId>
+//
+// Entries are appended in chronological order (oldest first) to the last page,
+// creating a new page when the current one is full. Reads that need the most
+// recent entries walk pages from the tail backwards, so only the requested
+// window is materialised — the full history is never copied into a temporary
+// `Vec`. Inserts are deduplicated against the last page (the only page that can
+// receive the new entry) to keep the index idempotent.
 
-/// Returns every bounty ID `address` was an assignee on when it reached a
-/// terminal status (`"completed"` or `"cancelled"`). Empty if none.
-pub fn get_contributor_history(env: &Env, address: &Address) -> Vec<BountyId> {
-    let key = DataKey::ContributorHistory(address.clone());
-    let list: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
-    if list.is_some() {
+/// Returns the total number of terminal bounties recorded for `address`.
+pub fn get_contributor_history_count(env: &Env, address: &Address) -> u32 {
+    let key = DataKey::ContributorHistoryCount(address.clone());
+    let count: Option<u32> = env.storage().persistent().get(&key);
+    if count.is_some() {
         extend(env, &key);
     }
-    list.unwrap_or_else(|| Vec::new(env))
+    count.unwrap_or(0)
+}
+
+fn set_contributor_history_count(env: &Env, address: &Address, count: u32) {
+    let key = DataKey::ContributorHistoryCount(address.clone());
+    env.storage().persistent().set(&key, &count);
+    extend(env, &key);
+}
+
+fn get_contributor_history_page(env: &Env, address: &Address, page: u32) -> Vec<BountyId> {
+    let key = DataKey::ContributorHistoryPage(address.clone(), page);
+    let result: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
+    if result.is_some() {
+        extend(env, &key);
+    }
+    result.unwrap_or_else(|| Vec::new(env))
+}
+
+fn set_contributor_history_page(env: &Env, address: &Address, page: u32, items: &Vec<BountyId>) {
+    let key = DataKey::ContributorHistoryPage(address.clone(), page);
+    if items.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, items);
+        extend(env, &key);
+    }
+}
+
+/// Returns every bounty ID `address` was an assignee on when it reached a
+/// terminal status (`"completed"` or `"cancelled"`), oldest first. Empty if
+/// none.
+///
+/// Compatibility helper: walks all pages. Prefer
+/// [`get_contributor_history_page_data`] for large histories.
+pub fn get_contributor_history(env: &Env, address: &Address) -> Vec<BountyId> {
+    let total = get_contributor_history_count(env, address);
+    let mut result = Vec::new(env);
+    if total == 0 {
+        return result;
+    }
+    let page_count = total.div_ceil(PAGE_SIZE);
+    let mut p = 0u32;
+    while p < page_count {
+        let page = get_contributor_history_page(env, address, p);
+        for id in page.iter() {
+            result.push_back(id);
+        }
+        p += 1;
+    }
+    result
+}
+
+/// Returns a single page of `address`'s history, oldest first. `page` is
+/// 0-indexed; returns an empty `Vec` when `page >= page_count`.
+pub fn get_contributor_history_page_data(env: &Env, address: &Address, page: u32) -> Vec<BountyId> {
+    get_contributor_history_page(env, address, page)
+}
+
+/// Returns up to `limit` of `address`'s most recent history entries, newest
+/// first, starting `offset` entries back from the tail.
+///
+/// Only the pages overlapping the requested window are read; the full history
+/// is never materialised.
+pub fn get_contributor_history_recent(
+    env: &Env,
+    address: &Address,
+    offset: u32,
+    limit: u32,
+) -> Vec<BountyId> {
+    let mut result = Vec::new(env);
+    let total = get_contributor_history_count(env, address);
+    if total == 0 || limit == 0 || offset >= total {
+        return result;
+    }
+
+    // Number of entries still available after skipping `offset` from the tail.
+    let available = total - offset;
+    let take = if limit < available { limit } else { available };
+
+    // Index (exclusive) of the newest entry we want, in chronological order.
+    let mut end = total - offset; // exclusive
+    let mut remaining = take;
+    while remaining > 0 && end > 0 {
+        let page_idx = (end - 1) / PAGE_SIZE;
+        let page = get_contributor_history_page(env, address, page_idx);
+        let page_len = page.len();
+        if page_len == 0 {
+            fail(ContractError::CorruptedIndex);
+        }
+        // Position within the page of the newest wanted entry (exclusive end).
+        let page_end = end - page_idx * PAGE_SIZE;
+        let page_end = if page_end > page_len { page_len } else { page_end };
+        let mut pos = page_end;
+        while pos > 0 && remaining > 0 {
+            pos -= 1;
+            if let Some(id) = page.get(pos) {
+                result.push_back(id);
+                remaining -= 1;
+            }
+        }
+        end = page_idx * PAGE_SIZE;
+    }
+    result
 }
 
 fn append_contributor_history(env: &Env, address: &Address, bounty_id: &BountyId) {
-    let mut list = get_contributor_history(env, address);
-    list.push_back(bounty_id.clone());
-    let key = DataKey::ContributorHistory(address.clone());
-    env.storage().persistent().set(&key, &list);
-    extend(env, &key);
+    let total = get_contributor_history_count(env, address);
+    let last_page_idx = if total == 0 {
+        0
+    } else {
+        (total - 1) / PAGE_SIZE
+    };
+
+    // Deduplicate against the last page: appends only ever land there, so a
+    // duplicate can only exist on the tail page.
+    let mut page = get_contributor_history_page(env, address, last_page_idx);
+    for id in page.iter() {
+        if id == *bounty_id {
+            return; // already recorded, nothing to do
+        }
+    }
+
+    // Start a fresh page when the tail page is full.
+    let target_page_idx = if total > 0 && total.is_multiple_of(PAGE_SIZE) {
+        total / PAGE_SIZE
+    } else {
+        last_page_idx
+    };
+    if target_page_idx != last_page_idx {
+        page = Vec::new(env);
+    }
+    page.push_back(bounty_id.clone());
+    set_contributor_history_page(env, address, target_page_idx, &page);
+    set_contributor_history_count(env, address, total + 1);
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────

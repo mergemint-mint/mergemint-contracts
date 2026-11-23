@@ -273,6 +273,9 @@ pub struct BountySummary {
     pub assignee: Option<Address>,
     pub status: Symbol,
     pub reward: i128,
+    /// Reward token the bounty was denominated in. Retained so archived
+    /// bounties report their true token instead of a placeholder address.
+    pub reward_token: Address,
 }
 
 impl Contributor {

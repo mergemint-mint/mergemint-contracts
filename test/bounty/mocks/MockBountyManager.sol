@@ -60,6 +60,15 @@ contract MockBountyManager {
         bountyStatus[contributor] = status;
     }
 
+    mapping(address => mapping(uint256 => uint256)) public metricUpdates;
+
+    function updateContributorMetrics(address contributor, uint256 bountyId) external {
+        if (shouldFail) {
+            revert("Mock metrics update failed");
+        }
+        metricUpdates[contributor][bountyId]++;
+    }
+
     function getRefreshCount(address contributor) external view returns (uint256) {
         return refreshCount[contributor];
     }
