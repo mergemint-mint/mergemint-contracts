@@ -1,199 +1,267 @@
-import { useEffect, useState, useCallback, useRef } from "react";
-import { MergeMintSDK, Bounty, watchBounty } from "@mergemint/sdk";
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { MergeMintClient, Bounty, BountyListOptions, TxResult } from '@mergemint/sdk';
+
+export interface UseBountyOptions {
+  pollIntervalMs?: number;
+  sseUrl?: string;
+}
 
 export interface UseBountyResult {
   bounty: Bounty | null;
   loading: boolean;
   error: Error | null;
-  refetch: () => Promise<void>;
+  refresh: () => Promise<void>;
+}
+
+export function useBounty(
+  client: MergeMintClient,
+  bountyId: string | undefined,
+  options?: UseBountyOptions,
+): UseBountyResult {
+  const [bounty, setBounty] = useState<Bounty | null>(null);
+  const [loading, setLoading] = useState<boolean>(Boolean(bountyId));
+  const [error, setError] = useState<Error | null>(null);
+
+  const pollIntervalMs = options?.pollIntervalMs;
+  const sseUrl = options?.sseUrl;
+
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const refresh = useCallback(async () => {
+    if (!bountyId) {
+      if (mountedRef.current) {
+        setBounty(null);
+        setLoading(false);
+      }
+      return;
+    }
+    if (mountedRef.current) setLoading(true);
+    try {
+      const next = await client.getBounty(bountyId);
+      if (mountedRef.current) {
+        setBounty(next);
+        setError(null);
+      }
+    } catch (err) {
+      if (mountedRef.current) {
+        setError(err instanceof Error ? err : new Error(String(err)));
+      }
+    } finally {
+      if (mountedRef.current) setLoading(false);
+    }
+  }, [client, bountyId]);
+
+  useEffect(() => {
+    if (!bountyId) {
+      setBounty(null);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+
+    const unsubscribe = client.watchBounty(bountyId, {
+      pollIntervalMs,
+      sseUrl,
+      onUpdate: (next: Bounty) => {
+        if (cancelled) return;
+        setBounty(next);
+        setError(null);
+        setLoading(false);
+      },
+      onError: (err: Error) => {
+        if (cancelled) return;
+        setError(err);
+        setLoading(false);
+      },
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [client, bountyId, pollIntervalMs, sseUrl]);
+
+  return { bounty, loading, error, refresh };
+}
+
+export interface UseBountiesOptions extends BountyListOptions {
+  pollIntervalMs?: number;
 }
 
 export interface UseBountiesResult {
   bounties: Bounty[];
   loading: boolean;
-  error: Error | null;
-  refetch: () => Promise<void>;
+  loadingMore: boolean;
   hasMore: boolean;
+  nextCursor: string | null;
+  error: Error | null;
+  refresh: () => Promise<void>;
   loadMore: () => Promise<void>;
 }
 
+export function useBounties(
+  client: MergeMintClient,
+  options?: UseBountiesOptions,
+): UseBountiesResult {
+  const [bounties, setBounties] = useState<Bounty[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [loadingMore, setLoadingMore] = useState<boolean>(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Monotonic request token: any in-flight request whose token no longer
+  // matches the latest one is considered stale and its result is discarded.
+  const requestIdRef = useRef(0);
+  const nextCursorRef = useRef<string | null>(null);
+
+  const limit = options?.limit;
+  const creator = options?.creator;
+
+  const refresh = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    if (mountedRef.current) {
+      setLoading(true);
+      setLoadingMore(false);
+    }
+    try {
+      const page = await client.getBountiesByCreator(creator, null, limit);
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      nextCursorRef.current = page.nextCursor;
+      setBounties(page.items);
+      setNextCursor(page.nextCursor);
+      setError(null);
+    } catch (err) {
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      if (mountedRef.current && requestId === requestIdRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [client, creator, limit]);
+
+  const loadMore = useCallback(async () => {
+    const cursor = nextCursorRef.current;
+    if (cursor === null) return;
+    const requestId = ++requestIdRef.current;
+    if (mountedRef.current) setLoadingMore(true);
+    try {
+      const page = await client.getBountiesByCreator(creator, cursor, limit);
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      nextCursorRef.current = page.nextCursor;
+      setNextCursor(page.nextCursor);
+      setBounties((prev) => {
+        const seen = new Set(prev.map((b) => b.id));
+        const appended = page.items.filter((b) => !seen.has(b.id));
+        return appended.length === 0 ? prev : [...prev, ...appended];
+      });
+      setError(null);
+    } catch (err) {
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      if (mountedRef.current && requestId === requestIdRef.current) {
+        setLoadingMore(false);
+      }
+    }
+  }, [client, creator, limit]);
+
+  useEffect(() => {
+    // Reset pagination state when the creator changes so stale cursors from a
+    // previous creator are never reused.
+    nextCursorRef.current = null;
+    setNextCursor(null);
+    setBounties([]);
+    void refresh();
+    return () => {
+      // Invalidate any in-flight request on unmount / creator change.
+      requestIdRef.current += 1;
+    };
+  }, [refresh]);
+
+  return {
+    bounties,
+    loading,
+    loadingMore,
+    hasMore: nextCursor !== null,
+    nextCursor,
+    error,
+    refresh,
+    loadMore,
+  };
+}
+
 export interface UseMergeMintTxResult {
-  loading: boolean;
-  error: Error | null;
+  execute: (...args: unknown[]) => Promise<TxResult>;
   hash: string | null;
+  pending: boolean;
+  error: Error | null;
   reset: () => void;
 }
 
-/**
- * Hook to fetch and watch a single bounty.
- * @param sdk The MergeMint SDK instance
- * @param bountyId The bounty ID to watch
- * @param options Configuration for polling/SSE
- */
-export function useBounty(
-  sdk: MergeMintSDK | null,
-  bountyId: string | null,
-  options?: { pollIntervalMs?: number; sseUrl?: string }
-): UseBountyResult {
-  const [bounty, setBounty] = useState<Bounty | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
-  const unsubscribeRef = useRef<(() => void) | null>(null);
-
-  const refetch = useCallback(async () => {
-    if (!sdk || !bountyId) {
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const b = await sdk.getBounty(bountyId);
-      setBounty(b);
-    } catch (err) {
-      setError(err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      setLoading(false);
-    }
-  }, [sdk, bountyId]);
-
-  useEffect(() => {
-    if (!sdk || !bountyId) {
-      setLoading(false);
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-
-    const unsubscribe = watchBounty(
-      sdk,
-      bountyId,
-      (b, err) => {
-        setBounty(b);
-        if (err) setError(err);
-        setLoading(false);
-      },
-      options
-    );
-
-    unsubscribeRef.current = unsubscribe;
-
-    return () => {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-        unsubscribeRef.current = null;
-      }
-    };
-  }, [sdk, bountyId, options]);
-
-  return { bounty, loading, error, refetch };
-}
-
-/**
- * Hook to fetch multiple bounties by creator with pagination.
- * @param sdk The MergeMint SDK instance
- * @param creator The creator address to fetch bounties for
- * @param pageSize Number of bounties per page (default 50)
- */
-export function useBounties(
-  sdk: MergeMintSDK | null,
-  creator: string | null,
-  pageSize: number = 50
-): UseBountiesResult {
-  const [bounties, setBounties] = useState<Bounty[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
-  const [hasMore, setHasMore] = useState(true);
-  const pageRef = useRef(0);
-
-  const refetch = useCallback(async () => {
-    if (!sdk || !creator) {
-      setLoading(false);
-      return;
-    }
-    pageRef.current = 0;
-    setLoading(true);
-    setError(null);
-    setBounties([]);
-
-    try {
-      const result = await sdk.getBountiesByCreator(creator, {
-        start: 0,
-        limit: pageSize,
-      });
-      setBounties(result.bounties);
-      setHasMore(result.hasMore);
-      pageRef.current = 1;
-    } catch (err) {
-      setError(err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      setLoading(false);
-    }
-  }, [sdk, creator, pageSize]);
-
-  const loadMore = useCallback(async () => {
-    if (!sdk || !creator || !hasMore || loading) return;
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const result = await sdk.getBountiesByCreator(creator, {
-        start: pageRef.current * pageSize,
-        limit: pageSize,
-      });
-      setBounties((prev) => [...prev, ...result.bounties]);
-      setHasMore(result.hasMore);
-      pageRef.current += 1;
-    } catch (err) {
-      setError(err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      setLoading(false);
-    }
-  }, [sdk, creator, pageSize, hasMore, loading]);
-
-  useEffect(() => {
-    refetch();
-  }, [refetch]);
-
-  return { bounties, loading, error, refetch, hasMore, loadMore };
-}
-
-/**
- * Hook for managing transaction state during bounty operations.
- * Tracks loading, errors, and transaction hashes.
- */
-export function useMergeMintTx(): UseMergeMintTxResult & {
-  execute: <T,>(fn: () => Promise<T>) => Promise<T>;
-} {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
+export function useMergeMintTx(
+  action: (...args: unknown[]) => Promise<TxResult>,
+): UseMergeMintTxResult {
   const [hash, setHash] = useState<string | null>(null);
+  const [pending, setPending] = useState<boolean>(false);
+  const [error, setError] = useState<Error | null>(null);
 
-  const reset = useCallback(() => {
-    setLoading(false);
-    setError(null);
-    setHash(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   const execute = useCallback(
-    async <T,>(fn: () => Promise<T>): Promise<T> => {
-      reset();
-      setLoading(true);
+    async (...args: unknown[]): Promise<TxResult> => {
+      if (mountedRef.current) {
+        setPending(true);
+        setError(null);
+        setHash(null);
+      }
       try {
-        const result = await fn();
+        const result = await action(...args);
+        if (mountedRef.current) {
+          setHash(result?.hash ?? null);
+        }
         return result;
       } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        setError(error);
-        throw error;
+        const normalized = err instanceof Error ? err : new Error(String(err));
+        if (mountedRef.current) {
+          setError(normalized);
+        }
+        throw normalized;
       } finally {
-        setLoading(false);
+        if (mountedRef.current) setPending(false);
       }
     },
-    [reset]
+    [action],
   );
 
-  return { loading, error, hash, reset, execute };
+  const reset = useCallback(() => {
+    if (!mountedRef.current) return;
+    setHash(null);
+    setPending(false);
+    setError(null);
+  }, []);
+
+  return { execute, hash, pending, error, reset };
 }
