@@ -7,4 +7,10 @@ export default defineConfig({
   splitting: false,
   sourcemap: true,
   clean: true,
+  treeshake: true,
+  minify: false,
+  target: 'es2020',
+  outExtension({ format }) {
+    return { js: format === 'cjs' ? '.cjs' : '.js' };
+  },
 });

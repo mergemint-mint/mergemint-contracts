@@ -92,7 +92,13 @@ Allowed symbol values (`src/symbols.rs`):
 | [`get_contributor_active_bounty`](#get_contributor_active_bounty) | query | none | — | — |
 | [`get_contributor_bounty_history`](#get_contributor_bounty_history) | query | none | — | — |
 | [`get_bounties_by_creator`](#get_bounties_by_creator) | query | none | — | — |
+| [`get_bounties_by_creator_count`](#get_bounties_by_creator_count) | query | none | — | — |
 | [`get_bounties_by_token`](#get_bounties_by_token) | query | none | — | — |
+| [`get_bounties_by_token_count`](#get_bounties_by_token_count) | query | none | — | — |
+| [`get_bounties_by_ids`](#get_bounties_by_ids) | query | none | — | — |
+| [`get_pending_resolution`](#get_pending_resolution) | query | none | — | — |
+| [`is_dispute_appealed`](#is_dispute_appealed) | query | none | — | — |
+| [`get_claimed_at_ledger`](#get_claimed_at_ledger) | query | none | — | — |
 
 ---
 
@@ -467,9 +473,10 @@ exhausted.
 
 | Function | Signature | Returns | Errors |
 |---|---|---|---|
-| <a id="get_bounty"></a>`get_bounty` | `(bounty_id: BountyId) -> Option<Bounty>` | The bounty, or `None` for IDs that were never allocated or have been pruned. | none |
-| <a id="get_bounties"></a>`get_bounties` | `(ids: Vec<BountyId>) -> Vec<Option<Bounty>>` | One entry per input ID, in order. | none |
-| <a id="get_bounty_metas"></a>`get_bounty_metas` | `(ids: Vec<BountyId>) -> Vec<Option<BountyMeta>>` | Title and description per ID. `None` once the temporary entry has expired. | none |
+| <a id="get_bounty"></a>`get_bounty` | `(bounty_id: BountyId) -> Option<Bounty>` | The bounty, or `None` for IDs that were never allocated or have been pruned. Falls back to `BountyArchive` when the live entry is missing. | none |
+| <a id="get_bounties"></a>`get_bounties` | `(ids: Vec<BountyId>) -> Vec<Option<Bounty>>` | One entry per input ID, in order. Each entry uses the same resolution as `get_bounty`: live storage, then `BountyArchive`, then `None` for never-allocated or pruned IDs. | none |
+| <a id="get_bounty_metas"></a>`get_bounty_metas` | `(ids: Vec<BountyId>) -> Vec<Option<BountyMeta>>` | Title and description per ID, in order. `None` once the temporary entry has expired or for never-allocated IDs. | none |
+| <a id="get_bounties_by_ids"></a>`get_bounties_by_ids` | `(ids: Vec<BountyId>) -> Vec<Option<Bounty>>` | Alias of `get_bounties` with identical archive-fallback and never-allocated-ID behavior. | none |
 | <a id="get_bounty_count"></a>`get_bounty_count` | `() -> u64` | Total number of bounties ever created (monotonic). | none |
 | <a id="get_contributor"></a>`get_contributor` | `(address: Address) -> Option<Contributor>` | Profile, or `None` if the address has never interacted with the contract. | none |
 | <a id="get_bounties_by_status"></a>`get_bounties_by_status` | `(status: Symbol, cursor: Option<u32>, limit: u32) -> (Vec<BountyId>, Option<u32>)` | One page of IDs in `status`. | `InvalidStatus` → `"invalid bounty status"` |
@@ -481,7 +488,54 @@ exhausted.
 | <a id="get_contributor_active_bounty"></a>`get_contributor_active_bounty` | `(address: Address) -> Option<BountyId>` | The first `in_progress` bounty that lists `address` as an assignee. | none |
 | <a id="get_contributor_bounty_history"></a>`get_contributor_bounty_history` | `(address: Address, offset: u32, limit: u32) -> Vec<BountyId>` | Bounded page of bounties where `address` was an assignee when they reached `completed`/`cancelled`, newest first. Limit capped at 50. | none |
 | <a id="get_bounties_by_creator"></a>`get_bounties_by_creator` | `(creator: Address, cursor: Option<u32>, limit: u32) -> (Vec<BountyId>, Option<u32>)` | One page of the bounties created by `creator`, in creation order. | none |
+| <a id="get_bounties_by_creator_count"></a>`get_bounties_by_creator_count` | `(creator: Address) -> u32` | O(1) total number of bounties indexed under `creator`. Backed by a persistent counter, so it never scans pages. | none |
 | <a id="get_bounties_by_token"></a>`get_bounties_by_token` | `(token: Address, cursor: Option<u32>, limit: u32) -> (Vec<BountyId>, Option<u32>)` | One page of the bounties paid in `token` (`reward_token`), in creation order. Same cursor/limit pagination as `get_bounties_by_creator`; `limit` capped at `MAX_LIMIT` (50). Pruned on `archive_bounty`. | none |
+| <a id="get_bounties_by_token_count"></a>`get_bounties_by_token_count` | `(token: Address) -> u32` | O(1) total number of bounties indexed under `token`. Backed by a persistent counter, so it never scans pages. | none |
+| <a id="get_pending_resolution"></a>`get_pending_resolution` | `(bounty_id: BountyId) -> Option<Symbol>` | The pending dispute resolution (`complete` or `cancel`) recorded on a disputed bounty, or `None` when no resolution is pending (including never-allocated IDs). | none |
+| <a id="is_dispute_appealed"></a>`is_dispute_appealed` | `(bounty_id: BountyId) -> bool` | `true` when the dispute on `bounty_id` has been appealed; `false` by default, including for never-allocated IDs. | none |
+| <a id="get_claimed_at_ledger"></a>`get_claimed_at_ledger` | `(bounty_id: BountyId) -> Option<u32>` | The ledger sequence at which the bounty was first claimed, or `None` when it has never been claimed (including never-allocated IDs). | none |
+
+### Archive fallback and never-allocated IDs
+
+Single and batch read entrypoints resolve a `BountyId` consistently:
+
+1. **Live storage** — the `Bounty` is returned if it is still present.
+2. **Archive fallback** — if the live entry is missing but the ID was
+   allocated, `BountyArchive` is consulted and the archived `Bounty` is
+   returned. This applies to `get_bounty`, `get_bounties` and
+   `get_bounties_by_ids`.
+3. **Never allocated / pruned** — if `bounty_id_was_allocated` is false, or
+   neither live nor archived state exists, the entry is `None`.
+
+`get_bounty_metas` follows the same per-ID ordering and returns `None` for
+never-allocated IDs, but `BountyMeta` lives in temporary storage and is not
+archived, so an expired meta yields `None` even when the `Bounty` itself is
+still readable through the archive fallback.
+
+### Computing appeal windows and stale-claim countdowns
+
+The dispute and claim queries expose the raw ledger anchors needed to derive
+client-side countdowns without scanning events:
+
+- **Appeal window** — read `get_pending_resolution(bounty_id)` to confirm a
+  resolution is pending and `is_dispute_appealed(bounty_id)` to check whether
+  it has already been appealed. While a resolution is pending and
+  `is_dispute_appealed` is `false`, the dispute is still inside its appeal
+  window; clients compare the current ledger sequence against the window
+  length to render the remaining ledgers.
+- **Stale-claim countdown** — read `get_claimed_at_ledger(bounty_id)` to get
+  the ledger at which the bounty was claimed. A `None` result means the bounty
+  has never been claimed, so no stale-claim countdown applies. Otherwise the
+  remaining ledgers are `claimed_at + stale_claim_window - current_ledger`,
+  clamped at zero.
+
+### Pagination totals
+
+`get_bounties_by_creator_count` and `get_bounties_by_token_count` mirror
+`get_open_bounties_count` and `get_status_count`: they are O(1) reads of
+persistent counters maintained by `create_bounty`, ownership transfer and
+`archive_bounty`. Clients compute total page counts as
+`ceil(count / MAX_LIMIT)` without walking every page.
 
 ---
 
