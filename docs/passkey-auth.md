@@ -84,10 +84,10 @@ Contributor (browser)          MergeMint backend / relayer        Stellar networ
         │                               │ Re-simulate (Enforcing Mode)  │
         │                               │ Fee-payer G-account signs     │
         │                               │ and submits TX                │
-        │                               │──────────────────────────────▶│
-        │                               │                               │ __check_auth runs
-        │                               │                               │ on wallet contract,
-        │                               │                               │ verifies passkey sig
+        │──────────────────────────────▶│                               │
+        │                               │ __check_auth runs             │
+        │                               │ on wallet contract,           │
+        │                               │ verifies passkey sig          │
         │◀──────────────────────────────│◀──────────────────────────────│
         │  4. Claim confirmed           │                               │
 ```
@@ -120,23 +120,22 @@ The `Address` type in Soroban is polymorphic: it represents both G-accounts and 
 
 **Recovery must be planned.** If a user loses access to their passkey device, recovery requires a pre-configured backup mechanism (e.g., a backend-controlled recovery signer that can call `rotate_signer` on the wallet contract). This is a backend / wallet contract concern, not a MergeMint contract concern.
 
-**Algorithm support is ES256 / secp256r1.** Soroban supports secp256r1 natively for `__check_auth` signature verification. Passkey credentials must be generated with `supportedAlgorithmIDs: [-7]` (ES256) during registration.
-
-**Testnet vs. mainnet.** Passkey-based smart wallets are supported on both Soroban testnet and mainnet as of 2024. The Stellar Foundation confirmed mainnet availability when announcing the passkey feature. See [Stellar blog: Introducing the New Stellar Passkey Feature](https://stellar.org/blog/foundation-news/introducing-the-new-stellar-passkey-feature-seamless-web3-smart-wallet-functionality-on-mainnet).
+**Algorithm support is ES256 / secp256r1.** Soroban supports secp256r1 natively for `__check_auth` signature verification. Passkey credentials must be generated
 
 ---
 
-## Reference Implementation
+## Frontend Integration (`frontend/src/lib/passkey.ts`)
 
-The Cheesecake Labs [soroban-smart-wallet-poc](https://github.com/CheesecakeLabs/soroban-smart-wallet-poc) is a complete runnable proof of concept covering wallet creation, passkey-bound transaction signing, and recovery flows. The same core architecture is used in production in Meridian Pay.
+The frontend `PasskeyAuth` helper must never fabricate security-sensitive values. The following rules apply to any implementation and are enforced by the Vitest suite in `frontend/src/lib/passkey.test.ts`:
 
-The Stellar Foundation's [sep-smart-wallet](https://github.com/stellar/sep-smart-wallet) provides the reference smart wallet contract interface.
+**Challenges are server-issued and single-use.** The client must fetch the WebAuthn challenge from the backend (`GET /api/passkey/challenge`) rather than generating it with `crypto.getRandomValues`. The backend stores the challenge, binds it to the session, and consumes it on verification. A locally generated challenge cannot be validated server-side and is trivially replayable.
 
----
+**`rp.id` is derived from the deployment host.** The relying-party ID must be `window.location.hostname` (or a configured parent domain), never a hardcoded value such as `mergemint.app`. A hardcoded `rp.id` breaks on localhost, preview deployments, and self-hosted instances, and causes the browser to reject the credential.
 
-## Further Reading
+**Assertions are verified server-side.** After `navigator.credentials.get()` resolves, the client POSTs the raw assertion (`authenticatorData`, `clientDataJSON`, `signature`, `credentialId`) to `POST /api/passkey/verify`. The backend validates the challenge, origin, `rpIdHash`, and signature. The client must not treat a resolved promise as proof of authentication.
 
-- [Signing Soroban contract invocations](https://developers.stellar.org/docs/build/guides/transactions/signing-soroban-invocations) — auth-entry signing, C-account authorization, fee-payer patterns
-- [Contract authorization fundamentals](https://developers.stellar.org/docs/learn/fundamentals/contract-development/authorization) — how `require_auth` and `__check_auth` interact
-- [Passkey dapp tutorial](https://developers.stellar.org/docs/build/apps/guestbook/overview) — Stellar's official walkthrough for building a passkey-enabled dapp
-- [SEP-45: Stellar Auth for Contract Accounts](https://developers.stellar.org/docs/platforms/anchor-platform/sep-guide/sep45) — authenticated sessions for C-accounts with anchors
+**Wallet addresses come from the backend.** The Soroban smart-wallet address (a `C...` strkey) is returned by the backend after successful verification. The client must never synthesize an address (e.g. `0x${Math.random()...}`); a fabricated address is not a valid Stellar address and cannot authorize on-chain actions.
+
+**Errors are typed.** Failures surface as a typed `PasskeyError` with a stable `code` (`unsupported`, `challenge_fetch_failed`, `challenge_mismatch`, `verification_failed`, `cancelled`). Callers must not rely on `as any` casts or string matching.
+
+**Unsupported browsers degrade gracefully.** When `window.PublicKeyCredential` or `navigator.credentials` is unavailable, the helper throws `PasskeyError` with code `unsupported` so the UI can fall back to an alternative sign-in method.
