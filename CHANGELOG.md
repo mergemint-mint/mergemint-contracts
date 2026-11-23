@@ -7,6 +7,48 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.1.0](https://github.com/mergemint-mint/mergemint-contracts/compare/contract-v1.0.0...contract-v1.1.0) (2026-11-23)
+
+
+### Added
+
+* add glossary, mdBook docs, CSP, and security headers ([4b11961](https://github.com/mergemint-mint/mergemint-contracts/commit/4b11961a971dac7dfbb403509f39feb169cbe2e7))
+* **backend:** add indexer reliability features ([f3f158b](https://github.com/mergemint-mint/mergemint-contracts/commit/f3f158b23ba68690c93ad8852040ca4ce513bd12))
+* **backend:** resolve transaction and webhook issues ([3f84bbc](https://github.com/mergemint-mint/mergemint-contracts/commit/3f84bbcdff5273f2a2aaf9b0daa3c1176774288c))
+* **bounty:** add gas-bounded chunked execution to BountyRefresh ([#1250](https://github.com/mergemint-mint/mergemint-contracts/issues/1250)) ([8582c21](https://github.com/mergemint-mint/mergemint-contracts/commit/8582c217056aa73f5fc799ddc0f32ca8bdc19d52))
+* **bounty:** use Ownable2Step and pause-guard createBatch/finalizeBatch ([#1253](https://github.com/mergemint-mint/mergemint-contracts/issues/1253)) ([f5489a7](https://github.com/mergemint-mint/mergemint-contracts/commit/f5489a7783ccdeb92914d00d34d0c7875c1c069a))
+* **bounty:** wire _executeRefresh to IBountyManager.updateContributorMetrics ([#1248](https://github.com/mergemint-mint/mergemint-contracts/issues/1248)) ([a3f744a](https://github.com/mergemint-mint/mergemint-contracts/commit/a3f744adf7ebc8a24d048c2909bc96bb2083cce5))
+* **contract:** validate milestones on bounty creation ([953c449](https://github.com/mergemint-mint/mergemint-contracts/commit/953c44980744438fbfdbc7775e14aea1875e3a18))
+* **contract:** validate milestones on bounty creation ([bf9d1b5](https://github.com/mergemint-mint/mergemint-contracts/commit/bf9d1b53a10a38ea0180f7cb5cc06ada86cb2c2d))
+* **frontend:** add content security policy ([99e7140](https://github.com/mergemint-mint/mergemint-contracts/commit/99e7140a8146321b1200ee2dd9e044ef723d2707)), closes [#1114](https://github.com/mergemint-mint/mergemint-contracts/issues/1114)
+* **frontend:** harden service worker, api timeouts/idempotency, csp, ci pins, and status a11y ([a347efb](https://github.com/mergemint-mint/mergemint-contracts/commit/a347efbfe2541eb7dfb88072a46151c0ebbf5928))
+* **frontend:** harden service worker, api timeouts/idempotency, csp, ci pins, and status a11y ([7d20413](https://github.com/mergemint-mint/mergemint-contracts/commit/7d204136380907fb7c91cd8f3a49ada08e600e6e))
+
+
+### Fixed
+
+* [#1266](https://github.com/mergemint-mint/mergemint-contracts/issues/1266) Add jittered exponential backoff, circuit breaking, and dead- ([54f12e6](https://github.com/mergemint-mint/mergemint-contracts/commit/54f12e628890de032892c8d2b9e166e6eea8e1c6))
+* [#1267](https://github.com/mergemint-mint/mergemint-contracts/issues/1267) Enforce webhook secret entropy, HTTPS-only production URLs, a ([64ad72f](https://github.com/mergemint-mint/mergemint-contracts/commit/64ad72f145cb0a1761cdbfd3098b61f4350db9f2))
+* [#1268](https://github.com/mergemint-mint/mergemint-contracts/issues/1268) Harden `webhooks/ssrf.rs` with destination-port allowlisting, ([f3a45cc](https://github.com/mergemint-mint/mergemint-contracts/commit/f3a45ccedf04445d5e77377530173273ca324e69))
+* [#1269](https://github.com/mergemint-mint/mergemint-contracts/issues/1269) Add authentication and authorization middleware to webhook ma ([6c7fc09](https://github.com/mergemint-mint/mergemint-contracts/commit/6c7fc09cb57ebee38a458ed6a40882f16cde0a0c))
+* [#1274](https://github.com/mergemint-mint/mergemint-contracts/issues/1274) Reconcile `description` length validation parity between `mer ([e1e743d](https://github.com/mergemint-mint/mergemint-contracts/commit/e1e743d4929eb1e524cb741b900370730f08dea9))
+* [#1284](https://github.com/mergemint-mint/mergemint-contracts/issues/1284) Fix `useBounty` infinite resubscription and unwired `hash` st ([43a81eb](https://github.com/mergemint-mint/mergemint-contracts/commit/43a81eb6f03750587570152c2a059bd3118124d0))
+* [#1285](https://github.com/mergemint-mint/mergemint-contracts/issues/1285) Align `react/src/index.ts` `useBounties` pagination with curs ([6a5526d](https://github.com/mergemint-mint/mergemint-contracts/commit/6a5526dd928bf80dae3ab5ed2b2c9717161e41ea))
+* [#1286](https://github.com/mergemint-mint/mergemint-contracts/issues/1286) Harden `cli/src/cli.ts` with real transaction signing, strict ([2ac7f6a](https://github.com/mergemint-mint/mergemint-contracts/commit/2ac7f6aff0f210501d15a5d5e8771177c116cccc))
+* [#1294](https://github.com/mergemint-mint/mergemint-contracts/issues/1294) Consolidate or deprecate duplicate `mergemint-frontend/` pack ([f4e5876](https://github.com/mergemint-mint/mergemint-contracts/commit/f4e5876186ac54e470aeeef0f78b3c74534022c4))
+* [#1296](https://github.com/mergemint-mint/mergemint-contracts/issues/1296) Harden `scripts/deploy.sh`, `scripts/build-release-wasm.sh`, ([54bdbbb](https://github.com/mergemint-mint/mergemint-contracts/commit/54bdbbbbd9712237e466d84fda113778a961a860))
+* address [#1294](https://github.com/mergemint-mint/mergemint-contracts/issues/1294), [#1295](https://github.com/mergemint-mint/mergemint-contracts/issues/1295), [#1296](https://github.com/mergemint-mint/mergemint-contracts/issues/1296), [#1297](https://github.com/mergemint-mint/mergemint-contracts/issues/1297) ([c2dc292](https://github.com/mergemint-mint/mergemint-contracts/commit/c2dc29273640de7e4b3fb42aeb14826e64af5cef))
+* **bounty:** bound getTask and paginate getContributorTasks ([#1252](https://github.com/mergemint-mint/mergemint-contracts/issues/1252)) ([d8bfb4a](https://github.com/mergemint-mint/mergemint-contracts/commit/d8bfb4ac68bd15fb74ae27a3de9a8ca38fbc0b70))
+* **bounty:** harden BountyRefresh ([#1250](https://github.com/mergemint-mint/mergemint-contracts/issues/1250), [#1251](https://github.com/mergemint-mint/mergemint-contracts/issues/1251), [#1252](https://github.com/mergemint-mint/mergemint-contracts/issues/1252), [#1253](https://github.com/mergemint-mint/mergemint-contracts/issues/1253)) ([c55dd6b](https://github.com/mergemint-mint/mergemint-contracts/commit/c55dd6b5f98d952178206fd9f23525101ed88319))
+* **bounty:** isolate custom-error and panic reverts in BountyRefresh._processRefreshTask ([#1251](https://github.com/mergemint-mint/mergemint-contracts/issues/1251)) ([1162724](https://github.com/mergemint-mint/mergemint-contracts/commit/1162724fbdaaba3ee10575c6d844bd62f97f9503))
+* **bounty:** pin solidity pragma and drop unused index param ([#1254](https://github.com/mergemint-mint/mergemint-contracts/issues/1254)) ([0aabc7b](https://github.com/mergemint-mint/mergemint-contracts/commit/0aabc7bf7e420daa52543586a7846726c3363933))
+* **bounty:** validate contributors and bountyIds in createBatch ([#1249](https://github.com/mergemint-mint/mergemint-contracts/issues/1249)) ([aa998a4](https://github.com/mergemint-mint/mergemint-contracts/commit/aa998a410c73e255f725df9a4f89d32d100f19ca))
+* **contract:** eliminate integer overflow and rounding dust loss in distribute_payout ([b87306f](https://github.com/mergemint-mint/mergemint-contracts/commit/b87306faaf4ce5c3cc097e68dbec5c465c8d9744))
+* **contract:** eliminate integer overflow and rounding dust loss in distribute_payout ([6d6d697](https://github.com/mergemint-mint/mergemint-contracts/commit/6d6d697b340faa50612c447fcfa7b9db4b627d84))
+* **contract:** remove duplicate code reintroduced by [#1153](https://github.com/mergemint-mint/mergemint-contracts/issues/1153) merge ([2502239](https://github.com/mergemint-mint/mergemint-contracts/commit/250223975a31e8a73f478c88cccde40256245e69))
+* refresh validation, manager wiring, ownership race tests, WASM gate ([#1246](https://github.com/mergemint-mint/mergemint-contracts/issues/1246) [#1247](https://github.com/mergemint-mint/mergemint-contracts/issues/1247) [#1248](https://github.com/mergemint-mint/mergemint-contracts/issues/1248) [#1249](https://github.com/mergemint-mint/mergemint-contracts/issues/1249)) ([3363cdd](https://github.com/mergemint-mint/mergemint-contracts/commit/3363cdd5e6795541a42bb34fe8411437a288f5e9))
+* **scripts:** harden batchRefresh retries, input validation and gas ([#1256](https://github.com/mergemint-mint/mergemint-contracts/issues/1256)) ([1de6bb6](https://github.com/mergemint-mint/mergemint-contracts/commit/1de6bb6ae8352a1b3d286639aa828603d82b9d0e))
+
 ## [Unreleased]
 
 Changes that have landed on `main` but are not yet associated with a tagged release.
