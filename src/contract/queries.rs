@@ -434,8 +434,47 @@ impl MergeMintContract {
         cursor: Option<u32>,
         limit: u32,
     ) -> (Vec<BountyId>, Option<u32>) {
-        let all = storage::get_creator_bounties(&env, &creator);
-        paginate(&env, all, cursor, limit)
+        let effective_limit = if limit == 0 || limit > MAX_LIMIT {
+            MAX_LIMIT
+        } else {
+            limit
+        };
+        let start = cursor.unwrap_or(0);
+        let total = storage::get_creator_bounties_count(&env, &creator);
+        let mut result = Vec::new(&env);
+        if start >= total {
+            return (result, None);
+        }
+        let end = {
+            let e = start + effective_limit;
+            if e > total {
+                total
+            } else {
+                e
+            }
+        };
+        // Read only the shard pages that overlap the requested window, so a
+        // `limit <= PAGE_SIZE` request touches at most two pages.
+        let mut i = start;
+        while i < end {
+            let page = storage::get_creator_bounties_page(&env, &creator, i / storage::PAGE_SIZE);
+            let offset = i % storage::PAGE_SIZE;
+            let mut j = offset;
+            while j < page.len() && i < end {
+                result.push_back(
+                    page.get(j)
+                        .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
+                );
+                j += 1;
+                i += 1;
+            }
+            // Guard against a short/corrupt page to avoid an infinite loop.
+            if j == offset {
+                break;
+            }
+        }
+        let next = if end < total { Some(end) } else { None };
+        (result, next)
     }
 
     /// Return the total number of bounties created by `creator`.

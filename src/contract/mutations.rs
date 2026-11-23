@@ -29,6 +29,13 @@ const ARCHIVE_GRACE_PERIOD_LEDGERS: u32 = 17_280;
 /// tags (or duplicates) after creation than it could at creation time.
 const MAX_TAGS: u32 = 5;
 
+/// Minimum non-zero claim window (in ledgers) accepted by
+/// `set_claim_window`. A window of `0` is treated as "disabled" (stale-claim
+/// release is blocked entirely); any other value must be at least this many
+/// ledgers so a misconfigured tiny window cannot let griefers immediately
+/// release fresh claims and slash contributor reputation.
+const MIN_CLAIM_WINDOW: u32 = 100;
+
 /// Validate a tag list: reject more than `MAX_TAGS` entries, reject
 /// duplicates, and reject any tag not on the allow-list (via
 /// `symbols::validate_symbol_or_fail`).
@@ -1280,6 +1287,14 @@ pub fn reopen_bounty(env: Env, creator: Address, bounty_id: BountyId, new_deadli
     for m in bounty.milestones.iter() {
         if m.completed {
             continue;
+        }
+
+        // Milestone-progress awareness: once any milestone has been completed
+        // the assignee has demonstrably done work, so the claim must not be
+        // treated as stale (and must not be slashed). This check runs before
+        // any reputation penalty or status change.
+        if bounty.milestones.iter().any(|m| m.completed) {
+            fail(ContractError::MilestoneProgressExists);
         }
 
         // Apply the existing reputation penalty for abandoned claims to each

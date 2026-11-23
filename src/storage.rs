@@ -20,7 +20,8 @@
 //! | Bounty body | `Bounty(BountyId)` | `Bounty` | Canonical bounty state |
 //! | Bounty metadata | `BountyMeta(BountyId)` | `BountyMeta` | Title/description sidecar |
 //! | Contributor profile | `Contributor(Address)` | `Contributor` | Reputation, earnings, claims |
-//! | Creator index | `ContributorBounties(Address)` | `Vec<BountyId>` | Bounties created by address |
+//! | Creator index count | `ContributorBountiesCount(Address)` | `u32` | Bounties created by address |
+//! | Creator index page | `ContributorBountiesPage(Address, u32)` | `Vec<BountyId>` | Paged creator shard (`PAGE_SIZE` IDs) |
 //! | Status totals | `StatusCount(Symbol)` | `u32` | Item count per status label |
 //! | Status index page | `StatusIndexPage(Symbol, u32)` | `Vec<BountyId>` | Paged shard (`PAGE_SIZE` IDs) |
 //! | Open-bounty totals | `OpenBountiesCount` | `u32` | Count of claimable bounties |
@@ -458,70 +459,35 @@ pub fn remove_bounty_from_status(env: &Env, bounty_id: &BountyId, status: &Symbo
     };
 
     // Swap the target slot with the very last item across all pages, then
-    // shrink the last page by one.  This is O(1) writes (at most 2 pages).
+    // shrink the last page by one. This is O(1) writes (at most 2 pages) and
+    // mutates the loaded pages in place via `Vec::set` / `Vec::pop_back`.
     let last_page_idx = page_count - 1;
-    let last_page = get_status_page(env, status, last_page_idx);
+    let mut last_page = get_status_page(env, status, last_page_idx);
     if last_page.is_empty() {
         fail(ContractError::CorruptedIndex);
     }
-    let last_item = match last_page.get(last_page.len() - 1) {
+    let last_pos = last_page.len() - 1;
+    let last_item = match last_page.get(last_pos) {
         Some(item) => item,
         None => fail(ContractError::CorruptedIndex),
     };
 
-    if fp == last_page_idx && fpos == last_page.len() - 1 {
-        // Removing the very last item — just pop it.
-        let new_last = last_page.clone();
-        // Rebuild without the last element
-        let mut trimmed: Vec<BountyId> = Vec::new(env);
-        let mut i = 0u32;
-        while i < new_last.len() - 1 {
-            trimmed.push_back(
-                new_last
-                    .get(i)
-                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
-            );
-            i += 1;
+    if fp == last_page_idx {
+        // Target and last item share the last page: swap in place, then pop.
+        if fpos != last_pos {
+            last_page.set(fpos, last_item);
         }
-        set_status_page(env, status, last_page_idx, &trimmed);
+        last_page.pop_back();
+        set_status_page(env, status, last_page_idx, &last_page);
     } else {
-        // Put last_item into the found slot, then shrink the last page.
-        let target_page = get_status_page(env, status, fp);
-        let mut new_target: Vec<BountyId> = Vec::new(env);
-        let mut i = 0u32;
-        while i < target_page.len() {
-            if i == fpos {
-                new_target.push_back(last_item.clone());
-            } else {
-                new_target.push_back(
-                    target_page
-                        .get(i)
-                        .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
-                );
-            }
-            i += 1;
-        }
-        set_status_page(env, status, fp, &new_target);
+        // Move the last item into the found slot on its own page.
+        let mut target_page = get_status_page(env, status, fp);
+        target_page.set(fpos, last_item);
+        set_status_page(env, status, fp, &target_page);
 
-        // Shrink the last page. When the target sat on the last page itself,
-        // shrink the freshly written copy, not the stale `last_page` read
-        // from before the swap (which would resurrect the removed id).
-        let source = if fp == last_page_idx {
-            new_target
-        } else {
-            last_page
-        };
-        let mut trimmed: Vec<BountyId> = Vec::new(env);
-        let mut i = 0u32;
-        while i < source.len() - 1 {
-            trimmed.push_back(
-                source
-                    .get(i)
-                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
-            );
-            i += 1;
-        }
-        set_status_page(env, status, last_page_idx, &trimmed);
+        // Shrink the last page (distinct from the target page).
+        last_page.pop_back();
+        set_status_page(env, status, last_page_idx, &last_page);
     }
 
     decrement_status_count(env, status);
@@ -730,63 +696,32 @@ pub fn remove_open_bounty(env: &Env, bounty_id: &BountyId) {
     };
 
     let last_page_idx = page_count - 1;
-    let last_page = get_open_bounties_page(env, last_page_idx);
+    let mut last_page = get_open_bounties_page(env, last_page_idx);
     if last_page.is_empty() {
         fail(ContractError::CorruptedIndex);
     }
-    let last_item = match last_page.get(last_page.len() - 1) {
+    let last_pos = last_page.len() - 1;
+    let last_item = match last_page.get(last_pos) {
         Some(item) => item,
         None => fail(ContractError::CorruptedIndex),
     };
 
-    if fp == last_page_idx && fpos == last_page.len() - 1 {
-        let mut trimmed: Vec<BountyId> = Vec::new(env);
-        let mut i = 0u32;
-        while i < last_page.len() - 1 {
-            trimmed.push_back(
-                last_page
-                    .get(i)
-                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
-            );
-            i += 1;
+    if fp == last_page_idx {
+        // Target and last item share the last page: swap in place, then pop.
+        if fpos != last_pos {
+            last_page.set(fpos, last_item);
         }
-        set_open_bounties_page(env, last_page_idx, &trimmed);
+        last_page.pop_back();
+        set_open_bounties_page(env, last_page_idx, &last_page);
     } else {
-        let target_page = get_open_bounties_page(env, fp);
-        let mut new_target: Vec<BountyId> = Vec::new(env);
-        let mut i = 0u32;
-        while i < target_page.len() {
-            if i == fpos {
-                new_target.push_back(last_item.clone());
-            } else {
-                new_target.push_back(
-                    target_page
-                        .get(i)
-                        .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
-                );
-            }
-            i += 1;
-        }
-        set_open_bounties_page(env, fp, &new_target);
+        // Move the last item into the found slot on its own page.
+        let mut target_page = get_open_bounties_page(env, fp);
+        target_page.set(fpos, last_item);
+        set_open_bounties_page(env, fp, &target_page);
 
-        // Shrink the freshly written copy when the target was on the last
-        // page; the pre-swap `last_page` would resurrect the removed id.
-        let source = if fp == last_page_idx {
-            new_target
-        } else {
-            last_page
-        };
-        let mut trimmed: Vec<BountyId> = Vec::new(env);
-        let mut i = 0u32;
-        while i < source.len() - 1 {
-            trimmed.push_back(
-                source
-                    .get(i)
-                    .unwrap_or_else(|| fail(ContractError::CorruptedIndex)),
-            );
-            i += 1;
-        }
-        set_open_bounties_page(env, last_page_idx, &trimmed);
+        // Shrink the last page (distinct from the target page).
+        last_page.pop_back();
+        set_open_bounties_page(env, last_page_idx, &last_page);
     }
 
     set_open_bounties_count(env, total - 1);
@@ -1140,8 +1075,80 @@ pub fn set_submission(env: &Env, bounty_id: &BountyId, hash: &soroban_sdk::Bytes
     extend(env, &key);
 }
 
-// ── Creator bounties index ────────────────────────────────────────────────────
+// ── Creator bounties index — paged ────────────────────────────────────────────
+//
+// Layout:
+//   DataKey::ContributorBountiesCount(creator)      → u32  (total items)
+//   DataKey::ContributorBountiesPage(creator, page) → Vec<BountyId> (0-indexed)
+//
+// Same append / swap-remove strategy as StatusIndex pages. The legacy
+// `ContributorBounties(creator)` blob is read once and lazily migrated into
+// pages on first access, then removed.
 
+fn get_creator_bounties_count(env: &Env, creator: &Address) -> u32 {
+    let key = DataKey::ContributorBountiesCount(creator.clone());
+    let count: Option<u32> = env.storage().persistent().get(&key);
+    if count.is_some() {
+        extend(env, &key);
+    }
+    count.unwrap_or(0)
+}
+
+fn set_creator_bounties_count(env: &Env, creator: &Address, count: u32) {
+    let key = DataKey::ContributorBountiesCount(creator.clone());
+    env.storage().persistent().set(&key, &count);
+    extend(env, &key);
+}
+
+fn get_creator_bounties_page(env: &Env, creator: &Address, page: u32) -> Vec<BountyId> {
+    let key = DataKey::ContributorBountiesPage(creator.clone(), page);
+    let result: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
+    if result.is_some() {
+        extend(env, &key);
+    }
+    result.unwrap_or_else(|| Vec::new(env))
+}
+
+fn set_creator_bounties_page(env: &Env, creator: &Address, page: u32, items: &Vec<BountyId>) {
+    let key = DataKey::ContributorBountiesPage(creator.clone(), page);
+    if items.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, items);
+        extend(env, &key);
+    }
+}
+
+/// Migrate a legacy `ContributorBounties(creator)` blob into pages, if present.
+///
+/// Returns the number of entries migrated (0 when no legacy blob exists).
+fn migrate_legacy_creator_bounties(env: &Env, creator: &Address) -> u32 {
+    let legacy_key = DataKey::ContributorBounties(creator.clone());
+    let legacy: Option<Vec<BountyId>> = env.storage().persistent().get(&legacy_key);
+    let legacy = match legacy {
+        Some(list) => list,
+        None => return 0,
+    };
+    let total = legacy.len();
+    let mut page_idx = 0u32;
+    let mut page: Vec<BountyId> = Vec::new(env);
+    for id in legacy.iter() {
+        page.push_back(id);
+        if page.len() == PAGE_SIZE {
+            set_creator_bounties_page(env, creator, page_idx, &page);
+            page = Vec::new(env);
+            page_idx += 1;
+        }
+    }
+    if !page.is_empty() {
+        set_creator_bounties_page(env, creator, page_idx, &page);
+    }
+    set_creator_bounties_count(env, creator, total);
+    env.storage().persistent().remove(&legacy_key);
+    total
+}
+
+/// Returns every bounty ID created by `creator`, in creation order.
 pub fn get_creator_bounties(env: &Env, creator: &Address) -> Vec<BountyId> {
     let key = DataKey::ContributorBounties(creator.clone());
     let list: Option<Vec<BountyId>> = env.storage().persistent().get(&key);
@@ -1151,6 +1158,7 @@ pub fn get_creator_bounties(env: &Env, creator: &Address) -> Vec<BountyId> {
     list.unwrap_or_else(|| Vec::new(env))
 }
 
+/// Append `bounty_id` to `creator`'s index, writing only the affected page.
 pub fn append_creator_bounty(env: &Env, creator: &Address, bounty_id: &BountyId) {
     let mut list = get_creator_bounties(env, creator);
     list.push_back(bounty_id.clone());
@@ -1164,12 +1172,29 @@ pub fn append_creator_bounty(env: &Env, creator: &Address, bounty_id: &BountyId)
 /// The key is deleted entirely once the index becomes empty so no stale
 /// empty vector keeps accruing TTL-extension rent.
 pub fn remove_creator_bounty(env: &Env, creator: &Address, bounty_id: &BountyId) {
-    let list = get_creator_bounties(env, creator);
-    let mut kept: Vec<BountyId> = Vec::new(env);
-    for id in list.iter() {
-        if id != *bounty_id {
-            kept.push_back(id);
+    let mut total = get_creator_bounties_count(env, creator);
+    if total == 0 {
+        total = migrate_legacy_creator_bounties(env, creator);
+    }
+    if total == 0 {
+        return;
+    }
+    let page_count = total.div_ceil(PAGE_SIZE);
+
+    // Find the target item across all pages.
+    let mut found_page: Option<u32> = None;
+    let mut found_pos: Option<u32> = None;
+    let mut p = 0u32;
+    'outer: while p < page_count {
+        let page = get_creator_bounties_page(env, creator, p);
+        for (pos, id) in page.iter().enumerate() {
+            if id == *bounty_id {
+                found_page = Some(p);
+                found_pos = Some(pos as u32);
+                break 'outer;
+            }
         }
+        p += 1;
     }
     let key = DataKey::ContributorBounties(creator.clone());
     if kept.is_empty() {

@@ -29,7 +29,18 @@ pub enum DataKey {
     Bounty(BountyId),
     BountyMeta(BountyId),
     Contributor(Address),
+    /// Legacy single-blob list of bounty IDs created by a contributor —
+    /// replaced by ContributorBountiesCount / ContributorBountiesPage.
+    /// Kept in the enum so existing serialised keys can still be read during a
+    /// migration pass. New code must not write this variant.
     ContributorBounties(Address),
+    /// Total number of bounty IDs recorded for a contributor across all
+    /// `ContributorBountiesPage` shards.
+    ContributorBountiesCount(Address),
+    /// Paged contributor-bounties shard. `page` is 0-indexed; each shard holds
+    /// at most `storage::PAGE_SIZE` (50) entries. See storage.rs for the
+    /// layout contract, mirroring `StatusIndexPage`.
+    ContributorBountiesPage(Address, u32),
     /// Bounty IDs a contributor was an assignee on when the bounty reached a
     /// terminal status (`"completed"` or `"cancelled"`). Maintained
     /// incrementally by `storage::move_bounty_status`.
