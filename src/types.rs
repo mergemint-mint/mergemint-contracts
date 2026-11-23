@@ -68,11 +68,30 @@ pub enum DataKey {
     /// rather than from the exact completion/cancellation ledger (which the
     /// contract does not currently record).
     ArchiveEligibleAt(BountyId),
-    /// Bounty IDs paid in a given reward token, keyed by the token contract
-    /// address. Appended to on `create_bounty`; entries for archived
-    /// bounties are pruned by `archive_bounty` so the index only lists
-    /// bounties with a live full record.
+    /// Legacy single-blob token index — replaced by TokenBountiesPage.
+    /// Kept in the enum so existing serialised keys can still be read during a
+    /// migration pass. New code must not write this variant.
     TokenBounties(Address),
+    /// Total number of bounty IDs indexed under a given reward token (sum
+    /// across all `TokenBountiesPage` shards). Maintained by
+    /// `storage::append_token_bounty` / `storage::remove_token_bounty`.
+    TokenBountiesCount(Address),
+    /// Paged token index shard, keyed by `(reward_token, page)`. `page` is
+    /// 0-indexed and each shard holds at most `storage::PAGE_SIZE` bounty IDs,
+    /// so a popular token (e.g. XLM/USDC) never exceeds Soroban's 64 KB
+    /// per-entry XDR cap. Entries for archived bounties are pruned by
+    /// `archive_bounty` via swap-remove so the index only lists bounties with
+    /// a live full record.
+    TokenBountiesPage(Address, u32),
+    /// Total number of open bounty IDs indexed under a given tag (sum across
+    /// all `TagIndexPage` shards). Maintained on `create_bounty`,
+    /// `update_tags`, and status transitions.
+    TagIndexCount(Symbol),
+    /// Paged tag index shard, keyed by `(tag, page)`. `page` is 0-indexed and
+    /// each shard holds at most `storage::PAGE_SIZE` bounty IDs, bounding the
+    /// read footprint of `get_bounties_by_tag` to a single page slice instead
+    /// of an O(N) scan over every open bounty.
+    TagIndexPage(Symbol, u32),
     /// Contract admin address, set lazily by the first admin-only call.
     Admin,
     /// Admin-configured cap on concurrent open+claimed bounties per creator.
@@ -269,6 +288,9 @@ pub struct BountySummary {
     pub assignee: Option<Address>,
     pub status: Symbol,
     pub reward: i128,
+    /// Reward token the bounty was denominated in. Retained so archived
+    /// bounties report their true token instead of a placeholder address.
+    pub reward_token: Address,
 }
 
 impl Contributor {

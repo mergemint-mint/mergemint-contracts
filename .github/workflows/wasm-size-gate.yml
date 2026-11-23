@@ -1,0 +1,111 @@
+name: WASM Size Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/wasm-size-baseline.txt"
+      - ".github/workflows/wasm-size-gate.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  WASM_SIZE_BASELINE_FILE: .github/wasm-size-baseline.txt
+  # Hard ceiling, independent of the baseline: Stellar's max contract WASM
+  # size is 128 KiB; keep a comfortable margin below it.
+  WASM_HARD_LIMIT_BYTES: 102400
+  WASM_SIZE_THRESHOLD_PERCENT: 10
+
+jobs:
+  wasm-size-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify release profile is intact
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          text = open("Cargo.toml").read()
+          m = re.search(r"\[profile\.release\](.*?)(?:\n\[|\Z)", text, re.S)
+          if not m:
+              sys.exit("[profile.release] missing from Cargo.toml")
+          body = m.group(1)
+          required = {
+              "opt-level": r'opt-level\s*=\s*"z"',
+              "overflow-checks": r"overflow-checks\s*=\s*true",
+              "lto": r"lto\s*=\s*(true|\"fat\")",
+              "strip": r'strip\s*=\s*("symbols"|true)',
+          }
+          bad = [k for k, rx in required.items() if not re.search(rx, body)]
+          if bad:
+              sys.exit("release profile regressed: " + ", ".join(bad))
+          print("release profile OK")
+          PY
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release WASM
+        run: scripts/build-release-wasm.sh ci dist
+
+      - name: Enforce size gate
+        run: |
+          WASM=$(ls dist/*.wasm | head -1)
+          SIZE=$(wc -c < "$WASM")
+          BASELINE=$(tr -dc '0-9' < "$WASM_SIZE_BASELINE_FILE")
+          MAX=$(( BASELINE + BASELINE * WASM_SIZE_THRESHOLD_PERCENT / 100 ))
+          echo "size=$SIZE baseline=$BASELINE allowed=$MAX hard_limit=$WASM_HARD_LIMIT_BYTES"
+          {
+            echo "### WASM size gate"
+            echo "- size: ${SIZE} bytes"
+            echo "- baseline: ${BASELINE} bytes (+${WASM_SIZE_THRESHOLD_PERCENT}% allowed = ${MAX})"
+            echo "- hard limit: ${WASM_HARD_LIMIT_BYTES} bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SIZE" -gt "$WASM_HARD_LIMIT_BYTES" ]; then
+            echo "::error::WASM exceeds hard limit"; exit 1
+          fi
+          if [ "$SIZE" -gt "$MAX" ]; then
+            echo "::error::WASM grew beyond baseline threshold; see the WASM Build workflow's update-wasm-baseline label to accept"; exit 1
+          fi
+
+      - name: Section audit and top-symbol breakdown
+        run: |
+          WASM=$(ls dist/*.wasm | head -1)
+          python3 - "$WASM" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import sys
+          d = open(sys.argv[1], "rb").read()
+          names = {0:"custom",1:"type",2:"import",3:"function",4:"table",5:"memory",
+                   6:"global",7:"export",8:"start",9:"element",10:"code",11:"data",12:"datacount"}
+          def leb(i):
+              r = s = 0
+              while True:
+                  b = d[i]; i += 1
+                  r |= (b & 0x7f) << s; s += 7
+                  if not b & 0x80: return r, i
+          i = 8
+          print("#### WASM sections (bytes)")
+          while i < len(d):
+              sid = d[i]; size, j = leb(i + 1)
+              print(f"- {names.get(sid, sid)}: {size}")
+              i = j + size
+          PY
+          cargo install twiggy --locked >/dev/null 2>&1 || true
+          if command -v twiggy >/dev/null; then
+            { echo '#### twiggy top 20'; echo '```'; twiggy top -n 20 "$WASM" || true; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

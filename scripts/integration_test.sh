@@ -19,6 +19,12 @@ log() { echo "[integration_test] $*"; }
 fail() { echo "[integration_test] FAIL: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
+# 0. Preflight checks
+# ---------------------------------------------------------------------------
+command -v stellar >/dev/null 2>&1 || fail "stellar-cli not found in PATH"
+command -v cargo >/dev/null 2>&1 || fail "cargo not found in PATH"
+
+# ---------------------------------------------------------------------------
 # 1. Start local sandbox
 # ---------------------------------------------------------------------------
 log "Starting local Soroban sandbox..."
@@ -34,6 +40,11 @@ log "Building WASM..."
 cargo build --release --target wasm32-unknown-unknown 2>&1
 [ -f "$WASM" ] || fail "WASM binary not found at $WASM"
 
+# Verify SHA-256 checksum of the built WASM before deploying
+WASM_SHA256=$(sha256sum "$WASM" | awk '{print $1}')
+[ -n "$WASM_SHA256" ] || fail "failed to compute WASM SHA-256"
+log "  wasm_sha256: $WASM_SHA256"
+
 # ---------------------------------------------------------------------------
 # 3. Generate test identities
 # ---------------------------------------------------------------------------
@@ -45,6 +56,10 @@ stellar keys generate verifier  --network "$NETWORK" --fund 2>/dev/null || true
 CREATOR=$(stellar keys address creator)
 CONTRIBUTOR=$(stellar keys address contributor)
 VERIFIER=$(stellar keys address verifier)
+
+[ -n "$CREATOR" ] || fail "failed to resolve creator address"
+[ -n "$CONTRIBUTOR" ] || fail "failed to resolve contributor address"
+[ -n "$VERIFIER" ] || fail "failed to resolve verifier address"
 
 log "  creator:     $CREATOR"
 log "  contributor: $CONTRIBUTOR"
@@ -58,6 +73,7 @@ REWARD_TOKEN=$(stellar contract asset deploy \
     --asset "USDC:$CREATOR" \
     --network "$NETWORK" \
     --source creator)
+[ -n "$REWARD_TOKEN" ] || fail "failed to deploy reward token"
 log "  reward_token: $REWARD_TOKEN"
 
 log "Minting 10000 USDC to verifier..."
@@ -77,6 +93,7 @@ CONTRACT_ID=$(stellar contract deploy \
     --wasm "$WASM" \
     --network "$NETWORK" \
     --source "$ACCOUNT")
+[ -n "$CONTRACT_ID" ] || fail "failed to deploy MergeMint contract"
 log "  contract_id: $CONTRACT_ID"
 
 # Helper: invoke a contract function and capture output
@@ -87,6 +104,20 @@ invoke() {
         --source "$ACCOUNT" \
         -- "$@"
 }
+
+# ---------------------------------------------------------------------------
+# 5b. init_admin — bootstrap admin atomically right after deploy to close
+#     the uninitialized-admin front-running window.
+# ---------------------------------------------------------------------------
+log "Invoking init_admin..."
+invoke init_admin --admin "$CREATOR"
+log "  admin initialized ✓"
+
+# Validate version() post-deploy
+log "Validating version()..."
+VERSION=$(invoke version)
+[ -n "$VERSION" ] || fail "version() returned empty"
+log "  version: $VERSION ✓"
 
 # ---------------------------------------------------------------------------
 # 6. create_bounty
