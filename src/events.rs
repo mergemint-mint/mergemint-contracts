@@ -627,13 +627,15 @@ pub struct OwnershipTransferStarted {
     pub new_owner: Address,
 }
 
-/// Emitted by `cancel_admin_transfer` (#1194): `config_changed` /
-/// `pending_admin` with `(Some(cancelled_nominee), None)`.
-pub fn emit_config_changed_pending_admin_cleared(env: &Env, cancelled: &Address) {
-    env.events().publish(
-        config_changed_topic(env, "pending_admin"),
-        (Some(cancelled.clone()), Option::<Address>::None),
-    );
+/// `config_changed` / `arbitrator` with `(old, new)`; `None` means the
+/// creator-as-arbitrator fallback is in effect (#1195).
+pub fn emit_config_changed_arbitrator(
+    env: &Env,
+    old_value: Option<Address>,
+    new_value: Option<Address>,
+) {
+    env.events()
+        .publish(config_changed_topic(env, "arbitrator"), (old_value, new_value));
 }
 
 pub fn emit_ownership_transfer_started(
@@ -658,6 +660,21 @@ pub struct OwnershipTransferred {
     pub new_owner: Address,
     pub bounty_id: BountyId,
     pub previous_owner: Address,
+}
+
+/// Emitted by `cancel_bounty_ownership_transfer` when a creator revokes a
+/// pending ownership transfer (#1193).
+pub fn emit_ownership_transfer_cancelled(
+    env: &Env,
+    bounty_id: &BountyId,
+    owner: &Address,
+    revoked_owner: &Address,
+) {
+    let topic = Symbol::new(env, "ownership_transfer_cancelled");
+    env.events().publish(
+        (topic, owner.clone()),
+        (bounty_id.clone(), revoked_owner.clone()),
+    );
 }
 
 pub fn emit_ownership_transferred(

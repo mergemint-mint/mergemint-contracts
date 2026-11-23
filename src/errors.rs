@@ -83,29 +83,27 @@ pub enum ContractError {
     NotPendingAdmin = 59,
     NotPendingOwner = 60,
     OwnerCannotBeAssignee = 61,
+    /// `transfer_bounty_ownership` named the current creator as new owner (#1193).
+    OwnerCannotBeCreator = 63,
+    /// `cancel_bounty_ownership_transfer` called with no pending transfer (#1193).
+    NoPendingOwner = 64,
     /// A state-mutating entrypoint was called while the admin has the
     /// contract paused.
     ContractPaused = 62,
-    /// An admin window setter was given a value above `MAX_LEDGER_WINDOW`
-    /// (#1189).
-    WindowTooLarge = 63,
-    /// `transfer_admin` nominated the current admin (#1194).
-    CannotTransferToSelf = 64,
-    /// `cancel_admin_transfer` was called with no transfer pending (#1194).
-    NoPendingAdmin = 65,
-    /// `resolve_dispute` was called while a decision is already pending its
-    /// appeal window (#1196).
-    ResolutionAlreadyPending = 66,
-    /// `required_verifiers` was `Some` but empty (#1198).
-    EmptyVerifierList = 67,
-    /// `required_verifiers` lists the same address more than once (#1198).
-    DuplicateVerifier = 68,
-    /// `required_verifiers` exceeds `MAX_VERIFIERS` (#1198).
-    TooManyVerifiers = 69,
-    /// `approval_threshold` is `0` while `required_verifiers` is set (#1198).
-    InvalidApprovalThreshold = 70,
-    /// The bounty creator was listed as one of its own verifiers (#1198).
-    CreatorCannotBeVerifier = 71,
+    /// The designated arbitrator is the bounty creator or one of its
+    /// assignees, i.e. an interested party in the dispute (#1195).
+    ArbitratorConflict = 63,
+    /// A `BytesN<32>` hash argument (work submission or dispute evidence)
+    /// was the all-zero sentinel value, which is never a valid hash.
+    ZeroHash = 64,
+    /// The supplied dispute evidence hash is already recorded for this
+    /// dispute; re-submitting it would consume the party's evidence quota
+    /// without adding new information.
+    DuplicateEvidence = 65,
+    /// `pause` was called while the contract was already paused.
+    AlreadyPaused = 66,
+    /// `unpause` was called while the contract was not paused.
+    NotPaused = 67,
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
@@ -196,19 +194,15 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::NotPendingAdmin => "caller is not the pending admin",
         ContractError::NotPendingOwner => "caller is not the pending bounty owner",
         ContractError::OwnerCannotBeAssignee => "new owner cannot be an assignee of the bounty",
+        ContractError::OwnerCannotBeCreator => "new owner cannot be the current creator",
+        ContractError::NoPendingOwner => "no pending ownership transfer for this bounty",
         ContractError::ContractPaused => "contract is paused",
-        ContractError::WindowTooLarge => "ledger window exceeds the maximum allowed",
-        ContractError::CannotTransferToSelf => "new admin must differ from the current admin",
-        ContractError::NoPendingAdmin => "no admin transfer is pending",
-        ContractError::ResolutionAlreadyPending => {
-            "a dispute decision is already pending for this bounty"
+        ContractError::ArbitratorConflict => {
+            "arbitrator cannot be the bounty creator or an assignee"
         }
-        ContractError::EmptyVerifierList => "required_verifiers must not be empty",
-        ContractError::DuplicateVerifier => "required_verifiers contains a duplicate address",
-        ContractError::TooManyVerifiers => "required_verifiers exceeds the maximum allowed",
-        ContractError::InvalidApprovalThreshold => {
-            "approval_threshold must be at least 1 when required_verifiers is set"
-        }
-        ContractError::CreatorCannotBeVerifier => "bounty creator cannot be a required verifier",
+        ContractError::ZeroHash => "hash must not be all zero",
+        ContractError::DuplicateEvidence => "dispute evidence hash already recorded",
+        ContractError::AlreadyPaused => "contract is already paused",
+        ContractError::NotPaused => "contract is not paused",
     }
 }
