@@ -35,6 +35,55 @@ pub fn initialize_indexer_ledger_gaps(total: u64) {
     INDEXER_LEDGER_GAPS.store(total, Ordering::Relaxed);
 }
 
+/// Indexer decode failures (malformed XDR / payloads).
+static INDEXER_DECODE_ERRORS: AtomicU64 = AtomicU64::new(0);
+/// Indexer events whose topic/type is not recognised.
+static INDEXER_UNRECOGNIZED_EVENTS: AtomicU64 = AtomicU64::new(0);
+/// Webhook deliveries by outcome (`success`, `failure`).
+static WEBHOOK_DELIVERIES_SUCCESS: AtomicU64 = AtomicU64::new(0);
+static WEBHOOK_DELIVERIES_FAILURE: AtomicU64 = AtomicU64::new(0);
+/// Webhook deliveries blocked by the SSRF guard.
+static WEBHOOK_SSRF_BLOCKED: AtomicU64 = AtomicU64::new(0);
+/// SSE connections rejected by reason (`per_ip`, `global`).
+static SSE_REJECTED_PER_IP: AtomicU64 = AtomicU64::new(0);
+static SSE_REJECTED_GLOBAL: AtomicU64 = AtomicU64::new(0);
+/// DB pool connections by state (`in_use`, `idle`).
+static DB_POOL_IN_USE: AtomicU64 = AtomicU64::new(0);
+static DB_POOL_IDLE: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_indexer_decode_error() {
+    INDEXER_DECODE_ERRORS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_indexer_unrecognized_event() {
+    INDEXER_UNRECOGNIZED_EVENTS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_webhook_delivery(success: bool) {
+    if success {
+        WEBHOOK_DELIVERIES_SUCCESS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        WEBHOOK_DELIVERIES_FAILURE.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn record_webhook_ssrf_blocked() {
+    WEBHOOK_SSRF_BLOCKED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_sse_rejected(reason: LimitExceeded) {
+    match reason {
+        LimitExceeded::PerIp => SSE_REJECTED_PER_IP.fetch_add(1, Ordering::Relaxed),
+        LimitExceeded::Global => SSE_REJECTED_GLOBAL.fetch_add(1, Ordering::Relaxed),
+    };
+}
+
+/// Update the DB pool saturation gauges from the current pool state.
+pub fn set_db_pool_connections(in_use: u64, idle: u64) {
+    DB_POOL_IN_USE.store(in_use, Ordering::Relaxed);
+    DB_POOL_IDLE.store(idle, Ordering::Relaxed);
+}
+
 /// A single (route, status) observation series.
 #[derive(Default)]
 struct RouteMetrics {
@@ -156,6 +205,49 @@ impl Metrics {
             INDEXER_LEDGER_GAPS.load(Ordering::Relaxed)
         ));
 
+        out.push_str("# HELP mergemint_indexer_decode_errors_total Indexer events that failed to decode.\n");
+        out.push_str("# TYPE mergemint_indexer_decode_errors_total counter\n");
+        out.push_str(&format!(
+            "mergemint_indexer_decode_errors_total {}\n",
+            INDEXER_DECODE_ERRORS.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP mergemint_indexer_unrecognized_events_total Indexer events with an unrecognised topic/type.\n");
+        out.push_str("# TYPE mergemint_indexer_unrecognized_events_total counter\n");
+        out.push_str(&format!(
+            "mergemint_indexer_unrecognized_events_total {}\n",
+            INDEXER_UNRECOGNIZED_EVENTS.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP mergemint_webhook_deliveries_total Webhook deliveries by outcome.\n");
+        out.push_str("# TYPE mergemint_webhook_deliveries_total counter\n");
+        out.push_str(&format!(
+            "mergemint_webhook_deliveries_total{{outcome=\"success\"}} {}\n",
+            WEBHOOK_DELIVERIES_SUCCESS.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "mergemint_webhook_deliveries_total{{outcome=\"failure\"}} {}\n",
+            WEBHOOK_DELIVERIES_FAILURE.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP mergemint_webhook_ssrf_blocked_total Webhook deliveries blocked by the SSRF guard.\n");
+        out.push_str("# TYPE mergemint_webhook_ssrf_blocked_total counter\n");
+        out.push_str(&format!(
+            "mergemint_webhook_ssrf_blocked_total {}\n",
+            WEBHOOK_SSRF_BLOCKED.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP mergemint_db_pool_connections Database pool connections by state.\n");
+        out.push_str("# TYPE mergemint_db_pool_connections gauge\n");
+        out.push_str(&format!(
+            "mergemint_db_pool_connections{{state=\"in_use\"}} {}\n",
+            DB_POOL_IN_USE.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "mergemint_db_pool_connections{{state=\"idle\"}} {}\n",
+            DB_POOL_IDLE.load(Ordering::Relaxed)
+        ));
+
         let (cache_hits, cache_misses) = crate::routes::leaderboard::leaderboard_cache_counts();
         out.push_str(
             "# HELP mergemint_leaderboard_cache_total Leaderboard cache requests by result.\n",
@@ -190,6 +282,17 @@ impl Metrics {
             ));
         }
 
+        out.push_str("# HELP mergemint_sse_rejected_total SSE connections rejected, by reason.\n");
+        out.push_str("# TYPE mergemint_sse_rejected_total counter\n");
+        out.push_str(&format!(
+            "mergemint_sse_rejected_total{{reason=\"per_ip\"}} {}\n",
+            SSE_REJECTED_PER_IP.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "mergemint_sse_rejected_total{{reason=\"global\"}} {}\n",
+            SSE_REJECTED_GLOBAL.load(Ordering::Relaxed)
+        ));
+
         out
     }
 }
@@ -212,12 +315,11 @@ pub async fn track_metrics(
     let start = Instant::now();
     let response = next.run(request).await;
     let elapsed = start.elapsed().as_secs_f64();
-
     metrics.observe_request(&route, response.status().as_u16(), elapsed);
     response
 }
 
-/// Handler serving the Prometheus exposition at `/metrics`.
+/// `GET /metrics` handler rendering the registry in Prometheus text format.
 async fn metrics_handler(State(metrics): State<Arc<Metrics>>) -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -226,8 +328,8 @@ async fn metrics_handler(State(metrics): State<Arc<Metrics>>) -> impl IntoRespon
     )
 }
 
-/// Build a router exposing the `/metrics` scrape endpoint.
-pub fn metrics_router(metrics: Arc<Metrics>) -> Router {
+/// Build a router exposing `GET /metrics` backed by `metrics`.
+pub fn router(metrics: Arc<Metrics>) -> Router {
     Router::new()
         .route("/metrics", get(metrics_handler))
         .with_state(metrics)
@@ -237,30 +339,98 @@ pub fn metrics_router(metrics: Arc<Metrics>) -> Router {
 mod tests {
     use super::*;
 
-    #[test]
-    fn renders_sse_connection_gauge_and_rejections() {
-        let limiter = SseConnectionLimiter::new(1, 10);
-        let metrics = Metrics::new().with_sse_limiter(limiter.clone());
-        let ip = "192.0.2.1".parse().ok();
-
-        let permit = limiter.try_acquire(ip).unwrap();
-        assert!(limiter.try_acquire(ip).is_err());
-        let out = metrics.render();
-        assert!(out.contains("# TYPE mergemint_sse_active_connections gauge"));
-        assert!(out.contains("mergemint_sse_active_connections 1\n"));
-        assert!(out.contains("mergemint_sse_rejected_connections_total{reason=\"per_ip\"} 1\n"));
-        assert!(out.contains("mergemint_sse_rejected_connections_total{reason=\"global\"} 0\n"));
-
-        drop(permit);
-        assert!(metrics
-            .render()
-            .contains("mergemint_sse_active_connections 0\n"));
+    fn value_for(rendered: &str, needle: &str) -> Option<f64> {
+        rendered
+            .lines()
+            .find(|line| line.starts_with(needle))
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|v| v.parse().ok())
     }
 
     #[test]
-    fn renders_zero_sse_gauge_without_limiter() {
-        assert!(Metrics::new()
-            .render()
-            .contains("mergemint_sse_active_connections 0\n"));
+    fn renders_help_and_type_for_new_metrics() {
+        let rendered = Metrics::new().render();
+        for name in [
+            "mergemint_indexer_decode_errors_total",
+            "mergemint_indexer_unrecognized_events_total",
+            "mergemint_webhook_deliveries_total",
+            "mergemint_webhook_ssrf_blocked_total",
+            "mergemint_sse_rejected_total",
+            "mergemint_db_pool_connections",
+        ] {
+            assert!(
+                rendered.contains(&format!("# HELP {name} ")),
+                "missing HELP for {name}"
+            );
+            assert!(
+                rendered.contains(&format!("# TYPE {name} ")),
+                "missing TYPE for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn counters_increment_on_error_paths() {
+        let before = Metrics::new().render();
+        let decode_before = value_for(&before, "mergemint_indexer_decode_errors_total").unwrap();
+        let unrec_before =
+            value_for(&before, "mergemint_indexer_unrecognized_events_total").unwrap();
+        let fail_before = value_for(
+            &before,
+            "mergemint_webhook_deliveries_total{outcome=\"failure\"}",
+        )
+        .unwrap();
+        let ssrf_before = value_for(&before, "mergemint_webhook_ssrf_blocked_total").unwrap();
+        let sse_before = value_for(
+            &before,
+            "mergemint_sse_rejected_total{reason=\"per_ip\"}",
+        )
+        .unwrap();
+
+        record_indexer_decode_error();
+        record_indexer_unrecognized_event();
+        record_webhook_delivery(false);
+        record_webhook_ssrf_blocked();
+        record_sse_rejected(LimitExceeded::PerIp);
+
+        let after = Metrics::new().render();
+        assert_eq!(
+            value_for(&after, "mergemint_indexer_decode_errors_total").unwrap(),
+            decode_before + 1.0
+        );
+        assert_eq!(
+            value_for(&after, "mergemint_indexer_unrecognized_events_total").unwrap(),
+            unrec_before + 1.0
+        );
+        assert_eq!(
+            value_for(
+                &after,
+                "mergemint_webhook_deliveries_total{outcome=\"failure\"}"
+            )
+            .unwrap(),
+            fail_before + 1.0
+        );
+        assert_eq!(
+            value_for(&after, "mergemint_webhook_ssrf_blocked_total").unwrap(),
+            ssrf_before + 1.0
+        );
+        assert_eq!(
+            value_for(&after, "mergemint_sse_rejected_total{reason=\"per_ip\"}").unwrap(),
+            sse_before + 1.0
+        );
+    }
+
+    #[test]
+    fn db_pool_gauges_reflect_state() {
+        set_db_pool_connections(7, 3);
+        let rendered = Metrics::new().render();
+        assert_eq!(
+            value_for(&rendered, "mergemint_db_pool_connections{state=\"in_use\"}").unwrap(),
+            7.0
+        );
+        assert_eq!(
+            value_for(&rendered, "mergemint_db_pool_connections{state=\"idle\"}").unwrap(),
+            3.0
+        );
     }
 }

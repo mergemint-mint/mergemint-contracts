@@ -54,15 +54,24 @@ const sanitizeSchema = {
   },
 };
 
+// Strip ASCII control characters (including tab/newline) that can be used to
+// obfuscate schemes such as `java\tscript:`.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001F\u007F]/g;
+
 const isSafeHref = (href?: string): boolean => {
   if (!href) return false;
-  const trimmed = href.trim().toLowerCase();
+  const cleaned = href.replace(CONTROL_CHARS, '').trim();
+  if (!cleaned) return false;
+  // Reject protocol-relative URLs (`//evil.example/phish`).
+  if (cleaned.startsWith('//')) return false;
+  const lower = cleaned.toLowerCase();
   return (
-    trimmed.startsWith('http://') ||
-    trimmed.startsWith('https://') ||
-    trimmed.startsWith('mailto:') ||
-    trimmed.startsWith('#') ||
-    trimmed.startsWith('/')
+    lower.startsWith('http://') ||
+    lower.startsWith('https://') ||
+    lower.startsWith('mailto:') ||
+    lower.startsWith('#') ||
+    cleaned.startsWith('/')
   );
 };
 
