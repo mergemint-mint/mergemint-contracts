@@ -179,6 +179,30 @@ pub fn remove_bounty_body(env: &Env, id: &BountyId) {
         .remove(&DataKey::BountyMeta(id.clone()));
 }
 
+/// Remove every auxiliary per-bounty persistent entry that only has meaning
+/// while a bounty is still live (#1190).
+///
+/// Called on every terminal transition (completion, cancellation, expiry,
+/// dispute resolution) and on archival, so finished bounties do not keep
+/// paying rent on obsolete state and stale entries can never be re-used by a
+/// later code path (e.g. a leftover `PendingOwner` being accepted, or old
+/// `Approvals` counting towards a new quorum). Removing an absent key is a
+/// no-op, so this is safe to call more than once.
+///
+/// `Sponsors` is intentionally not touched here: it is consumed (and
+/// cleared) by the escrow refund path, and is still needed to pay sponsors
+/// back on cancellation.
+pub fn cleanup_terminal_bounty_keys(env: &Env, id: &BountyId) {
+    let storage = env.storage().persistent();
+    storage.remove(&DataKey::ClaimedAtLedger(id.clone()));
+    storage.remove(&DataKey::Submission(id.clone()));
+    storage.remove(&DataKey::Approvals(id.clone()));
+    storage.remove(&DataKey::PendingOwner(id.clone()));
+    storage.remove(&DataKey::PendingResolution(id.clone()));
+    storage.remove(&DataKey::DisputeEvidence(id.clone()));
+    storage.remove(&DataKey::DisputeAppealed(id.clone()));
+}
+
 /// Persist a compacted `BountySummary` for a finished bounty.
 ///
 /// Storage key: `DataKey::BountyArchive(id)`.

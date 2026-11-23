@@ -1080,6 +1080,22 @@ Wait, the issue says "checks whether any uncompleted milestone carries a `deadli
             return complete_bounty_inner(env, bounty_id, bounty);
         }
 
+        // #1179: the multi-sig branch must apply the same status guards as
+        // the single-verifier path. A disputed bounty must go through
+        // resolve_dispute, and open, completed or cancelled bounties must
+        // never accumulate approvals.
+        if bounty.status == Symbol::new(&env, STATUS_DISPUTED) {
+            fail(ContractError::BountyIsDisputed);
+        }
+        ensure_status(
+            &bounty,
+            &[
+                Symbol::new(&env, STATUS_IN_PROGRESS),
+                Symbol::new(&env, STATUS_SUBMITTED),
+            ],
+            ContractError::BountyNotInProgress,
+        );
+
         // When verifiers are configured, a work submission must exist first —
         // approval without a recorded submission leaves verifiers with
         // nothing concrete to review.
@@ -1139,6 +1155,18 @@ Wait, the issue says "checks whether any uncompleted milestone carries a `deadli
                 events::emit_bounty_completed(&env, &bounty_id, &primary_assignee);
                 return;
             }
+
+            // #1179: checks-effects-interactions. Persist the terminal status,
+            // the status index move and the creator count *before* any
+            // external SEP-41 transfer, so a re-entrant call observes a
+            // completed bounty and cannot trigger a second payout.
+            let (primary_assignee, _) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
+            let previous_status = bounty.status.clone();
+            bounty.status = Symbol::new(&env, STATUS_COMPLETED);
+            storage::store_bounty(&env, &bounty_id, &bounty);
+            storage::move_bounty_status(&env, &bounty_id, &previous_status, &bounty.status);
+            storage::decrement_creator_open_count(&env, &bounty.creator);
+            storage::cleanup_terminal_bounty_keys(&env, &bounty_id);
 
             let token = TokenClient::new(&env, &bounty.reward_token);
             distribute_payout(
