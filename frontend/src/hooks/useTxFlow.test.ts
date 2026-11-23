@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildOptimisticState, buildConfirmedState, buildFailedState } from "./useTxFlow";
+import { generateIdempotencyKey, parseApiErrorBody } from "../lib/api";
 
 describe("useTxFlow state transitions", () => {
   const network = "testnet" as const;
@@ -33,5 +34,20 @@ describe("useTxFlow state transitions", () => {
     expect(failed.optimistic).toBe(false);
     expect(failed.result).toBeNull();
     expect(failed.error).toBe("Transaction failed");
+  });
+
+  it("generates unique idempotency keys and parses structured API errors", () => {
+    const key1 = generateIdempotencyKey();
+    const key2 = generateIdempotencyKey();
+    expect(key1).toBeTruthy();
+    expect(key1).not.toBe(key2);
+
+    const parsed = parseApiErrorBody(
+      JSON.stringify({ message: "Bounty already claimed", code: "ALREADY_CLAIMED" }),
+      409
+    );
+    expect(parsed.message).toBe("Bounty already claimed");
+    expect(parsed.status).toBe(409);
+    expect(parsed.code).toBe("ALREADY_CLAIMED");
   });
 });
