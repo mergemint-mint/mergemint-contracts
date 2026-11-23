@@ -1,5 +1,5 @@
 {
-  "$comment": "Shared fixture asserting frontend/src/lib/validation.ts and mergemint-backend agree on the reward-amount and description-length rules. Edit both consumers (frontend/src/lib/validation.test.ts, mergemint-backend/src/validation.rs) if you change a case here.",
+  "$comment": "Shared fixture asserting frontend/src/lib/validation.ts and mergemint-backend agree on reward-amount, title-symbol, and description-UTF-8 rules. Edit both consumers (frontend/src/lib/validation.test.ts, mergemint-backend/src/validation.rs) if you change a case here.",
   "rewardAmount": [
     { "value": "10", "valid": true, "reason": "plain positive integer" },
     { "value": "10.5", "valid": true, "reason": "one decimal place" },
@@ -13,13 +13,24 @@
     { "value": "1e10", "valid": false, "reason": "scientific notation is not accepted" },
     { "value": "10.", "valid": false, "reason": "trailing decimal point with no digits" }
   ],
-  "descriptionLength": [
-    { "value": "Fix the payout bug", "valid": true, "reason": "well under the limit" },
+  "title": [
+    { "value": "Fix_payout_bug", "valid": true, "reason": "symbol-safe chars under 32" },
+    { "value": "a", "valid": true, "reason": "single symbol char" },
     { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": true, "reason": "32 chars, at the Symbol limit" },
+    { "value": "", "valid": false, "reason": "empty title is rejected" },
+    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": false, "reason": "33 chars, one over the Symbol limit" },
+    { "value": "Fix the payout bug", "valid": false, "reason": "spaces are not valid Symbol chars" },
+    { "value": "fix-payout", "valid": false, "reason": "hyphen is not a valid Symbol char" },
+    { "value": "café", "valid": false, "reason": "non-ASCII is not a valid Symbol char" }
+  ],
+  "description": [
+    { "value": "Fix the payout bug", "valid": true, "reason": "well under the limit" },
     { "value": "a", "valid": true, "reason": "single character is still valid" },
+    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": true, "reason": "32 chars, still valid for a String" },
+    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": false, "reason": "33 chars, one over the limit" },
     { "value": "", "valid": false, "reason": "empty description is rejected" },
     { "value": "   ", "valid": false, "reason": "whitespace-only description is rejected" },
-    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": false, "reason": "33 chars, one over the Symbol limit" },
-    { "value": "this description is far too long to be stored on-chain as a Soroban Symbol", "valid": false, "reason": "well over the 32-char Symbol limit" }
+    { "value": "café ☕ payout fix", "valid": true, "reason": "multibyte UTF-8 within the limit" },
+    { "value": "this description is far too long to be stored on-chain as a Soroban Symbol", "valid": false, "reason": "well over the description limit" }
   ]
 }

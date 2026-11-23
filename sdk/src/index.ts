@@ -661,18 +661,23 @@ export class MergeMintSDK {
   // === #920 New lifecycle entrypoints
 
   /**
-   * Builds a `top_up` transaction that adds additional reward tokens to an
-   * existing open bounty's escrow. Not signed or submitted.
+   * Builds a `top_up_bounty` transaction that adds additional reward tokens to
+   * an existing open bounty's escrow. Not signed or submitted.
    *
    * The on-chain contract transfers `params.amount` tokens from `params.funder`
-   * to the bounty's escrow, increasing the total reward available to assignees.
+   * (the bounty creator) to the bounty's escrow, increasing the total reward
+   * available to assignees. The contract enforces creator-only auth, a
+   * non-paused contract, an active bounty status, and a positive amount, and
+   * performs a checked `i128` addition of the reward.
    *
-   * @param params - {@link TopUpParams}: funder address, bounty id, and amount.
+   * @param params - {@link TopUpParams}: funder (creator) address, bounty id,
+   * and amount.
    * @param sourceAccount - Address that funds and signs the transaction.
    * @returns The assembled transaction as a base64 XDR string.
    * @throws {@link SimulationFailedError} (or subclass) if the contract rejects
-   * the top-up — e.g. the bounty is not `open`, or the funder has insufficient
-   * balance.
+   * the top-up — e.g. the caller is not the bounty creator, the bounty is not
+   * active, the contract is paused, the reward addition overflows, or the
+   * funder has insufficient balance.
    * @throws {@link MergeMintSdkError} with `INVALID_ARGUMENT` if `params.amount`
    * is not a positive `bigint`.
    */
@@ -688,7 +693,7 @@ export class MergeMintSDK {
       hexToBytesN(params.bountyId),
       i128ToScVal(params.amount),
     ];
-    return this.buildTransaction("top_up", args, sourceAccount);
+    return this.buildTransaction("top_up_bounty", args, sourceAccount);
   }
 
   /**

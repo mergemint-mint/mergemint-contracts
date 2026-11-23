@@ -53,7 +53,7 @@ jobs:
       sdk-release-created: ${{ steps.release.outputs['sdk--release_created'] }}
       sdk-tag: ${{ steps.release.outputs['sdk--tag_name'] }}
     steps:
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@a02a3bbb29ffbd9b6c1ff46b9bf3f1bf8fd47104 # v4.4.0
         id: release
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
@@ -68,7 +68,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 20
 

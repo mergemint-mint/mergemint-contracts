@@ -226,3 +226,22 @@ Freighter and xBull are browser extensions. Their content scripts talk to the
 page with `window.postMessage`, which CSP does not restrict, so they need no
 entry. If a new wallet or external service is added, add its origin in
 `csp.ts` and in this table.
+
+## Formal verification proofs
+
+Bounded proofs for payout arithmetic (`share_bp` split of `reward_amount`),
+status-index paging (`PAGE_SIZE`, `div_ceil`, `is_multiple_of`) and saturating
+reputation updates live in `src/verification_proofs.rs` as pure mirrors of the
+contract math, so the on-chain ABI is unchanged.
+
+Commands:
+
+- `cargo test verification_proofs` runs the exhaustive/property proofs.
+- `cargo kani --harness proof_payout_never_exceeds_reward` and
+  `cargo kani --harness proof_page_count_covers_total` run the symbolic Kani proofs.
+
+Invariants: `0 <= payout <= reward_amount` and monotonic in `share_bp` for
+`share_bp <= 10_000` and `reward_amount <= i128::MAX / 10_000`; overflow is
+detected, never wrapped; `page_count(t) * PAGE_SIZE >= t` and
+`(page_count(t) - 1) * PAGE_SIZE < t` for `t > 0`; reputation saturates at
+`0` and `u32::MAX`.

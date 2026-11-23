@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Bounty } from '../types';
 import { mapErrorMessage } from '../utils/format';
-import { StatusBadge } from '../components/StatusBadge';
+import { StatusBadge, PausedContractNotice } from '../components/StatusBadge';
 import { BountyDetailSkeleton } from '../components/BountyDetailSkeleton';
 import { BountyErrorBoundary } from '../components/BountyErrorBoundary';
 import { TopUpModal } from '../components/TopUpModal';
@@ -126,6 +126,7 @@ function BountyDetailInner() {
   );
 
   const isOpen = bounty.status === 'open';
+  const isPaused = Boolean(bounty.paused || bounty.status === 'paused');
 
   const verifiers = bounty.verifiers ?? [];
   const approvalThreshold = bounty.approvalThreshold ?? 0;
@@ -139,6 +140,11 @@ function BountyDetailInner() {
     <div className="bounty-detail-page">
       <h1>{bounty.title}</h1>
       <StatusBadge status={bounty.status} />
+      <PausedContractNotice
+        paused={isPaused}
+        title={t('contract_paused_title')}
+        message={t('contract_paused_notice')}
+      />
       <p>{bounty.description}</p>
       <div className="bounty-reward" data-testid="bounty-reward">
         <strong>Reward:</strong> {bounty.reward} XLM

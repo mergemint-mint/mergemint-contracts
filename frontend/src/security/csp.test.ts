@@ -6,6 +6,7 @@ import {
   cspHeaderName,
   cspMode,
   originOf,
+  sanitizeReportUri,
 } from './csp';
 
 function directive(csp: string, name: string): string[] {
@@ -38,7 +39,12 @@ describe('buildCsp', () => {
       buildCsp({ VITE_NETWORK: 'mainnet', VITE_RPC_URLS: 'https://rpc.example.com/soroban, bad' }),
       'connect-src',
     );
-    expect(connect).toEqual(["'self'", 'https://horizon.stellar.org', 'https://rpc.example.com']);
+    expect(connect).toEqual([
+      "'self'",
+      'https://soroban-mainnet.stellar.org',
+      'https://horizon.stellar.org',
+      'https://rpc.example.com',
+    ]);
   });
 
   it('allows the Albedo wallet frame and blocks plugins and framing', () => {
@@ -48,11 +54,19 @@ describe('buildCsp', () => {
     expect(directive(csp, 'frame-ancestors')).toEqual(["'none'"]);
   });
 
-  it('adds report-uri only when configured', () => {
+  it('adds report-uri only when configured and rejects directive injection', () => {
     expect(buildCsp({})).not.toContain('report-uri');
     expect(directive(buildCsp({ VITE_CSP_REPORT_URI: '/csp-report' }), 'report-uri')).toEqual([
       '/csp-report',
     ]);
+    expect(
+      buildCsp({ VITE_CSP_REPORT_URI: '/csp-report; script-src https://evil.example' }),
+    ).not.toContain('report-uri');
+    expect(sanitizeReportUri('//evil.example/report')).toBeNull();
+    expect(sanitizeReportUri('javascript:alert(1)')).toBeNull();
+    expect(sanitizeReportUri('https://reports.mergemint.xyz/csp')).toBe(
+      'https://reports.mergemint.xyz/csp',
+    );
   });
 });
 

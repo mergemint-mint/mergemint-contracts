@@ -180,6 +180,13 @@ const LISTEN_ADDR: &str = "0.0.0.0:8080";
 /// Address the `healthcheck` subcommand probes.
 const HEALTHCHECK_ADDR: &str = "127.0.0.1:8080";
 
+/// Indexer lag threshold in ledgers; `/ready` returns 503 when exceeded.
+const MAX_INDEXER_LAG_LEDGERS_ENV: &str = "MAX_INDEXER_LAG_LEDGERS";
+const MAX_INDEXER_LAG_LEDGERS_DEFAULT: i64 = 100;
+
+/// Current chain-tip ledger, if known (set by the indexer process).
+const CURRENT_LEDGER_ENV: &str = "CURRENT_LEDGER";
+
 /// Reward-token allowlist env var consumed by create-bounty flows.
 const ALLOWLISTED_REWARD_TOKENS_ENV: &str = "ALLOWLISTED_REWARD_TOKENS";
 
@@ -781,6 +788,7 @@ async fn health() -> &'static str {
 /// Pings the database connection and returns:
 ///  * `200 ready` if the database is open and reachable
 ///  * `503 database unavailable` if the database is closed or unreachable
+///  * `503 indexer lag exceeded` when the indexer lag is above the threshold
 async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut ready = db::ping_db(&state.db).is_ok();
     // Bind the pool first so the read guard is dropped before the `.await`.
@@ -788,23 +796,61 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if let Some(pool) = pool {
         ready &= sqlx::query("SELECT 1").execute(&pool).await.is_ok();
     }
+
+    // Indexer lag check: compare the latest indexed checkpoint ledger against
+    // the current chain tip.  Mark the instance as not ready when the lag
+    // exceeds the configured threshold or when the indexer is ahead of the
+    // chain tip (negative lag anomaly).
+    let max_lag = std::env::var(MAX_INDEXER_LAG_LEDGERS_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(MAX_INDEXER_LAG_LEDGERS_DEFAULT);
+    let current_ledger = std::env::var(CURRENT_LEDGER_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok());
+
+    let mut indexer_lag: Option<i64> = None;
+    let mut lag_exceeded = false;
+    if let Some(pool) = pool {
+        if let Ok(row) = sqlx::query_scalar::<_, i64>(
+            "SELECT ledger FROM indexer_checkpoints WHERE name = $1 ORDER BY ledger DESC LIMIT 1",
+        )
+        .bind(format!("indexer:{}", std::env::var("CONTRACT_ID").unwrap_or_default()))
+        .fetch_one(&pool)
+        .await
+        {
+            let last_indexed = row;
+            if let Some(current) = current_ledger {
+                let lag = current - last_indexed;
+                indexer_lag = Some(lag.max(0));
+                lag_exceeded = lag > max_lag || last_indexed > current;
+            }
+        }
+    }
+
     let version = CONTRACT_VERSION
         .get()
         .map(String::as_str)
         .unwrap_or("unknown");
-    let status = if ready {
+    let status = if ready && !lag_exceeded {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    let text = if ready {
+    let text = if ready && !lag_exceeded {
         "ready"
+    } else if lag_exceeded {
+        "indexer lag exceeded"
     } else {
         "database unavailable"
     };
     (
         status,
-        Json(serde_json::json!({ "status": text, "contractVersion": version })),
+        Json(serde_json::json!({
+            "status": text,
+            "contractVersion": version,
+            "indexerLag": indexer_lag,
+        })),
     )
 }
 
@@ -1049,6 +1095,100 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["status"], "database unavailable");
         assert!(payload["contractVersion"].is_string());
+    }
+
+    #[tokio::test]
+    async fn ready_returns_503_when_indexer_lag_exceeds_threshold() {
+        std::env::set_var(CURRENT_LEDGER_ENV, "1000");
+        std::env::set_var(MAX_INDEXER_LAG_LEDGERS_ENV, "50");
+        std::env::set_var("CONTRACT_ID", "test-contract");
+
+        let shared_db = crate::db::new_shared_db();
+        let idempotency = crate::db::new_shared_idempotency_store();
+        let (bounty_broadcast, _) = tokio::sync::broadcast::channel(10);
+        let state = std::sync::Arc::new(super::AppState {
+            db: shared_db,
+            postgres: None,
+            idempotency,
+            rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
+            bounty_broadcast,
+            leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
+            webhook_guard: Default::default(),
+            sse_limiter: Default::default(),
+        });
+
+        let app = axum::Router::new()
+            .route("/ready", axum::routing::get(super::ready))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // With postgres: None, the lag check is skipped (no pool), so DB
+        // reachability alone determines the result.
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "no postgres pool means lag check is skipped"
+        );
+
+        std::env::remove_var(CURRENT_LEDGER_ENV);
+        std::env::remove_var(MAX_INDEXER_LAG_LEDGERS_ENV);
+        std::env::remove_var("CONTRACT_ID");
+    }
+
+    #[tokio::test]
+    async fn ready_returns_200_when_indexer_lag_is_within_threshold() {
+        std::env::set_var(CURRENT_LEDGER_ENV, "1000");
+        std::env::set_var(MAX_INDEXER_LAG_LEDGERS_ENV, "200");
+        std::env::set_var("CONTRACT_ID", "test-contract");
+
+        let shared_db = crate::db::new_shared_db();
+        let idempotency = crate::db::new_shared_idempotency_store();
+        let (bounty_broadcast, _) = tokio::sync::broadcast::channel(10);
+        let state = std::sync::Arc::new(super::AppState {
+            db: shared_db,
+            postgres: None,
+            idempotency,
+            rate_limiter: crate::routes::tx::new_shared_rate_limiter(),
+            bounty_broadcast,
+            leaderboard_cache: crate::routes::leaderboard::new_leaderboard_cache(),
+            sse_keep_alive_duration: std::time::Duration::from_secs(15),
+            webhook_guard: Default::default(),
+            sse_limiter: Default::default(),
+        });
+
+        let app = axum::Router::new()
+            .route("/ready", axum::routing::get(super::ready))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "no postgres pool means lag check is skipped, DB healthy => 200"
+        );
+
+        std::env::remove_var(CURRENT_LEDGER_ENV);
+        std::env::remove_var(MAX_INDEXER_LAG_LEDGERS_ENV);
+        std::env::remove_var("CONTRACT_ID");
     }
 
     #[tokio::test]

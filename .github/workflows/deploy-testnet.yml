@@ -62,7 +62,7 @@ jobs:
           echo "::warning::${msg}; skipping testnet deploy."
           echo "Testnet deploy skipped: \`STELLAR_DEPLOYER_SECRET_KEY\` is not configured." >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.secret.outputs.configured == 'true'
 
       - name: Install Rust toolchain from rust-toolchain.toml
@@ -71,7 +71,7 @@ jobs:
 
       - name: Cache cargo registry and wasm build artifacts
         if: steps.secret.outputs.configured == 'true'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -137,7 +137,7 @@ jobs:
 
       - name: Upload contract ID artifact
         if: steps.secret.outputs.configured == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: testnet-contract-id
           path: |
