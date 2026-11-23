@@ -90,6 +90,25 @@ pub enum ContractError {
     /// A state-mutating entrypoint was called while the admin has the
     /// contract paused.
     ContractPaused = 62,
+    /// A `BytesN<32>` hash argument (work submission or dispute evidence)
+    /// was the all-zero sentinel value, which is never a valid hash.
+    ZeroHash = 63,
+    /// The supplied dispute evidence hash is already recorded for this
+    /// dispute; re-submitting it would consume the party's evidence quota
+    /// without adding new information.
+    DuplicateEvidence = 64,
+    /// `pause` was called while the contract was already paused.
+    AlreadyPaused = 65,
+    /// `unpause` was called while the contract was not paused.
+    NotPaused = 66,
+}
+
+/// Convert a `ContractError` to its canonical panic message and panic.
+// The one sanctioned panic: every typed contract error funnels through here.
+#[allow(clippy::panic)]
+#[inline(never)]
+pub fn fail(e: ContractError) -> ! {
+    panic!("{}", message(e))
 }
 
 /// Convert a `ContractError` to its canonical human-readable message.
@@ -175,5 +194,9 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::OwnerCannotBeCreator => "new owner cannot be the current creator",
         ContractError::NoPendingOwner => "no pending ownership transfer for this bounty",
         ContractError::ContractPaused => "contract is paused",
+        ContractError::ZeroHash => "hash must not be all zero",
+        ContractError::DuplicateEvidence => "dispute evidence hash already recorded",
+        ContractError::AlreadyPaused => "contract is already paused",
+        ContractError::NotPaused => "contract is not paused",
     }
 }
