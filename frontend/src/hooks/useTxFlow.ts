@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { SubmitResult, NetworkName } from "../lib/types";
+import { generateIdempotencyKey } from "../lib/api";
 
 interface TxFlowState {
   pending: boolean;
@@ -7,6 +8,8 @@ interface TxFlowState {
   result: SubmitResult | null;
   /** True while `result` is a locally-assumed value that hasn't been confirmed on-chain yet. */
   optimistic: boolean;
+  /** Active idempotency key associated with the current or most recent submission attempt. */
+  idempotencyKey?: string | null;
 }
 
 const IDLE_STATE: TxFlowState = {
@@ -14,6 +17,7 @@ const IDLE_STATE: TxFlowState = {
   error: null,
   result: null,
   optimistic: false,
+  idempotencyKey: null,
 };
 
 /**
@@ -43,34 +47,47 @@ export function buildFailedState(message: string): TxFlowState {
   return { pending: false, error: message, result: null, optimistic: false };
 }
 
-type Submit = () => Promise<{ hash: string; ledger?: number }>;
+type Submit = (context?: { idempotencyKey: string }) => Promise<{ hash: string; ledger?: number }>;
 
 export function useTxFlow(network: NetworkName) {
   const [state, setState] = useState<TxFlowState>(IDLE_STATE);
+  const inFlightRef = useRef(false);
   const [lastSubmit, setLastSubmit] = useState<{
     submit: Submit;
     optimisticResult?: Omit<SubmitResult, "network">;
+    idempotencyKey: string;
   } | null>(null);
 
-  async function run(submit: Submit, optimisticResult?: Omit<SubmitResult, "network">) {
-    setLastSubmit({ submit, optimisticResult });
-    setState(buildOptimisticState(network, optimisticResult));
+  async function run(
+    submit: Submit,
+    optimisticResult?: Omit<SubmitResult, "network">,
+    existingIdempotencyKey?: string
+  ) {
+    if (inFlightRef.current) {
+      throw new Error("Transaction submission already in progress");
+    }
+    inFlightRef.current = true;
+    const idempotencyKey = existingIdempotencyKey ?? generateIdempotencyKey();
+    setLastSubmit({ submit, optimisticResult, idempotencyKey });
+    setState({ ...buildOptimisticState(network, optimisticResult), idempotencyKey });
     try {
-      const { hash, ledger } = await submit();
+      const { hash, ledger } = await submit({ idempotencyKey });
       const result: SubmitResult = { hash, network, ledger };
-      setState(buildConfirmedState(result));
+      setState({ ...buildConfirmedState(result), idempotencyKey });
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Transaction failed";
-      setState(buildFailedState(message));
+      setState({ ...buildFailedState(message), idempotencyKey });
       throw err;
+    } finally {
+      inFlightRef.current = false;
     }
   }
 
-  /** Re-invokes the most recent submit call, e.g. from a "Retry" action after a failure. */
+  /** Re-invokes the most recent submit call, reusing its idempotency key. */
   async function retry() {
-    if (!lastSubmit) return undefined;
-    return run(lastSubmit.submit, lastSubmit.optimisticResult);
+    if (!lastSubmit || inFlightRef.current) return undefined;
+    return run(lastSubmit.submit, lastSubmit.optimisticResult, lastSubmit.idempotencyKey);
   }
 
   return { ...state, run, retry };

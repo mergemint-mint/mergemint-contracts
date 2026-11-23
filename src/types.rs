@@ -203,6 +203,9 @@ pub struct PendingResolution {
     pub decided_at: u32,
 }
 
+/// Maximum number of milestones a bounty may carry to prevent unbounded vector metering.
+pub const MAX_MILESTONES: u32 = 20;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct Milestone {
@@ -319,4 +322,18 @@ impl Contributor {
             metadata: None,
         }
     }
+}
+
+/// Splits `reward` evenly across `count` assignees.
+///
+/// Returns `(share, dust)`; `dust` is the remainder kept explicit so escrow
+/// stays balanced. With `count == 0` the whole reward is returned as dust.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn split_reward(reward: i128, count: u32) -> (i128, i128) {
+    if count == 0 {
+        return (0, reward);
+    }
+    let n = count as i128;
+    let share = reward / n;
+    (share, reward - share * n)
 }

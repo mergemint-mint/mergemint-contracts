@@ -1,8 +1,9 @@
 import React from 'react';
 import { BountyStatus } from '../types';
 
-const STATUS_LABELS: Record<BountyStatus, string> = {
+export const STATUS_LABELS: Record<BountyStatus, string> = {
   open: 'Open',
+  claimed: 'Claimed',
   in_progress: 'In Progress',
   submitted: 'Submitted',
   disputed: 'Disputed',
@@ -10,18 +11,48 @@ const STATUS_LABELS: Record<BountyStatus, string> = {
   cancelled: 'Cancelled',
   expired: 'Expired',
   archived: 'Archived',
+  paused: 'Paused',
 };
 
-export function StatusBadge({ status }: { status: BountyStatus }) {
-  const label = STATUS_LABELS[status] ?? status;
+export function StatusBadge({
+  status,
+  label,
+}: {
+  status: BountyStatus;
+  label?: string;
+}) {
+  const displayLabel = label ?? STATUS_LABELS[status] ?? status;
   return (
     <span
       className={`status-badge status-badge--${status}`}
       role="status"
-      aria-label={label}
+      aria-label={displayLabel}
       data-status={status}
     >
-      {label}
+      {displayLabel}
     </span>
+  );
+}
+
+export function PausedContractNotice({
+  paused,
+  title = 'Contract paused',
+  message = 'The smart contract is currently paused by an administrator. State-changing bounty actions are temporarily unavailable.',
+}: {
+  paused?: boolean;
+  title?: string;
+  message?: string;
+}) {
+  if (!paused) return null;
+  return (
+    <div
+      className="contract-paused-banner"
+      role="status"
+      aria-live="polite"
+      data-testid="contract-paused-notice"
+    >
+      <strong className="contract-paused-banner__title">{title}:</strong>{' '}
+      <span className="contract-paused-banner__message">{message}</span>
+    </div>
   );
 }
