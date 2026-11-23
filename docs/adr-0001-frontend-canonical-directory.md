@@ -36,3 +36,12 @@ This ADR does not itself move code; it unblocks follow-up issues to do so safely
 4. Update `mergemint-backend`'s CORS/allowed-origin configuration, if any, to match `frontend/`'s dev/prod origins once it's the only frontend being deployed.
 
 Each step above should land as its own PR so review stays scoped to one directory at a time.
+
+## Deprecation status
+
+`mergemint-frontend/` is **deprecated** and slated for removal per step 1 above. Until it is deleted:
+
+- It is **not** a build, test, or deploy target. The canonical package is `frontend/` (npm name `mergemint-frontend`).
+- Its nested `.github/workflows/test.yml` is inert (GitHub Actions only reads workflows from the repository root `.github/workflows/`) and must not be relied on for CI signal.
+- New frontend work, scripts, Dockerfiles, and CI jobs must target `frontend/` only. Do not add features or fixes to `mergemint-frontend/`; port anything still needed into `frontend/` instead.
+- Root `package.json` scripts (e.g. `dev:frontend`) and `docker-compose.yml` must reference `frontend/`, not `mergemint-frontend/`.

@@ -11,7 +11,7 @@ export interface TopUpModalProps {
   walletBalance?: string | number;
   isCreator?: boolean;
   pending?: boolean;
-  onTopUp: (amount: string) => Promise<void | unknown>;
+  onTopUp: (amount: string, bountyId: string) => Promise<void | unknown>;
 }
 
 interface ParsedReward {
@@ -158,7 +158,7 @@ export function TopUpModal({
       setSubmitError(null);
       setInternalPending(true);
       try {
-        await onTopUp(amount.trim());
+        await onTopUp(amount.trim(), bountyId);
         onClose();
       } catch (err) {
         setSubmitError(mapErrorMessage(err instanceof Error ? err.message : String(err)));
@@ -166,7 +166,7 @@ export function TopUpModal({
         setInternalPending(false);
       }
     },
-    [canSubmit, onTopUp, amount, onClose]
+    [canSubmit, onTopUp, amount, bountyId, onClose]
   );
 
   if (!isOpen) {
