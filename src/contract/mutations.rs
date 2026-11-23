@@ -104,6 +104,11 @@ fn generate_bounty_id(env: &Env, count: u64) -> BountyId {
     BountyId(BytesN::from_array(env, &buf))
 }
 
+/// Returns `true` when every byte of `hash` is zero (the all-zero sentinel).
+fn is_zero_hash(hash: &BytesN<32>) -> bool {
+    hash.to_array().iter().all(|b| *b == 0)
+}
+
 /// Probe `reward_token` by invoking the SEP-41 `balance` method. Non-token
 /// addresses must fail closed with `InvalidRewardToken` instead of trapping.
 fn validate_reward_token(env: &Env, reward_token: &Address) -> Result<(), ContractError> {
@@ -1194,6 +1199,98 @@ pub fn sponsor_bounty(env: Env, sponsor: Address, bounty_id: BountyId, amount: i
         None => fail(ContractError::BountyNotFound),
     };
 
+        let window = storage::get_appeal_window(&env);
+        if env.ledger().sequence() >= pending.decided_at + window {
+            fail(ContractError::AppealWindowClosed);
+        }
+
+        storage::remove_pending_resolution(&env, &bounty_id);
+        storage::set_dispute_appealed(&env, &bounty_id);
+
+        events::emit_dispute_appealed(&env, &bounty_id, &caller);
+    }
+
+    /// Set the admin-configurable appeal window, in ledgers, that follows a
+    /// dispute decision before it can be finalized. A value of `0` keeps the
+    /// original immediate-payout behaviour (the default).
+    ///
+    /// Uses the same lazily-established admin as the other admin entrypoints.
+    ///
+    /// # Authorization
+    /// Requires auth from `caller`. Restricted to the contract admin once one
+    /// has been established.
+    pub fn set_appeal_window(env: Env, caller: Address, ledgers: u32) {
+        caller.require_auth();
+        require_not_paused(&env);
+
+        match storage::get_admin(&env) {
+            Some(admin) => {
+                if caller != admin {
+                    fail(ContractError::NotAdmin);
+                }
+            }
+            None => storage::set_admin(&env, &caller),
+        }
+
+        let old = storage::get_appeal_window(&env);
+        storage::set_appeal_window(&env, ledgers);
+        events::emit_config_changed_u32(&env, "appeal_window", old, ledgers);
+    }
+
+    /// Attach an evidence hash to an open dispute.
+    ///
+    /// Only the bounty creator or an assignee may call this. Evidence can no
+    /// longer be added once the dispute has been resolved (status is no
+    /// longer `"disputed"`), and at most `storage::MAX_DISPUTE_EVIDENCE`
+    /// entries are retained per dispute.
+    ///
+    /// # Arguments
+    /// * `caller` - The creator or an assignee of the disputed bounty.
+    /// * `bounty_id` - The disputed bounty.
+    /// * `hash` - A 32-byte hash referencing off-chain evidence.
+    ///
+    /// # Panics
+    /// * If `bounty_id` does not exist.
+    /// * If the bounty is not currently in `"disputed"` status.
+    /// * If `caller` is neither the creator nor an assignee.
+    /// * If the evidence cap has already been reached.
+    ///
+    /// # Authorization
+    /// Requires auth from `caller`.
+    pub fn add_dispute_evidence(env: Env, caller: Address, bounty_id: BountyId, hash: BytesN<32>) {
+        caller.require_auth();
+        require_not_paused(&env);
+
+        let bounty = match storage::get_bounty(&env, &bounty_id) {
+            Some(b) => b,
+            None => fail(ContractError::BountyNotFound),
+        };
+
+        if bounty.status != Symbol::new(&env, STATUS_DISPUTED) {
+            fail(ContractError::DisputeAlreadyResolved);
+        }
+
+        let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == caller);
+        if caller != bounty.creator && !is_assignee {
+            fail(ContractError::OnlyPartyCanAddEvidence);
+        }
+
+        if is_zero_hash(&hash) {
+            fail(ContractError::ZeroHash);
+        }
+
+        let existing = storage::get_dispute_evidence(&env, &bounty_id);
+        if existing.iter().any(|h| h == hash) {
+            fail(ContractError::DuplicateEvidence);
+        }
+        if existing.len() >= storage::MAX_DISPUTE_EVIDENCE {
+            fail(ContractError::EvidenceLimitReached);
+        }
+
+        storage::append_dispute_evidence(&env, &bounty_id, &hash);
+        events::emit_dispute_evidence_added(&env, &bounty_id, &caller, &hash);
+    }
+
     if amount <= 0 {
         fail(ContractError::AmountMustBePositive);
     }
@@ -1321,13 +1418,15 @@ pub fn sponsor_bounty(env: Env, sponsor: Address, bounty_id: BountyId, amount: i
             storage::remove_tag_bounty(&env, &tag, &bounty_id);
         }
 
+        if is_zero_hash(&submission_hash) {
+            fail(ContractError::ZeroHash);
+        }
+
+        storage::set_submission(&env, &bounty_id, &submission_hash);
+
     events::emit_bounty_sponsored(&env, &bounty_id, &sponsor, &amount, &bounty.reward_amount);
 }
-```
 
-Now for `reopen_bounty`:
-
-```rust
 pub fn reopen_bounty(env: Env, creator: Address, bounty_id: BountyId, new_deadline: u32) {
     creator.require_auth();
     require_not_paused(&env);
@@ -1454,12 +1553,39 @@ pub fn reopen_bounty(env: Env, creator: Address, bounty_id: BountyId, new_deadli
         }
     }
 
+    /// Pause the contract. While paused every state-mutating entrypoint
+    /// (except those in `PAUSE_EXEMPT_ENTRYPOINTS`) fails with
+    /// `ContractError::ContractPaused`; queries keep working.
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn pause(env: Env, admin: Address) {
+        require_admin(&env, &admin);
+        if storage::is_paused(&env) {
+            fail(ContractError::AlreadyPaused);
+        }
+        storage::set_paused(&env, true);
+        events::emit_contract_paused(&env, &admin);
+    }
+
+    /// Lift a pause set by `pause`.
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn unpause(env: Env, admin: Address) {
+        require_admin(&env, &admin);
+        if !storage::is_paused(&env) {
+            fail(ContractError::NotPaused);
+        }
+        storage::set_paused(&env, false);
+        events::emit_contract_unpaused(&env, &admin);
+    }
+
     bounty.deadline = Some(new_deadline);
     storage::store_bounty(&env, &bounty_id, &bounty);
 
     events::emit_bounty_reopened(&env, &bounty_id, &creator, new_deadline);
 }
-```
 
 Now let me write the full file. I need to be very careful to preserve everything.
 
@@ -1467,6 +1593,19 @@ Let me also double-check the `claim_bounty` change. After `storage::store_contri
 ```rust
 storage::set_contributor_active_bounty(&env, &contributor, &bounty_id);
 ```
+
+    /// Add a token to the on-chain reward-token allowlist. Only tokens on
+    /// this list may be used as `reward_token` in `create_bounty`.
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn add_reward_token(env: Env, admin: Address, token: Address) {
+        require_admin(&env, &admin);
+        require_not_paused(&env);
+        validate_reward_token(&env, &token);
+        storage::add_allowed_reward_token(&env, &token);
+        events::emit_reward_token_added(&env, &admin, &token);
+    }
 
 For `unclaim_bounty`, after `storage::store_contributor(&env, &contributor, &contrib);`, add:
 ```rust
@@ -1500,7 +1639,23 @@ Actually wait, for `cancel_bounty` and `expire_bounty`, these only work on open 
 
 Hmm, but actually, is there a scenario where an open bounty has assignees? No, because `unclaim_bounty` sets status to open only when assignees becomes empty. And `release_stale_claim` sets assignees to empty before setting open. So open bounties never have assignees. But defensive is fine.
 
-Actually, let me reconsider. The requirement says "remove it on `unclaim_bounty`, `release_stale_claim`, completion, cancellation, and dispute resolution". So cancellation should remove it. Even though open bounties have no assignees, let me add it for safety.
+    /// Set the minimum `reward_amount` accepted by `create_bounty` for
+    /// bounties paid in `token`. Applies on top of the global
+    /// `MIN_REWARD_AMOUNT`; `0` removes the per-token minimum.
+    ///
+    /// # Authorization
+    /// Admin-only; requires auth from `admin`.
+    pub fn set_min_reward(env: Env, admin: Address, token: Address, amount: i128) {
+        require_admin(&env, &admin);
+        require_not_paused(&env);
+        if amount < 0 {
+            fail(ContractError::AmountMustBePositive);
+        }
+        validate_reward_token(&env, &token);
+        let old = storage::get_min_reward(&env, &token);
+        storage::set_min_reward(&env, &token, amount);
+        events::emit_config_changed_min_reward(&env, &token, old, amount);
+    }
 
 OK, writing the full file now.
 
