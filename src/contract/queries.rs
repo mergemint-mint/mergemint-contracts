@@ -134,13 +134,24 @@ impl MergeMintContract {
     /// list pages that would otherwise call `get_bounty` once per card.
     ///
     /// Unknown IDs are skipped (not included in the result, not an error).
+    /// Never-allocated IDs are skipped; archived bounties fall back to a
+    /// degenerate `BountyMeta` reconstructed from the `BountySummary` (empty
+    /// title/description), consistent with `get_bounty`'s archive fallback.
     /// The number of IDs processed per call is capped at `MAX_LIMIT` (50);
     /// any IDs beyond the cap are ignored.
     pub fn get_bounties_by_ids(env: Env, ids: Vec<BountyId>) -> Vec<BountyMeta> {
         let mut result: Vec<BountyMeta> = Vec::new(&env);
         for id in ids.iter().take(MAX_LIMIT as usize) {
+            if !storage::bounty_id_was_allocated(&env, &id) {
+                continue;
+            }
             if let Some(meta) = storage::get_bounty_meta(&env, &id) {
                 result.push_back(meta);
+            } else if storage::get_bounty_archive(&env, &id).is_some() {
+                result.push_back(BountyMeta {
+                    title: String::new(&env),
+                    description: String::new(&env),
+                });
             }
         }
         result
@@ -412,6 +423,17 @@ impl MergeMintContract {
         paginate(&env, all, cursor, limit)
     }
 
+    /// Return the total number of bounties created by `creator`.
+    ///
+    /// O(1): reads a single persistent counter maintained alongside the
+    /// `DataKey::ContributorBounties(creator)` index, so callers can render
+    /// total page counts without scanning every page. Mirrors
+    /// `get_open_bounties_count` and `get_status_count`. Returns `0` for an
+    /// address that has never created a bounty.
+    pub fn get_bounties_by_creator_count(env: Env, creator: Address) -> u32 {
+        storage::get_creator_bounties_count(&env, &creator)
+    }
+
     /// Return a bounded page of bounty IDs paid in a specific reward token.
     ///
     /// `cursor` is the zero-based offset; `limit` capped at `MAX_LIMIT` (50),
@@ -433,6 +455,17 @@ impl MergeMintContract {
     ) -> (Vec<BountyId>, Option<u32>) {
         let all = storage::get_token_bounties(&env, &token);
         paginate(&env, all, cursor, limit)
+    }
+
+    /// Return the total number of bounties paid in `token`.
+    ///
+    /// O(1): reads a single persistent counter maintained alongside the
+    /// `DataKey::TokenBounties(token)` index, so callers can render total
+    /// page counts without scanning every page. Mirrors
+    /// `get_open_bounties_count` and `get_status_count`. Returns `0` for a
+    /// token that has never been used as a `reward_token`.
+    pub fn get_bounties_by_token_count(env: Env, token: Address) -> u32 {
+        storage::get_token_bounties_count(&env, &token)
     }
 
     /// Return the admin-configured cap on concurrent open+claimed bounties
@@ -490,13 +523,31 @@ impl MergeMintContract {
 
     /// Return the pending (undecided-until-finalized) dispute resolution for
     /// `bounty_id`, if one has been recorded.
+    ///
+    /// Read-only. Returns `None` when no resolution is pending (the default,
+    /// including for never-allocated IDs). Lets UIs and indexers compute the
+    /// remaining appeal-window countdown from `recorded_at_ledger` and
+    /// `get_appeal_window` without scanning events.
     pub fn get_pending_resolution(env: Env, bounty_id: BountyId) -> Option<PendingResolution> {
         storage::get_pending_resolution(&env, &bounty_id)
     }
 
     /// Return whether `bounty_id`'s dispute has already used its one
     /// allowed appeal.
+    ///
+    /// Read-only. Returns `false` when no appeal has been recorded (the
+    /// default, including for never-allocated IDs).
     pub fn get_dispute_appealed(env: Env, bounty_id: BountyId) -> bool {
         storage::get_dispute_appealed(&env, &bounty_id)
+    }
+
+    /// Return the ledger sequence at which `bounty_id` was most recently
+    /// claimed, or `None` if it has never been claimed.
+    ///
+    /// Read-only. Combined with `get_claim_window`, lets clients compute the
+    /// exact stale-claim countdown (`claimed_at_ledger + claim_window`) used
+    /// by `release_stale_claim` without scanning events.
+    pub fn get_claimed_at_ledger(env: Env, bounty_id: BountyId) -> Option<u32> {
+        storage::get_claimed_at_ledger(&env, &bounty_id)
     }
 }
