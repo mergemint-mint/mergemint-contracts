@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 9d16967058509031a5377e32853dfbc63f58654a0d30aa581d04ff31a82a0f21 # shrinks to ops = [(2, 0), (0, 3)]
+cc 6b771f39cc604c0ad8b941d1941c4f588e6c49a13894a4adb45d6f0ac0fa26d8 # shrinks to rewards = [101, 101, 101], max_assignees = [1, 1, 1], ops = [Sponsor { bounty: 1, sponsor: 0, amount: 101 }, Cancel { bounty: 0 }]

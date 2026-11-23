@@ -1,25 +1,30 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.0;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
+import "./IBountyManager.sol";
 
 /**
  * @title BountyRefresh
  * @dev Handles batch and parallel refresh of contributor bounties
  */
-contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
+contract BountyRefresh is Ownable2Step, ReentrancyGuard, Pausable {
     error InvalidBatchSize();
     error BatchDoesNotExist();
     error UnauthorizedCaller();
     error InvalidContributor();
     error InvalidBountyId();
+    error DuplicateRefreshPair();
     error ContributorsAndBountyIdsMismatch();
     error EmptyBatch();
     error BatchAlreadyProcessing();
     error BatchAlreadyCompleted();
     error BatchNotProcessing();
+    error InvalidChunk();
+    error TaskDoesNotExist();
+    error BatchNotFullyProcessed();
 
     // Constants
     uint256 public constant MAX_BATCH_SIZE = 100;
@@ -34,6 +39,10 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     uint256 public batchCounter;
 
     // Structs
+    // NOTE: the struct layouts below are returned verbatim by getTask/getBatch
+    // and the public getters, so narrowing/reordering fields (e.g. uint64
+    // timestamps, packed bools) would change the external ABI. Packing is
+    // intentionally deferred to a versioned ABI change.
     struct BountyRefreshTask {
         uint256 id;
         address contributor;
@@ -55,6 +64,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         uint256 failureCount;
         bool isProcessing;
         bool isCompleted;
+        uint256 nextIndex;
     }
 
     // Events
@@ -63,6 +73,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     event BatchProcessingCompleted(uint256 indexed batchId, uint256 successCount, uint256 failureCount);
     event TaskCompleted(uint256 indexed taskId, address indexed contributor, uint256 indexed bountyId, bool success);
     event TaskFailed(uint256 indexed taskId, address indexed contributor, string reason);
+    event BatchChunkProcessed(uint256 indexed batchId, uint256 startIndex, uint256 endIndex);
     event ParallelRefreshStarted(uint256 indexed batchId, uint256 parallelCount);
     /// @notice Emitted each time a failed task is retried.
     /// @param attempt The retry attempt number, starting at 1 for the first retry.
@@ -93,9 +104,21 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     function createBatch(
         address[] calldata contributors,
         uint256[] calldata bountyIds
-    ) external onlyOwner validBatchSize(contributors.length) returns (uint256) {
+    ) external onlyOwner whenNotPaused validBatchSize(contributors.length) returns (uint256) {
         if (contributors.length != bountyIds.length) revert ContributorsAndBountyIdsMismatch();
         if (contributors.length == 0) revert EmptyBatch();
+
+        // Reject malformed entries up front so they cannot revert the whole
+        // processBatchParallel call after batch creation gas has been spent.
+        for (uint256 i = 0; i < contributors.length; ++i) {
+            if (contributors[i] == address(0)) revert InvalidContributor();
+            if (bountyIds[i] == 0) revert InvalidBountyId();
+            for (uint256 j = i + 1; j < contributors.length; ++j) {
+                if (contributors[i] == contributors[j] && bountyIds[i] == bountyIds[j]) {
+                    revert DuplicateRefreshPair();
+                }
+            }
+        }
 
         uint256 batchId = batchCounter++;
         RefreshBatch storage batch = batches[batchId];
@@ -143,10 +166,18 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
             _processRefreshTask(
                 batchId,
                 contributors[i],
-                bountyIds[i],
-                i
+                bountyIds[i]
             );
         }
+        uint256 batchLength = batch.contributors.length;
+        uint256 end = startIndex + count;
+        if (end > batchLength) end = batchLength;
+
+        for (uint256 i = startIndex; i < end; ++i) {
+            _processRefreshTask(batchId, batch.contributors[i], batch.bountyIds[i], i);
+        }
+        batch.nextIndex = end;
+        emit BatchChunkProcessed(batchId, startIndex, end);
     }
 
     /**
@@ -155,7 +186,6 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
      * @param batchId The batch ID
      * @param contributor The contributor address
      * @param bountyId The bounty ID
-     * @param index The index in the batch
      */
     // The only external call here is `this._executeRefresh`, a self-call to an
     // onlySelf function reached from the nonReentrant processBatchParallel, so
@@ -164,8 +194,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     function _processRefreshTask(
         uint256 batchId,
         address contributor,
-        uint256 bountyId,
-        uint256 index
+        uint256 bountyId
     ) internal {
         if (contributor == address(0)) revert InvalidContributor();
         if (bountyId == 0) revert InvalidBountyId();
@@ -195,9 +224,11 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
                 emit TaskCompleted(taskId, contributor, bountyId, true);
                 return;
             } catch Error(string memory err) {
-                reason = err;
-            } catch {
-                reason = "Unknown error";
+                reason = bytes(err).length > MAX_ERROR_LENGTH ? string(abi.encodePacked(_slice(bytes(err)))) : err;
+            } catch Panic(uint256 code) {
+                reason = string.concat("Panic(", _toString(code), ")");
+            } catch (bytes memory data) {
+                reason = _describeRevert(data);
             }
         }
 
@@ -205,6 +236,45 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         task.errorMessage = reason;
         batches[batchId].failureCount++;
         emit TaskFailed(taskId, contributor, reason);
+    }
+
+    uint256 public constant MAX_ERROR_LENGTH = 100;
+
+    /// @dev Decode custom-error revert data into a bounded reason string.
+    function _describeRevert(bytes memory data) internal pure returns (string memory) {
+        if (data.length < 4) return "Unknown error";
+        bytes4 selector;
+        assembly {
+            selector := mload(add(data, 32))
+        }
+        return string.concat("CustomError(0x", _toHex(selector), ")");
+    }
+
+    function _slice(bytes memory b) private pure returns (bytes memory out) {
+        out = new bytes(MAX_ERROR_LENGTH);
+        for (uint256 i = 0; i < MAX_ERROR_LENGTH; ++i) out[i] = b[i];
+    }
+
+    function _toHex(bytes4 v) private pure returns (string memory) {
+        bytes memory h = "0123456789abcdef";
+        bytes memory out = new bytes(8);
+        for (uint256 i = 0; i < 4; ++i) {
+            out[2 * i] = h[uint8(v[i]) >> 4];
+            out[2 * i + 1] = h[uint8(v[i]) & 0x0f];
+        }
+        return string(out);
+    }
+
+    function _toString(uint256 v) private pure returns (string memory) {
+        if (v == 0) return "0";
+        uint256 len;
+        for (uint256 t = v; t != 0; t /= 10) ++len;
+        bytes memory out = new bytes(len);
+        while (v != 0) {
+            out[--len] = bytes1(uint8(48 + (v % 10)));
+            v /= 10;
+        }
+        return string(out);
     }
 
     /**
@@ -219,11 +289,30 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         virtual
         onlySelf
     {
-        // This is a placeholder for the actual refresh logic
-        // In production, this would call the actual bounty refresh mechanism
         require(contributor != address(0), "Invalid contributor");
         require(bountyId > 0, "Invalid bounty ID");
-        // Actual refresh implementation goes here
+        // When no manager is configured the refresh is a no-op. A reverting
+        // manager is caught and retried by _processRefreshTask.
+        if (address(bountyManager) != address(0)) {
+            bountyManager.updateContributorMetrics(contributor, bountyId);
+        }
+    }
+
+    /// @notice Configured bounty manager that receives metric updates.
+    IBountyManager public bountyManager;
+
+    error InvalidBountyManager();
+
+    event BountyManagerUpdated(address indexed previousManager, address indexed newManager);
+
+    /**
+     * @dev Set the bounty manager used by _executeRefresh.
+     * @param newManager Non-zero address of an IBountyManager implementation
+     */
+    function setBountyManager(address newManager) external onlyOwner {
+        if (newManager == address(0)) revert InvalidBountyManager();
+        emit BountyManagerUpdated(address(bountyManager), newManager);
+        bountyManager = IBountyManager(newManager);
     }
 
     /**
@@ -233,11 +322,13 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
     function finalizeBatch(uint256 batchId)
         external
         onlyOwner
+        whenNotPaused
         batchExists(batchId)
     {
         RefreshBatch storage batch = batches[batchId];
         if (!batch.isProcessing) revert BatchNotProcessing();
         if (batch.isCompleted) revert BatchAlreadyCompleted();
+        if (batch.nextIndex < batch.contributors.length) revert BatchNotFullyProcessed();
 
         batch.isProcessing = false;
         batch.isCompleted = true;
@@ -274,6 +365,7 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         view
         returns (BountyRefreshTask memory)
     {
+        if (taskId >= taskCounter) revert TaskDoesNotExist();
         return refreshTasks[taskId];
     }
 
@@ -288,6 +380,30 @@ contract BountyRefresh is Ownable, ReentrancyGuard, Pausable {
         returns (uint256[] memory)
     {
         return contributorTasks[contributor];
+    }
+
+    /// @dev Number of tasks recorded for a contributor.
+    function getContributorTaskCount(address contributor) external view returns (uint256) {
+        return contributorTasks[contributor].length;
+    }
+
+    /**
+     * @dev Paginated task IDs for a contributor. Out-of-range offsets return an empty array.
+     */
+    function getContributorTasks(address contributor, uint256 offset, uint256 limit)
+        external
+        view
+        returns (uint256[] memory page)
+    {
+        uint256[] storage ids = contributorTasks[contributor];
+        uint256 total = ids.length;
+        if (offset >= total || limit == 0) return new uint256[](0);
+        uint256 end = offset + limit;
+        if (end > total || end < offset) end = total;
+        page = new uint256[](end - offset);
+        for (uint256 i = offset; i < end; ++i) {
+            page[i - offset] = ids[i];
+        }
     }
 
     /**

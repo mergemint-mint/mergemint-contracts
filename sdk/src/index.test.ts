@@ -1,6 +1,13 @@
-import { nativeToScVal } from "@stellar/stellar-sdk";
-import { MergeMintSDK, symbolToScVal, TESTNET } from "./index";
+import { nativeToScVal, xdr } from "@stellar/stellar-sdk";
+import {
+  MergeMintSDK,
+  optionU32ToScVal,
+  optionVecAddressToScVal,
+  symbolToScVal,
+  TESTNET,
+} from "./index";
 import { MergeMintSdkError } from "./types";
+import { parseSimulationError } from "./errors";
 
 describe("symbolToScVal", () => {
   it("throws for a 33-character input", () => {
@@ -13,6 +20,51 @@ describe("symbolToScVal", () => {
   it("passes for exactly 32 characters", () => {
     const value = "a".repeat(32);
     expect(() => symbolToScVal(value)).not.toThrow();
+  });
+});
+
+describe("optionU32ToScVal", () => {
+  it("encodes Some(v) as the bare inner u32 ScVal", () => {
+    const encoded = optionU32ToScVal(42);
+    expect(encoded.switch().name).toBe("scvU32");
+    expect(encoded).toEqual(nativeToScVal(42, { type: "u32" }));
+  });
+
+  it("encodes None as scvVoid", () => {
+    expect(optionU32ToScVal(null).switch().name).toBe("scvVoid");
+    expect(optionU32ToScVal(undefined).switch().name).toBe("scvVoid");
+  });
+});
+
+describe("optionVecAddressToScVal", () => {
+  const ADDR_A = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  const ADDR_B = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+  it("encodes Some(vec) as a bare scvVec of address ScVals", () => {
+    const encoded = optionVecAddressToScVal([ADDR_A]);
+    expect(encoded.switch().name).toBe("scvVec");
+    const inner = encoded.vec();
+    expect(inner).not.toBeNull();
+    expect(inner).toHaveLength(1);
+    expect(inner?.[0].switch().name).toBe("scvAddress");
+  });
+
+  it("encodes an empty vec as Some(vec![])", () => {
+    const encoded = optionVecAddressToScVal([]);
+    expect(encoded.switch().name).toBe("scvVec");
+    expect(encoded.vec()).toHaveLength(0);
+  });
+
+  it("encodes None as scvVoid", () => {
+    expect(optionVecAddressToScVal(null).switch().name).toBe("scvVoid");
+    expect(optionVecAddressToScVal(undefined).switch().name).toBe("scvVoid");
+  });
+
+  it("round-trips through XDR base64", () => {
+    const encoded = optionVecAddressToScVal([ADDR_A, ADDR_B]);
+    const decoded = xdr.ScVal.fromXDR(encoded.toXDR());
+    expect(decoded.switch().name).toBe("scvVec");
+    expect(decoded.vec()).toHaveLength(2);
   });
 });
 
@@ -130,5 +182,32 @@ describe("MergeMintSDK constructor typed errors", () => {
       expect(err).toBeInstanceOf(MergeMintSdkError);
       expect((err as MergeMintSdkError).code).toBe("INVALID_RPC_URL");
     }
+  });
+});
+
+describe("parseSimulationError ContractError mapping", () => {
+  // Table of [contract error message, expected SDK error code].
+  const cases: Array<[string, string]> = [
+    ["ContractPaused", "CONTRACT_PAUSED"],
+    ["NotPendingAdmin", "NOT_PENDING_ADMIN"],
+    ["NotPendingOwner", "NOT_PENDING_OWNER"],
+    ["OwnerCannotBeAssignee", "OWNER_CANNOT_BE_ASSIGNEE"],
+    ["RewardTokenNotAllowed", "REWARD_TOKEN_NOT_ALLOWED"],
+    ["ClaimCooldownActive", "CLAIM_COOLDOWN_ACTIVE"],
+    ["AppealWindowClosed", "APPEAL_WINDOW_CLOSED"],
+    ["MilestoneDeadlinePassed", "MILESTONE_DEADLINE_PASSED"],
+    ["CorruptedIndex", "CORRUPTED_INDEX"],
+  ];
+
+  it.each(cases)("maps %s to %s", (message, expectedCode) => {
+    const err = parseSimulationError(`HostError: ${message}`);
+    expect(err).toBeInstanceOf(MergeMintSdkError);
+    expect((err as MergeMintSdkError).code).toBe(expectedCode);
+  });
+
+  it("falls back to SIMULATION_FAILED for an unknown message", () => {
+    const err = parseSimulationError("HostError: SomethingUnknown");
+    expect(err).toBeInstanceOf(MergeMintSdkError);
+    expect((err as MergeMintSdkError).code).toBe("SIMULATION_FAILED");
   });
 });
