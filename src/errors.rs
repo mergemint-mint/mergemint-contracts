@@ -50,51 +50,53 @@ pub enum ContractError {
     NotAllMilestonesCompleted = 31,
     InvalidMilestoneIndex = 32,
     MilestoneRewardsMismatch = 33,
-    RewardAmountOverflow = 34,
-    MetadataEmpty = 35,
-    NotAssignee = 36,
-    AmountMustBePositive = 37,
-    SubmissionRequired = 38,
-    DuplicateTag = 39,
-    CreatorLimitReached = 40,
-    NotAdmin = 41,
-    ClaimCooldownActive = 42,
-    OnlyPartyCanAddEvidence = 43,
-    EvidenceLimitReached = 44,
-    DisputeAlreadyResolved = 45,
-    NoPendingResolution = 46,
-    AppealWindowClosed = 47,
-    AlreadyAppealed = 48,
-    FinalizeTooEarly = 49,
-    ClaimWindowNotElapsed = 50,
-    NoActiveClaim = 51,
-    MilestoneDeadlineInvalid = 52,
-    MilestoneDeadlinePassed = 53,
-    AdminAlreadySet = 54,
-    RewardTokenNotAllowed = 55,
+    MilestoneRewardMustBePositive = 34,
+    TooManyMilestones = 35,
+    RewardAmountOverflow = 36,
+    MetadataEmpty = 37,
+    NotAssignee = 38,
+    AmountMustBePositive = 39,
+    SubmissionRequired = 40,
+    DuplicateTag = 41,
+    CreatorLimitReached = 42,
+    NotAdmin = 43,
+    ClaimCooldownActive = 44,
+    OnlyPartyCanAddEvidence = 45,
+    EvidenceLimitReached = 46,
+    DisputeAlreadyResolved = 47,
+    NoPendingResolution = 48,
+    AppealWindowClosed = 49,
+    AlreadyAppealed = 50,
+    FinalizeTooEarly = 51,
+    ClaimWindowNotElapsed = 52,
+    NoActiveClaim = 53,
+    MilestoneDeadlineInvalid = 54,
+    MilestoneDeadlinePassed = 55,
+    AdminAlreadySet = 56,
+    RewardTokenNotAllowed = 57,
     /// Internal storage invariant violated (e.g. a status index page that
     /// should contain the bounty being removed turned out to be empty).
     /// Surfacing this as a typed error rather than panicking on an unwrap
     /// keeps the failure mode a catchable contract error instead of an
     /// opaque host trap.
-    CorruptedIndex = 56,
-    NotPendingAdmin = 57,
-    NotPendingOwner = 58,
-    OwnerCannotBeAssignee = 59,
+    CorruptedIndex = 58,
+    NotPendingAdmin = 59,
+    NotPendingOwner = 60,
+    OwnerCannotBeAssignee = 61,
     /// A state-mutating entrypoint was called while the admin has the
     /// contract paused.
-    ContractPaused = 60,
+    ContractPaused = 62,
     /// A `BytesN<32>` hash argument (work submission or dispute evidence)
     /// was the all-zero sentinel value, which is never a valid hash.
-    ZeroHash,
+    ZeroHash = 63,
     /// The supplied dispute evidence hash is already recorded for this
     /// dispute; re-submitting it would consume the party's evidence quota
     /// without adding new information.
-    DuplicateEvidence,
+    DuplicateEvidence = 64,
     /// `pause` was called while the contract was already paused.
-    AlreadyPaused,
+    AlreadyPaused = 65,
     /// `unpause` was called while the contract was not paused.
-    NotPaused,
+    NotPaused = 66,
 }
 
 /// Convert a `ContractError` to its canonical panic message and panic.
@@ -148,6 +150,8 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::NotAllMilestonesCompleted => "not all milestones are completed",
         ContractError::InvalidMilestoneIndex => "invalid milestone index",
         ContractError::MilestoneRewardsMismatch => "milestone rewards do not sum to reward_amount",
+        ContractError::MilestoneRewardMustBePositive => "milestone reward must be positive",
+        ContractError::TooManyMilestones => "too many milestones",
         ContractError::RewardAmountOverflow => "reward amount arithmetic overflow",
         ContractError::MetadataEmpty => "metadata must not be empty",
         ContractError::NotAssignee => "caller is not an assignee of this bounty",

@@ -6,6 +6,11 @@ on:
     branches: [main]
   schedule:
     - cron: '0 3 * * *'  # Run at 3 AM UTC daily
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -20,19 +25,22 @@ jobs:
     strategy:
       matrix:
         manifest:
+          - Cargo.toml
+          - mergemint-backend/Cargo.toml
           - contracts/Cargo.toml
           - backend/Cargo.toml
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: EmbarkStudios/cargo-deny-action@837b8f6b6a4f0f5b1c8f8f8f8f8f8f8f8f8f8f8f # v2
+      - uses: EmbarkStudios/cargo-deny-action@92dc5ebdf5eacadfc5f4ca0b9cd8bf28ffcb8a88 # v2.0.15
         with:
           manifest-path: ${{ matrix.manifest }}
           log-level: warn
 
       - name: Comment on PR if licenses fail
         if: failure() && github.event_name == 'pull_request'
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             github.rest.issues.createComment({
