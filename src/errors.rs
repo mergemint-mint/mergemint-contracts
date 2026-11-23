@@ -83,6 +83,10 @@ pub enum ContractError {
     NotPendingAdmin = 59,
     NotPendingOwner = 60,
     OwnerCannotBeAssignee = 61,
+    /// `transfer_bounty_ownership` named the current creator as new owner (#1193).
+    OwnerCannotBeCreator = 63,
+    /// `cancel_bounty_ownership_transfer` called with no pending transfer (#1193).
+    NoPendingOwner = 64,
     /// A state-mutating entrypoint was called while the admin has the
     /// contract paused.
     ContractPaused = 62,
@@ -190,6 +194,8 @@ pub const fn message(e: ContractError) -> &'static str {
         ContractError::NotPendingAdmin => "caller is not the pending admin",
         ContractError::NotPendingOwner => "caller is not the pending bounty owner",
         ContractError::OwnerCannotBeAssignee => "new owner cannot be an assignee of the bounty",
+        ContractError::OwnerCannotBeCreator => "new owner cannot be the current creator",
+        ContractError::NoPendingOwner => "no pending ownership transfer for this bounty",
         ContractError::ContractPaused => "contract is paused",
         ContractError::ArbitratorConflict => {
             "arbitrator cannot be the bounty creator or an assignee"
