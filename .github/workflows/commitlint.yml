@@ -4,22 +4,29 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+permissions:
+  contents: read
+
 jobs:
   commitlint:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Validate commit messages
-        uses: wagoid/commitlint-github-action@v6.2.1
+        uses: wagoid/commitlint-github-action@b948419dd99f3fd7decff0fa6a6a01e8254c0169 # v6.2.1
         with:
           configFile: .commitlintrc.json
 
       - name: Comment on PR if validation fails
         if: failure()
-        uses: actions/github-script@v9
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             github.rest.issues.createComment({

@@ -48,7 +48,7 @@ jobs:
           targets: wasm32v1-none
 
       - name: Cache cargo builds
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build WASM
         run: cargo build --release --target wasm32v1-none
@@ -119,7 +119,7 @@ jobs:
         # PRs from forks get a read-only token and cannot comment; the size is
         # still in the job summary, so don't fail the build over it.
         continue-on-error: true
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           WASM_FILE: ${{ steps.size.outputs.file }}
           SIZE: ${{ steps.size.outputs.size }}

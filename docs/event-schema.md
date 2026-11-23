@@ -84,7 +84,7 @@ Contract events emitted for indexer integration.
 
 ### contributor_metadata_updated
 - **Topics**: `(Symbol("contributor_metadata_updated"), contributor_address)`
-- **Data**: `metadata`
+- **Data**: `metadata: BytesN<32>` — the same value stored in `Contributor.metadata`
 - **Trigger**: Contributor metadata is updated via `update_contributor_metadata`
 - **Purpose**: Notify indexer of contributor profile changes so cached profiles stay fresh
 
@@ -148,6 +148,18 @@ Contract events emitted for indexer integration.
 - **Data**: `(bounty_id, previous_owner_address)`
 - **Trigger**: Proposed owner accepts via `accept_bounty_ownership`
 - **Purpose**: Notify indexer that the bounty's creator changed
+
+## Wire Format Notes
+
+All events are emitted through Soroban SDK 29's typed `#[contractevent]` macros in
+`src/events.rs`. The macro-generated emitters are wire-compatible with the schema above:
+
+- The first topic is always the event name as a `Symbol`.
+- Additional topics are the indexed fields documented per event (e.g. the actor address).
+- The data payload is the documented tuple/value, encoded with the standard Soroban
+  `ScVal` encoding (no custom wrapping or versioning).
+
+Indexers can therefore decode topics and data exactly as described in each event section.
 
 ## Queries
 

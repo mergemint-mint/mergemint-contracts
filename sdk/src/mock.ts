@@ -201,6 +201,244 @@ export class MockMergeMint {
     return `AAAAAQAAAAABAAAAB==`;
   }
 
+  // === Missing Entrypoint Mocks (#1283) ===
+
+  /** Mock: sponsor a bounty with an additional reward contribution. */
+  async sponsorBounty(
+    sponsor: string,
+    bountyId: string,
+    amount: bigint,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    const entry = this.bounties.get(bountyId);
+    if (!entry) {
+      throw new MergeMintSdkError(`Bounty ${bountyId} not found`, "NOT_FOUND");
+    }
+    entry.bounty.rewardAmount += amount;
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: archive a bounty, marking it as archived. */
+  async archiveBounty(
+    caller: string,
+    bountyId: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    const entry = this.bounties.get(bountyId);
+    if (!entry) {
+      throw new MergeMintSdkError(`Bounty ${bountyId} not found`, "NOT_FOUND");
+    }
+    entry.bounty.status = "archived";
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: release a stale claim from a bounty. */
+  async releaseStaleClaim(
+    caller: string,
+    bountyId: string,
+    claimer: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    const entry = this.bounties.get(bountyId);
+    if (!entry) {
+      throw new MergeMintSdkError(`Bounty ${bountyId} not found`, "NOT_FOUND");
+    }
+    entry.bounty.assignees = entry.bounty.assignees.filter((a) => a.address !== claimer);
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: add evidence to an open dispute. */
+  async addDisputeEvidence(
+    submitter: string,
+    bountyId: string,
+    evidence: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    if (!this.bounties.has(bountyId)) {
+      throw new MergeMintSdkError(`Bounty ${bountyId} not found`, "NOT_FOUND");
+    }
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: appeal a resolved dispute. */
+  async appealDispute(
+    appellant: string,
+    bountyId: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    if (!this.bounties.has(bountyId)) {
+      throw new MergeMintSdkError(`Bounty ${bountyId} not found`, "NOT_FOUND");
+    }
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: finalize a dispute and apply its resolution. */
+  async finalizeDispute(
+    caller: string,
+    bountyId: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    if (!this.bounties.has(bountyId)) {
+      throw new MergeMintSdkError(`Bounty ${bountyId} not found`, "NOT_FOUND");
+    }
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: initiate a two-step bounty ownership transfer. */
+  async transferBountyOwnership(
+    owner: string,
+    bountyId: string,
+    newOwner: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    if (!this.bounties.has(bountyId)) {
+      throw new MergeMintSdkError(`Bounty ${bountyId} not found`, "NOT_FOUND");
+    }
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: accept a pending bounty ownership transfer. */
+  async acceptBountyOwnership(
+    newOwner: string,
+    bountyId: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    const entry = this.bounties.get(bountyId);
+    if (!entry) {
+      throw new MergeMintSdkError(`Bounty ${bountyId} not found`, "NOT_FOUND");
+    }
+    entry.bounty.creator = newOwner;
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: replace a bounty's tags. */
+  async updateTags(
+    caller: string,
+    bountyId: string,
+    tags: string[],
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    const entry = this.bounties.get(bountyId);
+    if (!entry) {
+      throw new MergeMintSdkError(`Bounty ${bountyId} not found`, "NOT_FOUND");
+    }
+    entry.bounty.tags = tags;
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: pause the contract. */
+  async pause(
+    admin: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: unpause the contract. */
+  async unpause(
+    admin: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: initialize the contract admin. */
+  async initAdmin(
+    admin: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: initiate a two-step admin transfer. */
+  async transferAdmin(
+    admin: string,
+    newAdmin: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: accept a pending admin transfer. */
+  async acceptAdmin(
+    newAdmin: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: add a supported reward token. */
+  async addRewardToken(
+    admin: string,
+    token: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: remove a supported reward token. */
+  async removeRewardToken(
+    admin: string,
+    token: string,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: set the minimum reward amount. */
+  async setMinReward(
+    admin: string,
+    amount: bigint,
+    sourceAccount: string,
+    options?: { simulate?: boolean }
+  ): Promise<string | SimulateResult> {
+    return options?.simulate ? this.mockSimulateResult() : `AAAAAQAAAAABAAAAB==`;
+  }
+
+  /** Mock: read the contract configuration. */
+  async getConfig(): Promise<Record<string, unknown>> {
+    return { paused: false, minReward: 0n, rewardTokens: [] };
+  }
+
+  /** Mock: read a bounty's milestones. */
+  async getMilestones(bountyId: string): Promise<unknown[]> {
+    return this.bounties.get(bountyId)?.bounty.milestones ?? [];
+  }
+
+  /** Mock: read the sponsors of a bounty. */
+  async getBountySponsors(bountyId: string): Promise<string[]> {
+    return [];
+  }
+
+  /** Mock: read bounty ids filtered by reward token. */
+  async getBountiesByToken(
+    token: string,
+    offset: number = 0,
+    limit: number = 50
+  ): Promise<string[]> {
+    const ids: string[] = [];
+    for (const [id, entry] of this.bounties) {
+      if (entry.bounty.rewardToken === token) ids.push(id);
+    }
+    return ids.slice(offset, offset + limit);
+  }
+
   // === Helper Methods
 
   private mockSimulateResult(): SimulateResult {
