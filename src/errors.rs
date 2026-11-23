@@ -153,6 +153,11 @@ pub const fn message(e: ContractError) -> &'static str {
             "milestone deadlines must be non-decreasing and not exceed the bounty deadline"
         }
         ContractError::MilestoneDeadlinePassed => "milestone deadline has passed",
+        ContractError::MilestoneDeadlineExpired => {
+            "an uncompleted milestone deadline has already expired"
+        }
+        ContractError::TooManySponsors => "maximum number of sponsors per bounty reached",
+        ContractError::SponsorAmountTooLow => "sponsor amount is below the minimum allowed",
         ContractError::AdminAlreadySet => "admin has already been initialized",
         ContractError::RewardTokenNotAllowed => "reward_token is not on the admin allowlist",
         ContractError::CorruptedIndex => "internal storage index invariant violated",

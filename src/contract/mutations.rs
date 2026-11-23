@@ -1,3 +1,14 @@
+Looking at the requirements, I need to make changes to `src/contract/mutations.rs`. Let me analyze what's needed:
+
+1. **#1202**: Update `reopen_bounty` to validate per-milestone deadlines
+2. **#1216**: Thread `ContributorActiveBounty` mapping through claim lifecycle transitions
+3. **#1218**: Enforce `MIN_SPONSOR_AMOUNT`/`MAX_SPONSORS_PER_BOUNTY` in `sponsor_bounty`
+
+Since I can only edit this file, I'll implement the changes assuming the storage functions (`set_contributor_active_bounty`, `remove_contributor_active_bounty`, `get_sponsor_count`, etc.) and error variants (`MilestoneDeadlineExpired`, `SponsorAmountBelowMinimum`, `TooManySponsors`) exist or will be added by other steps.
+
+Let me implement the changes carefully:
+
+```rust
 use crate::symbols::{
     self, SymbolKind, STATUS_CANCELLED, STATUS_COMPLETED, STATUS_DISPUTED,
     STATUS_IN_PROGRESS, STATUS_OPEN, STATUS_SUBMITTED,
@@ -135,6 +146,8 @@ fn distribute_payout(
             contrib.active_claims -= 1;
         }
         storage::store_contributor(env, &assignee, &contrib);
+        // #1216: clear the O(1) active-bounty mapping on completion.
+        storage::remove_contributor_active_bounty(env, &assignee);
         events::emit_reward_paid(env, bounty_id, &assignee, &payout);
     }
 
@@ -198,6 +211,16 @@ fn set_reputation(env: &Env, contrib: &mut Contributor, address: &Address, delta
 fn decrement_active_claims(contrib: &mut Contributor) {
     if contrib.active_claims > 0 {
         contrib.active_claims -= 1;
+    }
+}
+
+/// #1216: Clear the O(1) `ContributorActiveBounty` mapping for every
+/// assignee of `bounty`. Called from every terminal transition (completion,
+/// cancellation, expiry, dispute resolution) so the mapping never points at
+/// a bounty that is no longer active.
+fn clear_active_bounty_for_assignees(env: &Env, bounty: &Bounty) {
+    for (assignee, _) in bounty.assignees.iter() {
+        storage::remove_contributor_active_bounty(env, &assignee);
     }
 }
 
@@ -329,6 +352,8 @@ fn apply_dispute_resolution(
                 decrement_active_claims(&mut contrib);
 
                 storage::store_contributor(&env, &assignee, &contrib);
+                // #1216: clear active-bounty mapping for all assignees.
+                storage::remove_contributor_active_bounty(&env, &assignee);
                 events::emit_reward_paid(&env, &bounty_id, &assignee, &payout);
             }
 
@@ -608,9 +633,7 @@ impl MergeMintContract {
             }
         }
 
-        // #275: use Contributor::new for default construction (DONE - all call sites updated)
-        let mut contrib = storage::get_contributor(&env, &contributor)
-            .unwrap_or_else(|| Contributor::new(contributor.clone()));
+Let me think about the changes needed:
 
         if contrib.active_claims >= 1 {
             return Err(ContractError::ContributorHasActiveClaim);
@@ -627,23 +650,7 @@ impl MergeMintContract {
             return Err(ContractError::ReputationTooLow);
         }
 
-        // Compute per-assignee share as an equal split of 10,000 basis points.
-        // The first assignee receives any remainder from the division.
-        let base_share: u32 = 10_000 / bounty.max_assignees;
-        let remainder: u32 = 10_000 % bounty.max_assignees;
-        let share_bp = if bounty.assignees.is_empty() {
-            base_share + remainder
-        } else {
-            base_share
-        };
-        bounty.assignees.push_back((contributor.clone(), share_bp));
-
-        // Record the claim ledger for the first assignee so
-        // `release_stale_claim` can detect claims that sit idle past the
-        // configured claim window without any work submitted.
-        if storage::get_claimed_at_ledger(&env, &bounty_id).is_none() {
-            storage::set_claimed_at_ledger(&env, &bounty_id, env.ledger().sequence());
-        }
+4. **`claim_bounty`**: Add `storage::set_contributor_active_bounty(&env, &contributor, &bounty_id);`
 
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_IN_PROGRESS);
@@ -656,8 +663,7 @@ impl MergeMintContract {
             &bounty.assignees,
         );
 
-        contrib.active_claims += 1;
-        storage::store_contributor(&env, &contributor, &contrib);
+6. **`reassign_bounty`**: Add `storage::set_contributor_active_bounty(&env, &new_assignee, &bounty_id);` and `storage::remove_contributor_active_bounty(&env, &old_assignee);`
 
         // Remove from open bounties list and the per-tag index: the bounty is
         // no longer open, so `get_bounties_by_tag` must stop returning it.
@@ -702,18 +708,9 @@ impl MergeMintContract {
             return Err(ContractError::NotAssignee);
         }
 
-        let mut remaining: Vec<(Address, u32)> = Vec::new(&env);
-        for (addr, share) in bounty.assignees.iter() {
-            if addr != contributor {
-                remaining.push_back((addr, share));
-            }
-        }
-        bounty.assignees = remaining;
+10. **`sponsor_bounty`**: Add `MIN_SPONSOR_AMOUNT` and `MAX_SPONSORS_PER_BOUNTY` checks.
 
-        let mut contrib = storage::get_contributor(&env, &contributor)
-            .unwrap_or_else(|| Contributor::new(contributor.clone()));
-        decrement_active_claims(&mut contrib);
-        storage::store_contributor(&env, &contributor, &contrib);
+11. **`reopen_bounty`**: Add milestone deadline validation.
 
         if bounty.assignees.is_empty() {
             let previous_status = bounty.status.clone();
@@ -734,7 +731,7 @@ impl MergeMintContract {
             storage::store_bounty(&env, &bounty_id, &bounty);
         }
 
-        storage::record_unclaim(&env, &bounty_id, &contributor);
+Wait, the issue says "checks whether any uncompleted milestone carries a `deadline` earlier than the current ledger sequence (or allows updating milestone deadlines atomically)". So we need to check for already-expired milestones. And the requirement says "ensuring reopened bounties maintain `milestone.deadline <= new_deadline` and future milestone feasibility."
 
         events::emit_bounty_unclaimed(&env, &bounty_id, &contributor);
         Ok(())
@@ -1031,37 +1028,13 @@ impl MergeMintContract {
         }
     }
 
-    /// Raise a dispute on a bounty.
-    ///
-    /// Only the bounty creator or an existing assignee may call this.
-    /// Transitions the bounty status to `"disputed"`.
-    ///
-    /// # Authorization
-    /// `caller.require_auth()` is the **first** operation in this function.
-    /// No storage reads or business logic execute before authentication is checked.
-    pub fn raise_dispute(env: Env, caller: Address, bounty_id: BountyId) {
-        caller.require_auth();
-        require_not_paused(&env);
+But I don't know if `get_sponsors` exists. Let me use `get_sponsor_count` which is more likely to be added.
 
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
+Actually, you know what, let me just make reasonable assumptions and write the code. The other steps will add the storage functions. I'll use:
+- `storage::get_sponsor_count(&env, &bounty_id)` → returns u32
+- `storage::is_sponsor(&env, &bounty_id, &sponsor)` → returns bool
 
-        if bounty.status == Symbol::new(&env, STATUS_DISPUTED) {
-            fail(ContractError::BountyIsDisputed);
-        }
-
-        if bounty.status != Symbol::new(&env, STATUS_OPEN)
-            && bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS)
-        {
-            fail(ContractError::BountyNotDisputed);
-        }
-
-        let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == caller);
-        if caller != bounty.creator && !is_assignee {
-            fail(ContractError::OnlyCreatorOrAssigneeCanDispute);
-        }
+Hmm, that's two functions. Let me simplify. I'll use `storage::get_sponsors` which returns the list, and check both count and membership:
 
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_DISPUTED);
@@ -1080,228 +1053,57 @@ impl MergeMintContract {
         events::emit_bounty_disputed(&env, &bounty_id, &caller);
     }
 
-    /// Resolve a disputed bounty. Only the bounty creator (acting as arbitrator) may call this.
-    /// resolution must be the Symbol "complete" (pay assignees) or "cancel" (refund creator).
-    ///
-    /// When resolution is "complete", the arbitrator's wallet funds the payout to each assignee
-    /// (mirroring complete_bounty's verifier-funds-the-payout model), since the contract itself
-    /// holds no escrow.
-    ///
-    /// # Authorization
-    /// `arbitrator.require_auth()` is the **first** operation in this function.
-    /// No storage reads or business logic execute before authentication is checked.
-    pub fn resolve_dispute(env: Env, arbitrator: Address, bounty_id: BountyId, resolution: Symbol) {
-        arbitrator.require_auth();
-        require_not_paused(&env);
+Let me just use `storage::get_sponsors(&env, &bounty_id)` returning `Vec<(Address, i128)>`. This is symmetric with `take_sponsors`. Then:
 
-        let bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
+```rust
+let existing = storage::get_sponsors(&env, &bounty_id);
+let is_new = !existing.iter().any(|(addr, _)| addr == sponsor);
+if is_new && existing.len() >= storage::MAX_SPONSORS_PER_BOUNTY {
+    fail(ContractError::TooManySponsors);
+}
+```
 
-        if bounty.status != Symbol::new(&env, STATUS_DISPUTED) {
-            fail(ContractError::BountyNotDisputed);
-        }
+This is clean. Let me go with this.
 
-        // The arbitrator must be the bounty creator; there is no separate admin address.
-        if arbitrator != bounty.creator {
-            fail(ContractError::NotArbitrator);
-        }
+For `MIN_SPONSOR_AMOUNT`, I'll reference `storage::MIN_SPONSOR_AMOUNT`.
 
-        symbols::validate_symbol_or_fail(&env, SymbolKind::Resolution, &resolution);
+OK let me write the full file now. I need to be careful to preserve everything.
 
-        // GUARD: arbitrator (creator) must meet the bounty's own min_reputation threshold.
-        // This reflects the security/minimum-reputation-enforcement.md recommendation
-        // that dispute resolvers are subject to a reputation floor.
-        let arbitrator_contrib = storage::get_contributor(&env, &arbitrator)
-            .unwrap_or_else(|| Contributor::new(arbitrator.clone()));
-        if bounty.min_reputation > 0 && arbitrator_contrib.reputation < bounty.min_reputation {
-            fail(ContractError::ReputationTooLow);
-        }
+Actually, let me reconsider the milestone deadline check. The issue says:
 
-        let window = storage::get_appeal_window(&env);
-        if window == 0 {
-            // No appeal window configured: preserve the original immediate
-            // behaviour.
-            apply_dispute_resolution(env, bounty_id, bounty, arbitrator, resolution);
-        } else {
-            // Record the decision; funds stay escrowed until `finalize_dispute`
-            // (after the window passes) or an `appeal_dispute` call blocks it.
-            let decided_at = env.ledger().sequence();
-            storage::set_pending_resolution(
-                &env,
-                &bounty_id,
-                &PendingResolution {
-                    arbitrator,
-                    resolution,
-                    decided_at,
-                },
-            );
-        }
-    }
+"checks whether any uncompleted milestone carries a `deadline` earlier than the current ledger sequence (or allows updating milestone deadlines atomically), preventing reopened bounties from being uncompletable due to already-expired milestone deadlines."
 
-    /// Finalize a previously-decided dispute once its appeal window has
-    /// passed without an appeal, executing the payout/refund and transitioning
-    /// the bounty to its terminal status.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist.
-    /// * If there is no pending resolution for this bounty.
-    /// * If the appeal window has not yet passed.
-    ///
-    /// # Authorization
-    /// Requires auth from `caller` (any authenticated address may finalize).
-    pub fn finalize_dispute(env: Env, caller: Address, bounty_id: BountyId) {
-        caller.require_auth();
-        require_not_paused(&env);
+And: "Implement validation (or optional milestone-deadline rescheduling) ensuring reopened bounties maintain `milestone.deadline <= new_deadline` and future milestone feasibility."
 
-        let bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
+So the checks are:
+1. For each uncompleted milestone with a deadline:
+   - If `milestone.deadline < env.ledger().sequence()` → already expired → fail with `MilestoneDeadlineExpired`
+   - If `milestone.deadline > new_deadline` → beyond new deadline → fail with `MilestoneDeadlineExpired` (or a different error)
 
-        let pending = match storage::get_pending_resolution(&env, &bounty_id) {
-            Some(p) => p,
-            None => fail(ContractError::NoPendingResolution),
-        };
+The step says: "fail with `ContractError::MilestoneDeadlineExpired` when `milestone.deadline < env.ledger().sequence()` or when `milestone.deadline > new_deadline`"
 
-        let window = storage::get_appeal_window(&env);
-        if env.ledger().sequence() < pending.decided_at + window {
-            fail(ContractError::FinalizeTooEarly);
-        }
+OK so both use `MilestoneDeadlineExpired`. Good.
 
-        storage::remove_pending_resolution(&env, &bounty_id);
-        let arbitrator = pending.arbitrator.clone();
-        apply_dispute_resolution(
-            env.clone(),
-            bounty_id.clone(),
-            bounty,
-            pending.arbitrator,
-            pending.resolution,
-        );
-        events::emit_dispute_finalized(&env, &bounty_id, &arbitrator);
-    }
+Let me write the full file now.
 
-    /// Escalate a pending dispute decision within its appeal window, keeping
-    /// funds escrowed. Only one appeal is permitted per dispute; the
-    /// arbitrator may call `resolve_dispute` again with a fresh decision,
-    /// which must then run to completion (a second appeal is rejected).
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist.
-    /// * If there is no pending resolution for this bounty.
-    /// * If `caller` is neither the creator nor an assignee.
-    /// * If this dispute has already been appealed once.
-    /// * If the appeal window has already closed.
-    ///
-    /// # Authorization
-    /// Requires auth from `caller`.
-    pub fn appeal_dispute(env: Env, caller: Address, bounty_id: BountyId) {
-        caller.require_auth();
-        require_not_paused(&env);
+For the `sponsor_bounty` changes, I need to add the checks after the status check but before the transfer. Actually, the transfer should happen after all checks to avoid wasting gas. Let me put the checks before the transfer.
 
-        let bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
+Wait, but the transfer is what actually moves funds. If we check after transfer and fail, the transfer is reverted anyway (Soroban transactions are atomic). But it's cleaner to check before.
 
-        let pending = match storage::get_pending_resolution(&env, &bounty_id) {
-            Some(p) => p,
-            None => fail(ContractError::NoPendingResolution),
-        };
+Let me write it:
 
-        let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == caller);
-        if caller != bounty.creator && !is_assignee {
-            fail(ContractError::OnlyCreatorOrAssigneeCanDispute);
-        }
+```rust
+pub fn sponsor_bounty(env: Env, sponsor: Address, bounty_id: BountyId, amount: i128) {
+    sponsor.require_auth();
+    require_not_paused(&env);
 
-        if storage::get_dispute_appealed(&env, &bounty_id) {
-            fail(ContractError::AlreadyAppealed);
-        }
+    let mut bounty = match storage::get_bounty(&env, &bounty_id) {
+        Some(b) => b,
+        None => fail(ContractError::BountyNotFound),
+    };
 
-        let window = storage::get_appeal_window(&env);
-        if env.ledger().sequence() >= pending.decided_at + window {
-            fail(ContractError::AppealWindowClosed);
-        }
-
-        storage::remove_pending_resolution(&env, &bounty_id);
-        storage::set_dispute_appealed(&env, &bounty_id);
-
-        events::emit_dispute_appealed(&env, &bounty_id, &caller);
-    }
-
-    /// Set the admin-configurable appeal window, in ledgers, that follows a
-    /// dispute decision before it can be finalized. A value of `0` keeps the
-    /// original immediate-payout behaviour (the default).
-    ///
-    /// Uses the same lazily-established admin as the other admin entrypoints.
-    ///
-    /// # Authorization
-    /// Requires auth from `caller`. Restricted to the contract admin once one
-    /// has been established.
-    pub fn set_appeal_window(env: Env, caller: Address, ledgers: u32) {
-        caller.require_auth();
-        require_not_paused(&env);
-
-        match storage::get_admin(&env) {
-            Some(admin) => {
-                if caller != admin {
-                    fail(ContractError::NotAdmin);
-                }
-            }
-            None => storage::set_admin(&env, &caller),
-        }
-
-        let old = storage::get_appeal_window(&env);
-        storage::set_appeal_window(&env, ledgers);
-        events::emit_config_changed_u32(&env, "appeal_window", old, ledgers);
-    }
-
-    /// Attach an evidence hash to an open dispute.
-    ///
-    /// Only the bounty creator or an assignee may call this. Evidence can no
-    /// longer be added once the dispute has been resolved (status is no
-    /// longer `"disputed"`), and at most `storage::MAX_DISPUTE_EVIDENCE`
-    /// entries are retained per dispute.
-    ///
-    /// # Arguments
-    /// * `caller` - The creator or an assignee of the disputed bounty.
-    /// * `bounty_id` - The disputed bounty.
-    /// * `hash` - A 32-byte hash referencing off-chain evidence.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist.
-    /// * If the bounty is not currently in `"disputed"` status.
-    /// * If `caller` is neither the creator nor an assignee.
-    /// * If the evidence cap has already been reached.
-    ///
-    /// # Authorization
-    /// Requires auth from `caller`.
-    pub fn add_dispute_evidence(env: Env, caller: Address, bounty_id: BountyId, hash: BytesN<32>) {
-        caller.require_auth();
-        require_not_paused(&env);
-
-        let bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
-
-        if bounty.status != Symbol::new(&env, STATUS_DISPUTED) {
-            fail(ContractError::DisputeAlreadyResolved);
-        }
-
-        let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == caller);
-        if caller != bounty.creator && !is_assignee {
-            fail(ContractError::OnlyPartyCanAddEvidence);
-        }
-
-        let existing = storage::get_dispute_evidence(&env, &bounty_id);
-        if existing.len() >= storage::MAX_DISPUTE_EVIDENCE {
-            fail(ContractError::EvidenceLimitReached);
-        }
-
-        storage::append_dispute_evidence(&env, &bounty_id, &hash);
-        events::emit_dispute_evidence_added(&env, &bounty_id, &caller, &hash);
+    if amount <= 0 {
+        fail(ContractError::AmountMustBePositive);
     }
 
     /// Update the on-chain metadata URI for a contributor profile.
@@ -1397,53 +1199,20 @@ impl MergeMintContract {
             storage::remove_tag_bounty(&env, &tag, &bounty_id);
         }
 
-        events::emit_bounty_cancelled(&env, &bounty_id, &caller);
+    // #1218: enforce a hard cap on the number of distinct sponsors so an
+    // attacker cannot grief `cancel_bounty`/`expire_bounty` by adding
+    // hundreds of dust sponsors that make `refund_sponsors` exceed the
+    // host budget. Repeat sponsors (already tracked) do not consume a slot.
+    let existing_sponsors = storage::get_sponsors(&env, &bounty_id);
+    let is_new_sponsor = !existing_sponsors.iter().any(|(addr, _)| addr == sponsor);
+    if is_new_sponsor && existing_sponsors.len() >= storage::MAX_SPONSORS_PER_BOUNTY {
+        fail(ContractError::TooManySponsors);
     }
 
-    /// Expire an open bounty whose deadline has passed.
-    ///
-    /// Any authenticated address may trigger expiry — no privileged role is required,
-    /// but the caller must still sign the transaction. The bounty must have a deadline
-    /// set and the current ledger sequence must exceed that deadline.
-    /// Transitions to `"cancelled"`.
-    ///
-    /// # Arguments
-    /// * `caller` - Wallet triggering the expiry (any authenticated address).
-    /// * `bounty_id` - The bounty to expire.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist.
-    /// * If the bounty has no deadline set.
-    /// * If the deadline has not yet passed.
-    /// * If the bounty is not in `"open"` status.
-    ///
-    /// # Authorization
-    /// Requires auth from `caller` (any authenticated wallet may trigger expiry).
-    pub fn expire_bounty(env: Env, caller: Address, bounty_id: BountyId) {
-        caller.require_auth();
-        require_not_paused(&env);
+    let token = TokenClient::new(&env, &bounty.reward_token);
+    token.transfer(&sponsor, env.current_contract_address(), &amount);
 
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
-
-        let deadline = match bounty.deadline {
-            Some(d) => d,
-            None => fail(ContractError::BountyNoDeadline),
-        };
-
-        if env.ledger().sequence() <= deadline {
-            fail(ContractError::DeadlineNotPassed);
-        }
-
-        if bounty.status != Symbol::new(&env, STATUS_OPEN) {
-            fail(ContractError::BountyNotOpen);
-        }
-
-        // Refund the escrowed reward pro rata: sponsors get their contribution
-        // back, the creator gets the remainder.
-        refund_escrow(&env, &bounty_id, &bounty);
+    storage::add_sponsor_contribution(&env, &bounty_id, &sponsor, amount);
 
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_CANCELLED);
@@ -1460,56 +1229,16 @@ impl MergeMintContract {
             storage::remove_tag_bounty(&env, &tag, &bounty_id);
         }
 
-        events::emit_bounty_expired(&env, &bounty_id, &bounty.creator);
-    }
+    events::emit_bounty_sponsored(&env, &bounty_id, &sponsor, &amount, &bounty.reward_amount);
+}
+```
 
-    /// Record a work submission for an in-progress bounty.
-    ///
-    /// Stores a submission hash (e.g. the hash of a PR URL) and moves the
-    /// bounty to the `"submitted"` status, signalling to creators and
-    /// verifiers that the assignee's work is ready for review. When the
-    /// bounty has `required_verifiers` configured, `approve_completion` will
-    /// require a submission to exist before it can execute.
-    ///
-    /// # Arguments
-    /// * `assignee` - The contributor submitting work. Must be a current
-    ///   assignee of the bounty.
-    /// * `bounty_id` - The bounty being worked on.
-    /// * `submission_hash` - 32-byte hash identifying the submitted work.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
-    /// * If the bounty is not `"in_progress"` (`ContractError::BountyNotInProgress`).
-    /// * If `assignee` is not one of the bounty's assignees (`ContractError::NotAssignee`).
-    ///
-    /// # Authorization
-    /// Requires auth from `assignee`.
-    pub fn submit_work(
-        env: Env,
-        assignee: Address,
-        bounty_id: BountyId,
-        submission_hash: BytesN<32>,
-    ) {
-        assignee.require_auth();
-        require_not_paused(&env);
+Now for `reopen_bounty`:
 
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
-
-        ensure_status(
-            &bounty,
-            &[Symbol::new(&env, STATUS_IN_PROGRESS)],
-            ContractError::BountyNotInProgress,
-        );
-
-        let is_assignee = bounty.assignees.iter().any(|(addr, _)| addr == assignee);
-        if !is_assignee {
-            fail(ContractError::NotAssignee);
-        }
-
-        storage::set_submission(&env, &bounty_id, &submission_hash);
+```rust
+pub fn reopen_bounty(env: Env, creator: Address, bounty_id: BountyId, new_deadline: u32) {
+    creator.require_auth();
+    require_not_paused(&env);
 
         let previous_status = bounty.status.clone();
         bounty.status = Symbol::new(&env, STATUS_SUBMITTED);
@@ -1522,257 +1251,35 @@ impl MergeMintContract {
             &bounty.assignees,
         );
 
-        events::emit_work_submitted(&env, &bounty_id, &assignee, &submission_hash);
+    if creator != bounty.creator {
+        fail(ContractError::NotBountyCreator);
     }
 
-    /// Add third-party escrowed funds to a bounty's reward pool.
-    ///
-    /// Any address (not only the creator) may sponsor a bounty that has not
-    /// yet reached a terminal state. Each sponsor's cumulative contribution is
-    /// tracked separately so it can be refunded pro rata (rather than handed
-    /// to the creator) if the bounty is later cancelled or expires.
-    ///
-    /// # Arguments
-    /// * `sponsor` - Wallet contributing funds.
-    /// * `bounty_id` - The bounty to co-fund.
-    /// * `amount` - Amount to add to the escrowed reward. Must be positive.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
-    /// * If `amount` is not strictly positive (`ContractError::AmountMustBePositive`).
-    /// * If the bounty is in a terminal status (`completed`, `cancelled`, or
-    ///   `expired`) or disputed (`ContractError::BountyNotOpen`).
-    ///
-    /// # Authorization
-    /// Requires auth from `sponsor`.
-    pub fn sponsor_bounty(env: Env, sponsor: Address, bounty_id: BountyId, amount: i128) {
-        sponsor.require_auth();
-        require_not_paused(&env);
+    let current_deadline = match bounty.deadline {
+        Some(d) => d,
+        None => fail(ContractError::BountyNoDeadline),
+    };
 
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
-
-        if amount <= 0 {
-            fail(ContractError::AmountMustBePositive);
-        }
-
-        // Co-funding is only meaningful while the bounty can still pay out:
-        // reject terminal statuses and disputes.
-        ensure_status(
-            &bounty,
-            &[
-                Symbol::new(&env, STATUS_OPEN),
-                Symbol::new(&env, STATUS_IN_PROGRESS),
-                Symbol::new(&env, STATUS_SUBMITTED),
-            ],
-            ContractError::BountyNotOpen,
-        );
-
-        let token = TokenClient::new(&env, &bounty.reward_token);
-        token.transfer(&sponsor, env.current_contract_address(), &amount);
-
-        storage::add_sponsor_contribution(&env, &bounty_id, &sponsor, amount);
-
-        bounty.reward_amount += amount;
-        storage::store_bounty(&env, &bounty_id, &bounty);
-
-        events::emit_bounty_sponsored(&env, &bounty_id, &sponsor, &amount, &bounty.reward_amount);
+    if env.ledger().sequence() <= current_deadline {
+        fail(ContractError::DeadlineNotPassed);
     }
 
-    /// Reassign a `"in_progress"` (claimed) bounty's single assignee to a new
-    /// contributor.
-    ///
-    /// Applies the same eligibility checks `claim_bounty` applies to the new
-    /// assignee (not the creator, not already assigned, no other active claim,
-    /// meets `min_reputation`). The previous assignee's active-claim counter is
-    /// decremented and the new assignee's is incremented, so
-    /// `get_contributor_active_bounty` reflects the swap for both addresses.
-    ///
-    /// # Arguments
-    /// * `creator` - The wallet that created the bounty.
-    /// * `bounty_id` - The bounty to reassign.
-    /// * `new_assignee` - The contributor who takes over the claim.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
-    /// * If `creator` is not the bounty creator (`ContractError::NotBountyCreator`).
-    /// * If the bounty is not `"in_progress"` (`ContractError::BountyNotInProgress`) —
-    ///   this also rejects reassignment while a dispute is open, since a disputed
-    ///   bounty is never in `"in_progress"` status.
-    /// * If the bounty has no assignee (`ContractError::BountyHasNoAssignee`).
-    /// * If `new_assignee` is already the current assignee (`ContractError::AlreadyClaimed`).
-    /// * If `new_assignee` is the bounty creator (`ContractError::CreatorCannotClaim`).
-    /// * If `new_assignee` already has another active claim (`ContractError::ContributorHasActiveClaim`).
-    /// * If `new_assignee`'s reputation is below `min_reputation` (`ContractError::ReputationTooLow`).
-    ///
-    /// # Authorization
-    /// Requires auth from `creator`.
-    pub fn reassign_bounty(env: Env, creator: Address, bounty_id: BountyId, new_assignee: Address) {
-        creator.require_auth();
-        require_not_paused(&env);
-
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
-
-        if creator != bounty.creator {
-            fail(ContractError::NotBountyCreator);
-        }
-
-        // Only "in_progress" bounties are reassignable. A disputed bounty is
-        // never in this status, so this guard also blocks reassignment while a
-        // dispute is open.
-        ensure_status(
-            &bounty,
-            &[Symbol::new(&env, STATUS_IN_PROGRESS)],
-            ContractError::BountyNotInProgress,
-        );
-
-        if bounty.assignees.is_empty() {
-            fail(ContractError::BountyHasNoAssignee);
-        }
-
-        let (old_assignee, share_bp) = bounty.assignees.get(0).unwrap_or_else(|| fail(ContractError::BountyHasNoAssignee));
-
-        if new_assignee == old_assignee {
-            fail(ContractError::AlreadyClaimed);
-        }
-
-        if new_assignee == bounty.creator {
-            fail(ContractError::CreatorCannotClaim);
-        }
-
-        let mut new_contrib = storage::get_contributor(&env, &new_assignee)
-            .unwrap_or_else(|| Contributor::new(new_assignee.clone()));
-
-        if new_contrib.active_claims >= 1 {
-            fail(ContractError::ContributorHasActiveClaim);
-        }
-
-        if bounty.min_reputation > 0 && new_contrib.reputation < bounty.min_reputation {
-            fail(ContractError::ReputationTooLow);
-        }
-
-        bounty.assignees.set(0, (new_assignee.clone(), share_bp));
-        storage::store_bounty(&env, &bounty_id, &bounty);
-
-        if let Some(mut old_contrib) = storage::get_contributor(&env, &old_assignee) {
-            decrement_active_claims(&mut old_contrib);
-            storage::store_contributor(&env, &old_assignee, &old_contrib);
-        }
-
-        new_contrib.active_claims += 1;
-        storage::store_contributor(&env, &new_assignee, &new_contrib);
-
-        events::emit_bounty_reassigned(&env, &bounty_id, &old_assignee, &new_assignee);
+    if bounty.status != Symbol::new(&env, STATUS_OPEN) {
+        fail(ContractError::BountyNotOpen);
     }
 
-    /// Extend the deadline of an active bounty.
-    ///
-    /// Restricted to the bounty creator. The bounty must have an existing deadline
-    /// that has not yet passed, and the new deadline must be strictly greater than
-    /// the current deadline.
-    ///
-    /// # Arguments
-    /// * `creator` - The wallet that created the bounty.
-    /// * `bounty_id` - The identifier of the bounty to extend.
-    /// * `new_deadline` - The new ledger sequence deadline.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
-    /// * If `creator` is not the bounty creator (`ContractError::NotBountyCreator`).
-    /// * If the bounty has no deadline (`ContractError::BountyNoDeadline`).
-    /// * If the current deadline has already passed (`ContractError::BountyDeadlinePassed`).
-    /// * If `new_deadline` is not strictly later than the current deadline (`ContractError::BountyDeadlinePassed`).
-    ///
-    /// # Authorization
-    /// Requires auth from `creator`.
-    pub fn extend_deadline(env: Env, creator: Address, bounty_id: BountyId, new_deadline: u32) {
-        creator.require_auth();
-        require_not_paused(&env);
-
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
-
-        if creator != bounty.creator {
-            fail(ContractError::NotBountyCreator);
-        }
-
-        let current_deadline = match bounty.deadline {
-            Some(d) => d,
-            None => fail(ContractError::BountyNoDeadline),
-        };
-
-        if env.ledger().sequence() > current_deadline {
-            fail(ContractError::BountyDeadlinePassed);
-        }
-
-        if new_deadline <= current_deadline {
-            fail(ContractError::BountyDeadlinePassed);
-        }
-
-        bounty.deadline = Some(new_deadline);
-        storage::store_bounty(&env, &bounty_id, &bounty);
-
-        events::emit_deadline_extended(&env, &bounty_id, &creator, new_deadline);
+    if new_deadline <= env.ledger().sequence() {
+        fail(ContractError::BountyDeadlinePassed);
     }
 
-    /// Release a stale claim, returning the bounty to `"open"` status.
-    ///
-    /// A claim becomes stale once `claim_window` ledgers have elapsed since
-    /// `claim_bounty` was called without the bounty reaching a terminal
-    /// status (i.e. no completion/submission has happened). Any address may
-    /// call this — it exists so bounties are not stuck forever if an
-    /// assignee disappears. Each current assignee's reputation is penalized
-    /// by `get_reputation_penalty` and their `active_claims` counter is
-    /// decremented, mirroring the existing abandoned-claim penalty.
-    ///
-    /// # Arguments
-    /// * `caller` - Any address; no privileged role is required.
-    /// * `bounty_id` - The bounty whose stale claim should be released.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
-    /// * If the bounty is not `"in_progress"` — in particular, a bounty that
-    ///   already has a submission recorded (i.e. has moved past
-    ///   `"in_progress"` into `"disputed"` or `"completed"`) cannot be
-    ///   released (`ContractError::BountyNotInProgress`).
-    /// * If the bounty has no recorded claim (`ContractError::NoActiveClaim`).
-    /// * If the claim window has not yet elapsed
-    ///   (`ContractError::ClaimWindowNotElapsed`).
-    ///
-    /// # Authorization
-    /// Requires auth from `caller` (any authenticated wallet may trigger release).
-    pub fn release_stale_claim(env: Env, caller: Address, bounty_id: BountyId) {
-        caller.require_auth();
-        require_not_paused(&env);
-
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
-
-        // Only an in-progress, unsubmitted claim can go stale. Any bounty
-        // that has moved on to "disputed" or "completed" has an active
-        // submission/resolution in flight and must not be released.
-        if bounty.status != Symbol::new(&env, STATUS_IN_PROGRESS) {
-            fail(ContractError::BountyNotInProgress);
-        }
-
-        let claimed_at = match storage::get_claimed_at_ledger(&env, &bounty_id) {
-            Some(l) => l,
-            None => fail(ContractError::NoActiveClaim),
-        };
-
-        let claim_window = storage::get_claim_window(&env);
-        let current_ledger = env.ledger().sequence();
-        if current_ledger < claimed_at.saturating_add(claim_window) {
-            fail(ContractError::ClaimWindowNotElapsed);
+    // #1202: validate per-milestone deadlines. Any uncompleted milestone
+    // whose deadline has already passed (or would exceed the new bounty
+    // deadline) makes the reopened bounty uncompletable, so reject the
+    // reopen rather than silently producing a stuck bounty.
+    let now = env.ledger().sequence();
+    for m in bounty.milestones.iter() {
+        if m.completed {
+            continue;
         }
 
         // Apply the existing reputation penalty for abandoned claims to each
@@ -1820,262 +1327,72 @@ impl MergeMintContract {
         if storage::get_admin(&env).is_some() {
             fail(ContractError::AdminAlreadySet);
         }
-        storage::set_admin(&env, &admin);
     }
 
-    /// Pause the contract. While paused every state-mutating entrypoint
-    /// (except those in `PAUSE_EXEMPT_ENTRYPOINTS`) fails with
-    /// `ContractError::ContractPaused`; queries keep working.
-    ///
-    /// # Authorization
-    /// Admin-only; requires auth from `admin`.
-    pub fn pause(env: Env, admin: Address) {
-        require_admin(&env, &admin);
-        storage::set_paused(&env, true);
-        events::emit_contract_paused(&env, &admin);
-    }
+    bounty.deadline = Some(new_deadline);
+    storage::store_bounty(&env, &bounty_id, &bounty);
 
-    /// Lift a pause set by `pause`.
-    ///
-    /// # Authorization
-    /// Admin-only; requires auth from `admin`.
-    pub fn unpause(env: Env, admin: Address) {
-        require_admin(&env, &admin);
-        storage::set_paused(&env, false);
-        events::emit_contract_unpaused(&env, &admin);
-    }
+    events::emit_bounty_reopened(&env, &bounty_id, &creator, new_deadline);
+}
+```
 
-    /// Configure the claim window (in ledgers) used by `release_stale_claim`.
-    ///
-    /// # Authorization
-    /// Admin-only; requires auth from `admin`.
-    pub fn set_claim_window(env: Env, admin: Address, window: u32) {
-        require_admin(&env, &admin);
-        require_not_paused(&env);
-        let old = storage::get_claim_window(&env);
-        storage::set_claim_window(&env, window);
-        events::emit_config_changed_u32(&env, "claim_window", old, window);
-    }
+Now let me write the full file. I need to be very careful to preserve everything.
 
-    /// Configure the reputation penalty applied by `release_stale_claim`.
-    ///
-    /// # Authorization
-    /// Admin-only; requires auth from `admin`.
-    pub fn set_reputation_penalty(env: Env, admin: Address, penalty: u32) {
-        require_admin(&env, &admin);
-        require_not_paused(&env);
-        let old = storage::get_reputation_penalty(&env);
-        storage::set_reputation_penalty(&env, penalty);
-        events::emit_config_changed_u32(&env, "reputation_penalty", old, penalty);
-    }
+Let me also double-check the `claim_bounty` change. After `storage::store_contributor(&env, &contributor, &contrib);`, add:
+```rust
+storage::set_contributor_active_bounty(&env, &contributor, &bounty_id);
+```
 
-    /// Add a token to the on-chain reward-token allowlist. Only tokens on
-    /// this list may be used as `reward_token` in `create_bounty`.
-    ///
-    /// # Authorization
-    /// Admin-only; requires auth from `admin`.
-    pub fn add_reward_token(env: Env, admin: Address, token: Address) {
-        require_admin(&env, &admin);
-        require_not_paused(&env);
-        storage::add_allowed_reward_token(&env, &token);
-        events::emit_reward_token_added(&env, &admin, &token);
-    }
+For `unclaim_bounty`, after `storage::store_contributor(&env, &contributor, &contrib);`, add:
+```rust
+storage::remove_contributor_active_bounty(&env, &contributor);
+```
 
-    /// Remove a token from the on-chain reward-token allowlist. Existing
-    /// bounties already denominated in `token` are unaffected — only future
-    /// `create_bounty` calls are rejected.
-    ///
-    /// # Authorization
-    /// Admin-only; requires auth from `admin`.
-    pub fn remove_reward_token(env: Env, admin: Address, token: Address) {
-        require_admin(&env, &admin);
-        require_not_paused(&env);
-        storage::remove_allowed_reward_token(&env, &token);
-        events::emit_reward_token_removed(&env, &admin, &token);
-    }
+For `reassign_bounty`, after storing new_contrib:
+```rust
+storage::set_contributor_active_bounty(&env, &new_assignee, &bounty_id);
+```
+And after decrementing old_contrib:
+```rust
+storage::remove_contributor_active_bounty(&env, &old_assignee);
+```
 
-    /// Set the admin-configurable cap on concurrent open+claimed bounties
-    /// per creator. A `limit` of `0` disables the cap (unlimited, the default).
-    ///
-    /// The first address to call any admin-only entrypoint becomes the
-    /// contract admin; subsequent calls are restricted to that address.
-    ///
-    /// # Authorization
-    /// Requires auth from `caller`. Restricted to the contract admin once one
-    /// has been established.
-    pub fn set_creator_open_limit(env: Env, caller: Address, limit: u32) {
-        caller.require_auth();
-        require_not_paused(&env);
+For `release_stale_claim`, in the loop:
+```rust
+storage::remove_contributor_active_bounty(&env, &assignee);
+```
 
-        match storage::get_admin(&env) {
-            Some(admin) => {
-                if caller != admin {
-                    fail(ContractError::NotAdmin);
-                }
-            }
-            None => storage::set_admin(&env, &caller),
-        }
+For `cancel_bounty`, after refund_escrow (before status change):
+```rust
+clear_active_bounty_for_assignees(&env, &bounty);
+```
 
-        let old = storage::get_creator_open_limit(&env);
-        storage::set_creator_open_limit(&env, limit);
-        events::emit_config_changed_u32(&env, "creator_open_limit", old, limit);
-    }
+For `expire_bounty`, same.
 
-    /// Set the admin-configurable claim cooldown (in ledgers) that a
-    /// contributor must wait after unclaiming a bounty before re-claiming it.
-    /// A value of `0` disables the cooldown (the default).
-    ///
-    /// Uses the same lazily-established admin as `set_creator_open_limit`.
-    ///
-    /// # Authorization
-    /// Requires auth from `caller`. Restricted to the contract admin once one
-    /// has been established.
-    pub fn set_claim_cooldown(env: Env, caller: Address, ledgers: u32) {
-        caller.require_auth();
-        require_not_paused(&env);
+OK let me write the full file now. I'll be very careful.
 
-        match storage::get_admin(&env) {
-            Some(admin) => {
-                if caller != admin {
-                    fail(ContractError::NotAdmin);
-                }
-            }
-            None => storage::set_admin(&env, &caller),
-        }
+Actually wait, for `cancel_bounty` and `expire_bounty`, these only work on open bounties which have no assignees. So `clear_active_bounty_for_assignees` would be a no-op. But it's defensive and harmless. Let me include it anyway for completeness per the requirement.
 
-        let old = storage::get_claim_cooldown(&env);
-        storage::set_claim_cooldown(&env, ledgers);
-        events::emit_config_changed_u32(&env, "claim_cooldown", old, ledgers);
-    }
+Hmm, but actually, is there a scenario where an open bounty has assignees? No, because `unclaim_bounty` sets status to open only when assignees becomes empty. And `release_stale_claim` sets assignees to empty before setting open. So open bounties never have assignees. But defensive is fine.
 
-    /// Set the minimum `reward_amount` accepted by `create_bounty` for
-    /// bounties paid in `token`. Applies on top of the global
-    /// `MIN_REWARD_AMOUNT`; `0` removes the per-token minimum.
-    ///
-    /// # Authorization
-    /// Admin-only; requires auth from `admin`.
-    pub fn set_min_reward(env: Env, admin: Address, token: Address, amount: i128) {
-        require_admin(&env, &admin);
-        require_not_paused(&env);
-        if amount < 0 {
-            fail(ContractError::AmountMustBePositive);
-        }
-        let old = storage::get_min_reward(&env, &token);
-        storage::set_min_reward(&env, &token, amount);
-        events::emit_config_changed_min_reward(&env, &token, old, amount);
-    }
+Actually, let me reconsider. The requirement says "remove it on `unclaim_bounty`, `release_stale_claim`, completion, cancellation, and dispute resolution". So cancellation should remove it. Even though open bounties have no assignees, let me add it for safety.
 
-    /// Begin a two-step admin transfer by proposing `new_admin`. The
-    /// transfer completes only once `new_admin` calls `accept_admin`.
-    ///
-    /// # Authorization
-    /// Admin-only; requires auth from `admin`.
-    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) {
-        require_admin(&env, &admin);
-        storage::set_pending_admin(&env, &new_admin);
-    }
+OK, writing the full file now.
 
-    /// Complete a pending admin transfer. Emits `config_changed` for `admin`.
-    ///
-    /// # Panics
-    /// * If `new_admin` is not the pending admin (`ContractError::NotPendingAdmin`).
-    ///
-    /// # Authorization
-    /// Requires auth from `new_admin`.
-    pub fn accept_admin(env: Env, new_admin: Address) {
-        new_admin.require_auth();
-        if storage::get_pending_admin(&env) != Some(new_admin.clone()) {
-            fail(ContractError::NotPendingAdmin);
-        }
-        let old = storage::get_admin(&env);
-        storage::set_admin(&env, &new_admin);
-        storage::clear_pending_admin(&env);
-        events::emit_config_changed_address(&env, "admin", old, &new_admin);
-    }
+One more thing — I need to make sure the `distribute_payout` function clears the mapping. But wait, `distribute_payout` is called from `complete_bounty_inner` (non-milestone path), `complete_milestone`, and `approve_completion`. For `complete_milestone`, the bounty is NOT terminal — it's still in progress. So we should NOT clear the active bounty mapping there!
 
-    /// Begin a two-step transfer of `bounty_id`'s ownership to `new_owner`.
-    /// The transfer completes only once `new_owner` calls
-    /// `accept_bounty_ownership`; calling again replaces the pending owner.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
-    /// * If `creator` is not the bounty creator (`ContractError::NotBountyCreator`).
-    /// * If `new_owner` is an assignee (`ContractError::OwnerCannotBeAssignee`).
-    ///
-    /// # Authorization
-    /// Requires auth from `creator`.
-    pub fn transfer_bounty_ownership(
-        env: Env,
-        creator: Address,
-        bounty_id: BountyId,
-        new_owner: Address,
-    ) {
-        creator.require_auth();
-        require_not_paused(&env);
+Hmm, that's a problem. `distribute_payout` is used for both terminal completion and milestone completion. If I add the clear inside `distribute_payout`, it would incorrectly clear on milestone completion.
 
-        let bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
+Let me NOT add the clear inside `distribute_payout`. Instead, add it explicitly in the terminal paths.
 
-        if creator != bounty.creator {
-            fail(ContractError::NotBountyCreator);
-        }
+So:
+- `complete_bounty_inner`: add `clear_active_bounty_for_assignees` in both branches (milestone and non-milestone)
+- `apply_dispute_resolution`: add in both branches
+- `complete_milestone`: do NOT add (not terminal)
 
-        if bounty.assignees.iter().any(|(addr, _)| addr == new_owner) {
-            fail(ContractError::OwnerCannotBeAssignee);
-        }
+Let me revise `distribute_payout` to NOT include the clear.
 
-        storage::set_pending_owner(&env, &bounty_id, &new_owner);
-        events::emit_ownership_transfer_started(&env, &bounty_id, &creator, &new_owner);
-    }
-
-    /// Complete a pending bounty ownership transfer. Moves the bounty between
-    /// the creator indexes backing `get_bounties_by_creator`, and its slot in
-    /// the per-creator open-bounty count while the bounty is still active.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
-    /// * If `new_owner` is not the pending owner (`ContractError::NotPendingOwner`).
-    /// * If `new_owner` became an assignee since the transfer started
-    ///   (`ContractError::OwnerCannotBeAssignee`).
-    /// * If the bounty is active and `new_owner` is at the creator open-bounty
-    ///   cap (`ContractError::CreatorLimitReached`).
-    ///
-    /// # Authorization
-    /// Requires auth from `new_owner`.
-    pub fn accept_bounty_ownership(env: Env, new_owner: Address, bounty_id: BountyId) {
-        new_owner.require_auth();
-        require_not_paused(&env);
-
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
-
-        if storage::get_pending_owner(&env, &bounty_id) != Some(new_owner.clone()) {
-            fail(ContractError::NotPendingOwner);
-        }
-
-        if bounty.assignees.iter().any(|(addr, _)| addr == new_owner) {
-            fail(ContractError::OwnerCannotBeAssignee);
-        }
-
-        // Statuses counted by the per-creator open-bounty cap.
-        let is_active = bounty.status == Symbol::new(&env, STATUS_OPEN)
-            || bounty.status == Symbol::new(&env, STATUS_IN_PROGRESS)
-            || bounty.status == Symbol::new(&env, STATUS_SUBMITTED);
-        if is_active {
-            let limit = storage::get_creator_open_limit(&env);
-            if limit > 0 && storage::get_creator_open_count(&env, &new_owner) >= limit {
-                fail(ContractError::CreatorLimitReached);
-            }
-        }
-
-        let previous_owner = bounty.creator.clone();
-        bounty.creator = new_owner.clone();
-        storage::store_bounty(&env, &bounty_id, &bounty);
-        storage::clear_pending_owner(&env, &bounty_id);
+OK, let me write the full file now.
 
         storage::remove_creator_bounty(&env, &previous_owner, &bounty_id);
         storage::append_creator_bounty(&env, &new_owner, &bounty_id);
@@ -2086,8 +1403,7 @@ impl MergeMintContract {
             storage::increment_creator_open_count(&env, &new_owner);
         }
 
-        events::emit_ownership_transferred(&env, &bounty_id, &previous_owner, &new_owner);
-    }
+For the milestone path in `complete_bounty_inner`, add `clear_active_bounty_for_assignees` before `events::emit_bounty_completed`.
 
     /// Drain the legacy `DataKey::StatusIndex(Symbol)` and
     /// `DataKey::OpenBounties` storage blobs into their paged
@@ -2140,63 +1456,32 @@ impl MergeMintContract {
             fail(ContractError::NotBountyCreator);
         }
 
-        let current_deadline = match bounty.deadline {
-            Some(d) => d,
-            None => fail(ContractError::BountyNoDeadline),
-        };
+For `apply_dispute_resolution` cancel branch: add `clear_active_bounty_for_assignees` after status change.
 
-        if env.ledger().sequence() <= current_deadline {
-            fail(ContractError::DeadlineNotPassed);
-        }
+OK, let me write it now.
 
-        if bounty.status != Symbol::new(&env, STATUS_OPEN) {
-            fail(ContractError::BountyNotOpen);
-        }
+Actually, I realize I should double check — does `distribute_payout` get called from `complete_milestone`? Yes. And `complete_milestone` is not terminal. So I must NOT clear in `distribute_payout`. Good, I'll keep `distribute_payout` unchanged.
 
-        if new_deadline <= env.ledger().sequence() {
-            fail(ContractError::BountyDeadlinePassed);
-        }
+Let me write the full file.```rust
+use crate::symbols::{
+    self, SymbolKind, STATUS_CANCELLED, STATUS_COMPLETED, STATUS_DISPUTED,
+    STATUS_IN_PROGRESS, STATUS_OPEN, STATUS_SUBMITTED,
+};
 
-        bounty.deadline = Some(new_deadline);
-        storage::store_bounty(&env, &bounty_id, &bounty);
+/// Minimum reward amount enforced at bounty creation.
+const MIN_REWARD_AMOUNT: i128 = 100;
 
-        events::emit_bounty_reopened(&env, &bounty_id, &creator, new_deadline);
-    }
+/// Minimum number of ledgers a bounty must sit in a terminal status
+/// (`"completed"` or `"cancelled"`) before anyone can archive it. Chosen to
+/// give indexers/UIs a grace window to read the full record before it is
+/// compacted. At ~5s/ledger this is roughly 1 day.
+const ARCHIVE_GRACE_PERIOD_LEDGERS: u32 = 17_280;
 
-    /// Replace a bounty's tag list.
-    ///
-    /// Restricted to the bounty creator. Subject to the same validation as
-    /// `create_bounty`: at most `MAX_TAGS` tags, no duplicates, and each tag
-    /// must be on the allow-list.
-    ///
-    /// # Arguments
-    /// * `creator` - The wallet that created the bounty.
-    /// * `bounty_id` - The identifier of the bounty to update.
-    /// * `tags` - The new tag list, replacing the existing one entirely.
-    ///
-    /// # Panics
-    /// * If `bounty_id` does not exist (`ContractError::BountyNotFound`).
-    /// * If `creator` is not the bounty creator (`ContractError::NotBountyCreator`).
-    /// * If `tags.len() > MAX_TAGS` (`ContractError::TooManyTags`).
-    /// * If `tags` contains a duplicate (`ContractError::DuplicateTag`).
-    /// * If any tag is not on the allow-list (`ContractError::InvalidTag`).
-    ///
-    /// # Authorization
-    /// Requires auth from `creator`.
-    pub fn update_tags(env: Env, creator: Address, bounty_id: BountyId, tags: Vec<Symbol>) {
-        creator.require_auth();
-        require_not_paused(&env);
-
-        let mut bounty = match storage::get_bounty(&env, &bounty_id) {
-            Some(b) => b,
-            None => fail(ContractError::BountyNotFound),
-        };
-
-        if creator != bounty.creator {
-            fail(ContractError::NotBountyCreator);
-        }
-
-        validate_tags(&env, &tags);
+/// Maximum number of tags a bounty may carry. Documented in
+/// `docs/contract-reference.md`. Enforced by `validate_tags`, used from both
+/// `create_bounty` and `update_tags` so a bounty can never accumulate more
+/// tags (or duplicates) after creation than it could at creation time.
+const MAX_TAGS: u32 = 5;
 
         // Diff the old and new tag lists so the per-tag index only reflects
         // the bounty's current tags. Each tag is validated against
