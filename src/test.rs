@@ -407,6 +407,179 @@ fn test_complete_bounty_after_assignee_dispute_panics() {
 
 /// Every `ContractError` variant must map to a distinct, stable `u32` code.
 #[test]
+fn test_contract_error_messages() {
+    use crate::errors::{message, ContractError};
+
+    assert_eq!(message(ContractError::BountyNotFound), "bounty not found");
+    assert_eq!(
+        message(ContractError::BountyAlreadyAssigned),
+        "bounty already assigned"
+    );
+    assert_eq!(
+        message(ContractError::AlreadyClaimed),
+        "bounty already claimed by contributor"
+    );
+    assert_eq!(message(ContractError::BountyNotOpen), "bounty not open");
+    assert_eq!(
+        message(ContractError::BountyNotInProgress),
+        "bounty is not in progress"
+    );
+    assert_eq!(
+        message(ContractError::BountyHasNoAssignee),
+        "bounty has no assignee"
+    );
+    assert_eq!(
+        message(ContractError::RewardMustBePositive),
+        "reward_amount must be positive"
+    );
+    assert_eq!(
+        message(ContractError::NotBountyCreator),
+        "not bounty creator"
+    );
+    assert_eq!(
+        message(ContractError::VerifierCannotBeAssignee),
+        "verifier cannot be the assignee"
+    );
+    assert_eq!(
+        message(ContractError::CreatorCannotClaim),
+        "creator cannot claim"
+    );
+    assert_eq!(
+        message(ContractError::ContributorHasActiveClaim),
+        "contributor already has an active claim"
+    );
+    assert_eq!(
+        message(ContractError::BountyIsDisputed),
+        "bounty is disputed"
+    );
+    assert_eq!(message(ContractError::TooManyTags), "too many tags");
+    assert_eq!(
+        message(ContractError::OnlyCreatorOrAssigneeCanDispute),
+        "only creator or assignee can raise dispute"
+    );
+    assert_eq!(
+        message(ContractError::DeadlineNotPassed),
+        "deadline has not passed"
+    );
+    assert_eq!(
+        message(ContractError::BountyDeadlinePassed),
+        "bounty deadline passed"
+    );
+    assert_eq!(
+        message(ContractError::BountyNoDeadline),
+        "bounty has no deadline"
+    );
+    assert_eq!(
+        message(ContractError::ReputationTooLow),
+        "contributor reputation is too low"
+    );
+    assert_eq!(
+        message(ContractError::VerifierNotAuthorized),
+        "verifier is not in the required verifiers list"
+    );
+    assert_eq!(
+        message(ContractError::AlreadyApproved),
+        "verifier has already approved this bounty"
+    );
+    assert_eq!(
+        message(ContractError::BountyNotDisputed),
+        "bounty is not in disputed status"
+    );
+    assert_eq!(
+        message(ContractError::NotArbitrator),
+        "caller is not authorized to resolve this dispute"
+    );
+    assert_eq!(
+        message(ContractError::RewardBelowMinimum),
+        "reward_amount is below the minimum allowed"
+    );
+    assert_eq!(
+        message(ContractError::MaxAssigneesMustBePositive),
+        "max_assignees must be at least 1"
+    );
+    assert_eq!(
+        message(ContractError::ApprovalThresholdExceedsVerifiers),
+        "approval_threshold cannot exceed the number of required_verifiers"
+    );
+    assert_eq!(
+        message(ContractError::InvalidRewardToken),
+        "invalid reward_token address"
+    );
+    assert_eq!(
+        message(ContractError::MilestoneAlreadyCompleted),
+        "milestone is already completed"
+    );
+    assert_eq!(
+        message(ContractError::NotAllMilestonesCompleted),
+        "not all milestones are completed"
+    );
+    assert_eq!(
+        message(ContractError::InvalidMilestoneIndex),
+        "invalid milestone index"
+    );
+    assert_eq!(
+        message(ContractError::MilestoneRewardsMismatch),
+        "milestone rewards do not sum to reward_amount"
+    );
+    assert_eq!(
+        message(ContractError::MilestoneRewardMustBePositive),
+        "milestone reward must be positive"
+    );
+    assert_eq!(
+        message(ContractError::TooManyMilestones),
+        "too many milestones"
+    );
+    assert_eq!(
+        message(ContractError::MetadataEmpty),
+        "metadata must not be empty"
+    );
+}
+
+/// Every `ContractError` variant must map to a distinct panic message.
+#[test]
+fn test_contract_error_messages_are_unique() {
+    use crate::errors::{message, ContractError};
+
+    let variants = [
+        ContractError::BountyNotFound,
+        ContractError::BountyAlreadyAssigned,
+        ContractError::BountyNotOpen,
+        ContractError::BountyNotInProgress,
+        ContractError::BountyHasNoAssignee,
+        ContractError::RewardMustBePositive,
+        ContractError::RewardBelowMinimum,
+        ContractError::NotBountyCreator,
+        ContractError::VerifierCannotBeAssignee,
+        ContractError::CreatorCannotClaim,
+        ContractError::ContributorHasActiveClaim,
+        ContractError::BountyIsDisputed,
+        ContractError::BountyDeadlinePassed,
+        ContractError::BountyNoDeadline,
+        ContractError::DeadlineNotPassed,
+        ContractError::ReputationTooLow,
+        ContractError::TooManyTags,
+        ContractError::MaxAssigneesMustBePositive,
+        ContractError::OnlyCreatorOrAssigneeCanDispute,
+        ContractError::VerifierNotAuthorized,
+        ContractError::AlreadyApproved,
+        ContractError::BountyNotDisputed,
+        ContractError::NotArbitrator,
+        ContractError::ApprovalThresholdExceedsVerifiers,
+        ContractError::InvalidRewardToken,
+        ContractError::MilestoneAlreadyCompleted,
+        ContractError::NotAllMilestonesCompleted,
+        ContractError::InvalidMilestoneIndex,
+    ];
+
+    for (i, a) in variants.iter().enumerate() {
+        for b in variants.iter().skip(i + 1) {
+            assert_ne!(message(*a), message(*b));
+        }
+    }
+}
+
+/// Every `ContractError` variant must map to a distinct, stable `u32` code.
+#[test]
 fn test_contract_error_codes_are_unique() {
     use crate::errors::ContractError;
 
@@ -440,6 +613,8 @@ fn test_contract_error_codes_are_unique() {
         ContractError::NotAllMilestonesCompleted,
         ContractError::InvalidMilestoneIndex,
         ContractError::MilestoneRewardsMismatch,
+        ContractError::MilestoneRewardMustBePositive,
+        ContractError::TooManyMilestones,
         ContractError::MetadataEmpty,
     ];
 
@@ -602,6 +777,131 @@ fn test_create_bounty_rejects_invalid_reward_token() {
         error_code(res),
         ContractError::InvalidRewardToken as u32
     );
+}
+
+// ===========================================================================
+// Issue #1187 — creator.require_auth() is the first operation in create_bounty
+// ===========================================================================
+
+/// Run `f` and return the panic message it raised, or `None` if it returned.
+fn auth_panic_message<F: FnOnce()>(f: F) -> Option<std::string::String> {
+    use std::string::ToString;
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).err()?;
+    Some(if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<std::string::String>() {
+        s.clone()
+    } else {
+        "<non-string panic>".to_string()
+    })
+}
+
+/// An unauthenticated `create_bounty` must fail on the auth check, before the
+/// `reward_token` probe. The token address here is not a token contract, so a
+/// probe would panic with "invalid reward_token address"; the panic must be the
+/// auth failure instead.
+#[test]
+fn test_create_bounty_requires_auth_before_reward_token_probe() {
+    let env = Env::default();
+    // No mock_all_auths: the creator's authorization is missing.
+    let creator = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let bogus_token = Address::generate(&env);
+    let msg = auth_panic_message(|| {
+        client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "auth_first"),
+            &String::from_str(&env, "desc"),
+            &1000,
+            &bogus_token,
+            &0,
+            &None,
+            &Vec::new(&env),
+            &1,
+            &None,
+            &1,
+            &Vec::new(&env),
+        );
+    })
+    .expect("unauthenticated create_bounty must panic");
+
+    assert!(
+        !msg.contains("invalid reward_token address"),
+        "auth must be checked before the reward_token probe, got: {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("auth"),
+        "expected an authorization failure, got: {msg}"
+    );
+
+    // Nothing was persisted: no bounty allocated, no storage written.
+    assert_eq!(client.get_bounty_count(), 0);
+    assert!(client.get_bounty(&fake_bounty_id(&env, 0)).is_none());
+}
+
+/// Same as above but with an explicit empty auth mock list.
+#[test]
+fn test_create_bounty_with_empty_auth_mocks_fails_before_storage() {
+    let env = Env::default();
+    env.mock_auths(&[]);
+    let creator = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let msg = auth_panic_message(|| {
+        client.create_bounty(
+            &creator,
+            &Symbol::new(&env, "auth_empty"),
+            &String::from_str(&env, "desc"),
+            &1000,
+            &Address::generate(&env),
+            &0,
+            &None,
+            &Vec::new(&env),
+            &1,
+            &None,
+            &1,
+            &Vec::new(&env),
+        );
+    })
+    .expect("unauthenticated create_bounty must panic");
+
+    assert!(
+        !msg.contains("invalid reward_token address"),
+        "auth must be checked before the reward_token probe, got: {msg}"
+    );
+    assert_eq!(client.get_bounty_count(), 0);
+    assert_eq!(client.get_bounties_by_creator(&creator, &None, &10).0.len(), 0);
+}
+
+/// Audit: `claim_bounty` also authenticates the contributor before reading
+/// bounty state, so an unauthenticated call on a missing bounty fails on auth.
+#[test]
+fn test_claim_bounty_requires_auth_first() {
+    let env = Env::default();
+    let creator = Address::generate(&env);
+    let contributor = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // Create the bounty with mocked auths, then drop them.
+    env.mock_all_auths();
+    let bounty_id = make_bounty(&client, &env, &creator, "auth_claim", None);
+    env.set_auths(&[]);
+
+    let msg = auth_panic_message(|| client.claim_bounty(&contributor, &bounty_id))
+        .expect("unauthenticated claim_bounty must panic");
+    assert!(
+        msg.to_lowercase().contains("auth"),
+        "expected an authorization failure, got: {msg}"
+    );
+
+    // The bounty is untouched.
+    let bounty = client.get_bounty(&bounty_id).unwrap();
+    assert_eq!(bounty.status, Symbol::new(&env, "open"));
+    assert!(bounty.assignees.is_empty());
 }
 
 // ===========================================================================
@@ -816,6 +1116,142 @@ fn test_create_bounty_rejects_milestone_reward_overflow() {
         &Symbol::new(&env, "overflow"),
         &String::from_str(&env, "desc"),
         &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject negative milestone rewards.
+#[test]
+#[should_panic(expected = "milestone reward must be positive")]
+fn test_create_bounty_rejects_negative_milestone_reward() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 1500,
+        completed: false,
+        deadline: None,
+    });
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m2"),
+        reward: -500,
+        completed: false,
+        deadline: None,
+    });
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "neg_reward"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject zero milestone rewards.
+#[test]
+#[should_panic(expected = "milestone reward must be positive")]
+fn test_create_bounty_rejects_zero_milestone_reward() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 0,
+        completed: false,
+        deadline: None,
+    });
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "zero_reward"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject pre-completed milestones.
+#[test]
+#[should_panic(expected = "milestone is already completed")]
+fn test_create_bounty_rejects_pre_completed_milestone() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 1000,
+        completed: true,
+        deadline: None,
+    });
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "pre_comp"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject more than MAX_MILESTONES (20) milestones.
+#[test]
+#[should_panic(expected = "too many milestones")]
+fn test_create_bounty_rejects_oversized_milestone_list() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    for _ in 0..21 {
+        milestones.push_back(Milestone {
+            description: Symbol::new(&env, "m"),
+            reward: 100,
+            completed: false,
+            deadline: None,
+        });
+    }
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "too_many"),
+        &String::from_str(&env, "desc"),
+        &2100,
         &create_token_and_mint(&env, &creator, &contract_id, 0),
         &0,
         &None,
@@ -2392,16 +2828,14 @@ fn test_three_assignees_payout_sum_with_divisible_reward() {
 }
 
 /// Three assignees with an uneven reward_amount (9_999):
-/// Each share_bp: 3_334, 3_333, 3_333 (same as above).
-/// payout = 9_999 * share_bp / 10_000 (integer division truncates):
-///   First:  9_999 * 3_334 / 10_000 = 33_326_666 / 10_000 = 3_332 (truncated)
-///   Second: 9_999 * 3_333 / 10_000 = 33_323_667 / 10_000 = 3_332 (truncated)
-///   Third:  9_999 * 3_333 / 10_000 = 33_323_667 / 10_000 = 3_332 (truncated)
-///   Sum = 9_996 — 3 tokens lost to integer division in the payout formula.
-///
-/// This test documents the known integer-division remainder loss so future
-/// implementors can choose whether to recover the dust (e.g. send it to the
-/// primary assignee or back to the verifier).
+/// Each share_bp: 3_334, 3_333, 3_333.
+/// Base payouts:
+///   First:  9_999 * 3_334 / 10_000 = 3_333
+///   Second: 9_999 * 3_333 / 10_000 = 3_332
+///   Third:  9_999 * 3_333 / 10_000 = 3_332
+/// Base sum = 9_997. Remainder dust = 9_999 - 9_997 = 2 tokens.
+/// Primary assignee absorbs the 2 remainder tokens → payout1 = 3_335.
+/// Sum = 3_335 + 3_332 + 3_332 = 9_999 (exact sum equals reward_amount).
 #[test]
 fn test_three_assignees_payout_integer_division_loss_documented() {
     let (env, creator, contributor1, verifier) = setup_test();
@@ -2432,31 +2866,30 @@ fn test_three_assignees_payout_integer_division_loss_documented() {
     let payout2 = token_client.balance(&contributor2);
     let payout3 = token_client.balance(&contributor3);
 
-    // 9_999 * 3_334 / 10_000 = 3_333 (truncated from 3_333.6666)
-    assert_eq!(payout1, 3_333, "first assignee payout (truncated)");
-    // 9_999 * 3_333 / 10_000 = 3_332 (truncated from 3_332.6667)
-    assert_eq!(payout2, 3_332, "second assignee payout (truncated)");
-    assert_eq!(payout3, 3_332, "third assignee payout (truncated)");
+    // Primary assignee receives base share (3_333) + dust (2) = 3_335
+    assert_eq!(
+        payout1, 3_335,
+        "first assignee payout absorbs remainder dust"
+    );
+    assert_eq!(payout2, 3_332, "second assignee payout");
+    assert_eq!(payout3, 3_332, "third assignee payout");
 
     let total_paid = payout1 + payout2 + payout3;
     let integer_division_loss = reward_amount - total_paid;
 
-    // Document the known loss: 9_999 - 9_997 = 2 tokens unaccounted for.
     assert_eq!(
-        integer_division_loss, 2,
-        "integer-division loss is 2 tokens for reward_amount=9_999 with 3 assignees"
+        integer_division_loss, 0,
+        "integer-division loss is 0 as dust is allocated to primary assignee"
     );
-    // The total paid is strictly less than reward_amount in this case.
-    assert!(
-        total_paid < reward_amount,
-        "payout sum is less than reward_amount due to integer division"
-    );
+    assert_eq!(total_paid, reward_amount, "payout sum equals reward_amount");
 }
 
 /// Two assignees with uneven reward_amount=9_999:
 /// base_share = 5_000, remainder = 0 → both get 5_000.
-/// payout = 9_999 * 5_000 / 10_000 = 4_999 (truncated from 4_999.5).
-/// Sum = 9_998 — 1 token lost to truncation.
+/// Base payout: 9_999 * 5_000 / 10_000 = 4_999.
+/// Base sum = 9_998. Dust = 9_999 - 9_998 = 1 token.
+/// Primary assignee absorbs 1 token dust → payout1 = 5_000, payout2 = 4_999.
+/// Sum = 5_000 + 4_999 = 9_999 (exact sum equals reward_amount).
 #[test]
 fn test_two_assignees_uneven_reward_integer_division_loss() {
     let (env, creator, contributor1, verifier) = setup_test();
@@ -2483,17 +2916,105 @@ fn test_two_assignees_uneven_reward_integer_division_loss() {
     let payout1 = token_client.balance(&contributor1);
     let payout2 = token_client.balance(&contributor2);
 
-    // 9_999 * 5_000 / 10_000 = 4_999 (truncated from 4_999.5)
-    assert_eq!(payout1, 4_999, "first assignee payout");
+    assert_eq!(
+        payout1, 5_000,
+        "first assignee payout absorbs remainder dust"
+    );
     assert_eq!(payout2, 4_999, "second assignee payout");
 
     let total_paid = payout1 + payout2;
     let integer_division_loss = reward_amount - total_paid;
 
-    // Document: 1 token lost.
     assert_eq!(
-        integer_division_loss, 1,
-        "integer-division loss is 1 token for reward_amount=9_999 with 2 assignees"
+        integer_division_loss, 0,
+        "integer-division loss is 0 as dust is allocated to primary assignee"
+    );
+    assert_eq!(total_paid, reward_amount, "payout sum equals reward_amount");
+}
+
+/// Issue #1184: Verify that distribute_payout does not overflow on large reward amounts
+/// where reward_amount * share_bp exceeds i128::MAX.
+#[test]
+fn test_distribute_payout_large_reward_no_overflow() {
+    let (env, creator, contributor1, verifier) = setup_test();
+    let contributor2 = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    // reward_amount * 5_000 would exceed i128::MAX (~1.7e38) if multiplied directly.
+    // i128::MAX / 10_000 = ~1.7e34.
+    // Let's use 100_000_000_000_000_000_000_000_000_000_000_001 (1e34 + 1).
+    // 1e34 * 5_000 = 5e37, which with another order of magnitude exceeds i128::MAX.
+    // Let's use 50_000_000_000_000_000_000_000_000_000_000_001_i128 (~5e34).
+    // 5e34 * 5_000 = 2.5e38 > i128::MAX (1.7e38), so direct multiplication overflows!
+    let reward_amount: i128 = 50_000_000_000_000_000_000_000_000_000_000_001_i128;
+    let (bounty_id, token_addr) = make_multi_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "large_overflow",
+        reward_amount,
+        2,
+    );
+
+    client.claim_bounty(&contributor1, &bounty_id);
+    client.claim_bounty(&contributor2, &bounty_id);
+    client.complete_bounty(&verifier, &bounty_id);
+
+    let token_client = StellarAssetClient::new(&env, &token_addr);
+    let payout1 = token_client.balance(&contributor1);
+    let payout2 = token_client.balance(&contributor2);
+
+    assert_eq!(
+        payout1 + payout2,
+        reward_amount,
+        "sum of payouts equals reward_amount without overflow"
+    );
+}
+
+/// Issue #1184: Verify that apply_dispute_resolution also allocates dust to primary assignee.
+#[test]
+fn test_dispute_resolution_payout_allocates_dust_to_primary_assignee() {
+    let (env, creator, contributor1, _verifier) = setup_test();
+    let contributor2 = Address::generate(&env);
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let reward_amount: i128 = 9_999;
+    let (bounty_id, token_addr) = make_multi_bounty_with_token(
+        &client,
+        &env,
+        &creator,
+        &contract_id,
+        "dispute_dust",
+        reward_amount,
+        2,
+    );
+
+    client.claim_bounty(&contributor1, &bounty_id);
+    client.claim_bounty(&contributor2, &bounty_id);
+
+    client.raise_dispute(&creator, &bounty_id);
+
+    // Creator acts as arbitrator to resolve with "complete"
+    let token_admin = StellarAssetClient::new(&env, &token_addr);
+    token_admin.mint(&creator, &reward_amount);
+
+    client.resolve_dispute(&creator, &bounty_id, &Symbol::new(&env, "complete"));
+
+    let payout1 = token_admin.balance(&contributor1);
+    let payout2 = token_admin.balance(&contributor2);
+
+    assert_eq!(
+        payout1, 5_000,
+        "primary assignee absorbs 1 token remainder dust"
+    );
+    assert_eq!(payout2, 4_999, "second assignee payout");
+    assert_eq!(
+        payout1 + payout2,
+        reward_amount,
+        "payout sum equals reward_amount"
     );
 }
 
@@ -4893,6 +5414,72 @@ fn test_cancel_bounty_all_milestones_completed_zero_refund() {
     );
 }
 
+// --- #1231: reward-split dust invariants ---
+#[test]
+fn test_split_reward_dust_invariants() {
+    use crate::types::split_reward;
+    assert_eq!(split_reward(1000, 0), (0, 1000));
+    for (reward, count) in [(1000i128, 3u32), (7, 7), (1, 2), (i128::MAX, u32::MAX)] {
+        let (share, dust) = split_reward(reward, count);
+        assert_eq!(share * count as i128 + dust, reward);
+        assert!(dust >= 0 && dust < count as i128);
+    }
+}
+
+// --- #1230: real Val round-trips ---
+#[test]
+fn test_val_round_trip_types() {
+    use soroban_sdk::IntoVal;
+    let env = Env::default();
+    let id = BountyId(BytesN::from_array(&env, &[7u8; 32]));
+    let addr = Address::generate(&env);
+    let keys = [
+        DataKey::BountyCount,
+        DataKey::Bounty(id.clone()),
+        DataKey::BountyMeta(id.clone()),
+        DataKey::Contributor(addr.clone()),
+        DataKey::ContributorBounties(addr.clone()),
+        DataKey::ContributorHistory(addr),
+        DataKey::StatusIndex(Symbol::new(&env, "open")),
+    ];
+    for k in keys {
+        let v: Val = k.clone().into_val(&env);
+        assert_eq!(DataKey::try_from_val(&env, &v).unwrap(), k);
+    }
+    for (amt, idx) in [(i128::MIN, 0u32), (i128::MAX, u32::MAX)] {
+        let v: Val = (amt, idx, Vec::<u32>::new(&env)).into_val(&env);
+        let back = <(i128, u32, Vec<u32>)>::try_from_val(&env, &v).unwrap();
+        assert_eq!(back.0, amt);
+        assert_eq!(back.1, idx);
+    }
+}
+
+// --- #1232: metering budget bounds ---
+#[test]
+fn test_create_bounty_budget_bounds() {
+    let (env, creator, _, _) = setup_test();
+    let client = MergeMintContractClient::new(&env, &env.register(MergeMintContract, ()));
+    env.cost_estimate().budget().reset_default();
+    make_bounty(&client, &env, &creator, "budget", None);
+    let budget = env.cost_estimate().budget();
+    // Baseline ceilings; >10% unexplained growth must update these deliberately.
+    assert!(budget.cpu_instruction_cost() < 10_000_000);
+    assert!(budget.memory_bytes_cost() < 5_000_000);
+}
+
+// --- #1233: non-token reward contract fails closed ---
+mod not_a_token {
+    use soroban_sdk::{contract, contractimpl};
+    #[contract]
+    pub struct NotAToken;
+    #[contractimpl]
+    impl NotAToken {
+        pub fn ping() -> u32 {
+            1
+        }
+    }
+}
+
 // ── #1237: multi-page PAGE_SIZE boundary / swap-remove corruption tests ──
 
 fn page_test_id(env: &Env, n: u32) -> BountyId {
@@ -4953,6 +5540,33 @@ fn test_status_index_page_boundaries_all_orders() {
             });
         }
     }
+}
+
+#[test]
+fn test_non_token_reward_rejected() {
+    let (env, creator, _, _) = setup_test();
+    let client = MergeMintContractClient::new(&env, &env.register(MergeMintContract, ()));
+    let fake = env.register(not_a_token::NotAToken, ());
+    let res = client.try_create_bounty(
+        &creator,
+        &Symbol::new(&env, "bad"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &fake,
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &Vec::new(&env),
+    );
+    assert_eq!(
+        res.err().unwrap().unwrap(),
+        soroban_sdk::Error::from_contract_error(
+            crate::errors::ContractError::InvalidRewardToken as u32
+        )
+    );
 }
 
 #[test]

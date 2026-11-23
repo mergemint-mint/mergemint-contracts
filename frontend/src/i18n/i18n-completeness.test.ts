@@ -58,6 +58,11 @@ describe('i18n key completeness', () => {
     expect(missingKeys).toContain('create_bounty');
     expect(missingKeys).toContain('error_boundary_message');
     expect(missingKeys).toContain('deadline_urgent');
+    expect(missingKeys).toContain('status_submitted');
+    expect(missingKeys).toContain('status_archived');
+    expect(missingKeys).toContain('status_paused');
+    expect(missingKeys).toContain('contract_paused_title');
+    expect(missingKeys).toContain('contract_paused_notice');
 
     const errorFormat = `Missing ${missingKeys.length} keys: ${missingKeys.join(', ')}`;
     expect(errorFormat).toContain('claim_bounty');

@@ -21,6 +21,10 @@ const en = {
   status_cancelled: 'cancelled',
   status_expired: 'expired',
   status_archived: 'archived',
+  status_paused: 'paused',
+  contract_paused_title: 'Contract paused',
+  contract_paused_notice:
+    'The smart contract is currently paused by an administrator. State-changing bounty actions are temporarily unavailable.',
   load_more: 'Load more',
   loading: 'Loading...',
 
