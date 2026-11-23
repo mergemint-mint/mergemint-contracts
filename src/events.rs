@@ -662,6 +662,21 @@ pub struct OwnershipTransferred {
     pub previous_owner: Address,
 }
 
+/// Emitted by `cancel_bounty_ownership_transfer` when a creator revokes a
+/// pending ownership transfer (#1193).
+pub fn emit_ownership_transfer_cancelled(
+    env: &Env,
+    bounty_id: &BountyId,
+    owner: &Address,
+    revoked_owner: &Address,
+) {
+    let topic = Symbol::new(env, "ownership_transfer_cancelled");
+    env.events().publish(
+        (topic, owner.clone()),
+        (bounty_id.clone(), revoked_owner.clone()),
+    );
+}
+
 pub fn emit_ownership_transferred(
     env: &Env,
     bounty_id: &BountyId,
