@@ -2,14 +2,16 @@ import React from 'react';
 import { BountyStatus } from '../types';
 
 export const STATUS_LABELS: Record<BountyStatus, string> = {
-  open: 'open',
-  claimed: 'claimed',
-  submitted: 'submitted',
-  disputed: 'disputed',
-  completed: 'completed',
-  cancelled: 'cancelled',
-  archived: 'archived',
-  paused: 'paused',
+  open: 'Open',
+  claimed: 'Claimed',
+  in_progress: 'In Progress',
+  submitted: 'Submitted',
+  disputed: 'Disputed',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+  expired: 'Expired',
+  archived: 'Archived',
+  paused: 'Paused',
 };
 
 export function StatusBadge({
@@ -21,7 +23,12 @@ export function StatusBadge({
 }) {
   const displayLabel = label ?? STATUS_LABELS[status] ?? status;
   return (
-    <span className={`status-badge status-badge--${status}`}>
+    <span
+      className={`status-badge status-badge--${status}`}
+      role="status"
+      aria-label={displayLabel}
+      data-status={status}
+    >
       {displayLabel}
     </span>
   );

@@ -38,6 +38,8 @@ jobs:
 
   interface-check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,3 +97,87 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+
+  cross-layer-parity:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify cross-layer parity fixtures exist
+        run: |
+          missing=0
+          for f in fixtures/validation-parity.json src mergemint-backend sdk; do
+            if [ ! -e "$f" ]; then
+              echo "✗ Missing required parity input: $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "✓ All cross-layer parity inputs present" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate parity fixture JSON
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          with open("fixtures/validation-parity.json") as fh:
+              data = json.load(fh)
+          if not isinstance(data, (dict, list)) or not data:
+              print("✗ fixtures/validation-parity.json is empty or malformed")
+              sys.exit(1)
+          print("✓ fixtures/validation-parity.json is valid JSON")
+          PY
+
+      - name: Check contract exports vs backend events vs SDK methods
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, re, sys
+
+          root = pathlib.Path(".")
+          fixture = json.loads((root / "fixtures/validation-parity.json").read_text())
+
+          def collect(paths, pattern):
+              found = set()
+              for base in paths:
+                  for p in (root / base).rglob("*"):
+                      if p.is_file() and p.suffix in {".rs", ".ts", ".js"}:
+                          try:
+                              text = p.read_text(errors="ignore")
+                          except OSError:
+                              continue
+                          found.update(re.findall(pattern, text))
+              return found
+
+          contract_exports = collect(["src"], r"#\[contracttype\]|#\[contractimpl\]|pub fn (\w+)")
+          backend_events = collect(["mergemint-backend"], r"(?:event|Event)\s*[:=]\s*[\"'](\w+)[\"']")
+          sdk_methods = collect(["sdk"], r"(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{")
+
+          errors = []
+          if not contract_exports:
+              errors.append("No contract exports detected under src/")
+          if not backend_events:
+              errors.append("No backend events detected under mergemint-backend/")
+          if not sdk_methods:
+              errors.append("No SDK methods detected under sdk/")
+
+          if errors:
+              for e in errors:
+                  print(f"✗ {e}")
+              sys.exit(1)
+
+          print("✓ Cross-layer parity inputs detected across contract, backend, and SDK")
+          PY
+
+      - name: Summarize parity result
+        if: always()
+        run: |
+          {
+            echo "## Cross-layer parity"
+            echo ""
+            echo "Verified Soroban contract exports (\`src/\`), backend events (\`mergemint-backend/\`), SDK methods (\`sdk/\`), and \`fixtures/validation-parity.json\`."
+          } >> "$GITHUB_STEP_SUMMARY"

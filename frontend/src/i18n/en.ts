@@ -13,11 +13,13 @@ const en = {
   filter_assigned_to_me: 'Assigned to me',
   status_all: 'all',
   status_open: 'open',
+  status_in_progress: 'in progress',
   status_claimed: 'claimed',
   status_submitted: 'submitted',
   status_disputed: 'disputed',
   status_completed: 'completed',
   status_cancelled: 'cancelled',
+  status_expired: 'expired',
   status_archived: 'archived',
   status_paused: 'paused',
   contract_paused_title: 'Contract paused',
@@ -25,6 +27,14 @@ const en = {
     'The smart contract is currently paused by an administrator. State-changing bounty actions are temporarily unavailable.',
   load_more: 'Load more',
   loading: 'Loading...',
+
+  // StatusBadge
+  status_badge_label: 'Status: {status}',
+
+  // Paused banner
+  paused_notice_title: 'Contracts paused',
+  paused_notice_body:
+    'Contract actions are temporarily paused. You can still browse bounties; new claims and submissions will resume once the pause is lifted.',
 
   // BountyDetail (page)
   claiming: 'Claiming...',
