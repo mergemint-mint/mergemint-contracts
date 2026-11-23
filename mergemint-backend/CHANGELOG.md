@@ -5,6 +5,32 @@ documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en
 
 ---
 
+## [0.2.0](https://github.com/mergemint-mint/mergemint-contracts/compare/backend-v0.1.0...backend-v0.2.0) (2026-11-23)
+
+
+### Added
+
+* add glossary, mdBook docs, CSP, and security headers ([4b11961](https://github.com/mergemint-mint/mergemint-contracts/commit/4b11961a971dac7dfbb403509f39feb169cbe2e7))
+* **backend:** add indexer reliability features ([f3f158b](https://github.com/mergemint-mint/mergemint-contracts/commit/f3f158b23ba68690c93ad8852040ca4ce513bd12))
+* **backend:** add security headers middleware ([698ce41](https://github.com/mergemint-mint/mergemint-contracts/commit/698ce41e146d20b6e6bf930f129880d37cd4889c)), closes [#1115](https://github.com/mergemint-mint/mergemint-contracts/issues/1115)
+* **backend:** resolve transaction and webhook issues ([3f84bbc](https://github.com/mergemint-mint/mergemint-contracts/commit/3f84bbcdff5273f2a2aaf9b0daa3c1176774288c))
+
+
+### Fixed
+
+* [#1274](https://github.com/mergemint-mint/mergemint-contracts/issues/1274) Reconcile `description` length validation parity between `mer ([e1e743d](https://github.com/mergemint-mint/mergemint-contracts/commit/e1e743d4929eb1e524cb741b900370730f08dea9))
+* [#1275](https://github.com/mergemint-mint/mergemint-contracts/issues/1275) Harden full-text search, sort parameters, and cursor decoding ([396c60f](https://github.com/mergemint-mint/mergemint-contracts/commit/396c60f7cfff4dcf8140764225b589d98b6cb2f9))
+* [#1276](https://github.com/mergemint-mint/mergemint-contracts/issues/1276) Add Prometheus metrics for indexer decode failures, webhook d ([31a9ee9](https://github.com/mergemint-mint/mergemint-contracts/commit/31a9ee9192967d0755575a17b135d7103b1fb7db))
+* [#1277](https://github.com/mergemint-mint/mergemint-contracts/issues/1277) Enforce OpenAPI snapshot drift check and contract-to-backend ([4d5e882](https://github.com/mergemint-mint/mergemint-contracts/commit/4d5e882c0c5fd013d583717a84b4dd400be75eda))
+* **backend:** recover stale webhook delivery leases ([944b2d2](https://github.com/mergemint-mint/mergemint-contracts/commit/944b2d2aa50e2874721cb35fab227344f8f8b862))
+* **backend:** restore truncated db.rs and missing sha2 import ([748680e](https://github.com/mergemint-mint/mergemint-contracts/commit/748680e7c42774264fe7dc9d721dc89c4fdd4014))
+* **indexer:** implement genuine Soroban XDR tuple decoding ([#1259](https://github.com/mergemint-mint/mergemint-contracts/issues/1259)) ([c0eebab](https://github.com/mergemint-mint/mergemint-contracts/commit/c0eebaba2b118632fd0e5e8b568fcd534874f54a))
+* **indexer:** implement genuine Soroban XDR tuple decoding ([#1259](https://github.com/mergemint-mint/mergemint-contracts/issues/1259)) ([1b68e2a](https://github.com/mergemint-mint/mergemint-contracts/commit/1b68e2a1cd033afa0a8b2d9d689bac3d37ac1efa))
+* **indexer:** index all missing Soroban contract events ([#1258](https://github.com/mergemint-mint/mergemint-contracts/issues/1258)) ([06d2fd7](https://github.com/mergemint-mint/mergemint-contracts/commit/06d2fd798990b45da0b14ec505df2c29f0f386cb))
+* **indexer:** index all missing Soroban contract events ([#1258](https://github.com/mergemint-mint/mergemint-contracts/issues/1258)) ([ca47699](https://github.com/mergemint-mint/mergemint-contracts/commit/ca476994d6d40f90d8acecf0513fa8736eabb744))
+* **rate-limit:** add bounded capacity and TTL eviction to prevent OOM DoS ([#1261](https://github.com/mergemint-mint/mergemint-contracts/issues/1261)) ([19a71f1](https://github.com/mergemint-mint/mergemint-contracts/commit/19a71f198cc35e177117522705b1ac2b750f46b6))
+* **rate-limit:** add bounded capacity and TTL eviction to prevent OOM DoS ([#1261](https://github.com/mergemint-mint/mergemint-contracts/issues/1261)) ([fac4808](https://github.com/mergemint-mint/mergemint-contracts/commit/fac4808ed42cc5536721e090710d001849363a34))
+
 ## [Unreleased]
 
 ### Added
