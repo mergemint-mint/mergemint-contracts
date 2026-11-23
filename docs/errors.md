@@ -1,7 +1,7 @@
 # MergeMint Unified API & Error Code Reference
 
 This document provides a single, authoritative reference for errors across all three layers of the MergeMint platform:
-1. **On-chain Contract Errors** (Soroban smart contract numeric error codes 1–7)
+1. **On-chain Contract Errors** (Soroban smart contract `#[contracterror]` numeric discriminants)
 2. **Backend API Errors** (`mergemint-backend` REST & SSE `AppError` responses)
 3. **TypeScript SDK Errors** (`@mergemint/sdk` typed error classes and `MergeMintErrorCode` variants)
 
@@ -18,6 +18,7 @@ This document provides a single, authoritative reference for errors across all t
 | **5** | `InsufficientBalance` | `400` | `insufficient token balance` | `SimulationFailedError` | `SIMULATION_FAILED` | Insufficient token balance in your wallet to cover escrow funding. |
 | **6** | `InvalidState` | `400` | `invalid bounty state transition` | `SimulationFailedError` | `SIMULATION_FAILED` | The bounty is not in the required state for this action (e.g. not in progress). |
 | **7** | `Overflow` | `400` | `arithmetic overflow` | `SimulationFailedError` | `SIMULATION_FAILED` | Calculation overflow detected. Please verify numerical inputs. |
+| **8** | `BatchTooLarge` | `400` | `invalid input parameters` | `InvalidArgumentError` | `INVALID_ARGUMENT` | Too many IDs requested. Batch reads are capped at 50 entries. |
 | — | *N/A (Idempotency)* | `409` | `request already in flight` | `MergeMintSdkError` | `SIMULATION_FAILED` | A conflicting operation is currently in flight. Please wait a moment. |
 | — | *N/A (Rate Limit)* | `429` | `rate limit exceeded` | `MergeMintSdkError` | `SIMULATION_FAILED` | Too many requests. Please wait a moment before trying again. |
 | — | *N/A (Config)* | — | *Client-only* | `InvalidConfigError` | `INVALID_CONFIG` | Invalid network configuration or contract parameters. |
@@ -30,7 +31,32 @@ This document provides a single, authoritative reference for errors across all t
 
 ## 2. On-Chain Contract Errors (`src/errors.rs`)
 
-Soroban contracts use numeric error codes mapped via the `#[contracterror]` macro. When a precondition fails, the contract invokes `soroban_sdk::panic_with_error!(&env, err)`.
+`ContractError` is a typed `#[contracterror]` `#[repr(u32)]` enum. Entrypoints return `Result<T, ContractError>`; the Soroban host converts a returned `Err` into a deterministic numeric error code, so no static error strings are compiled into the release WASM. The discriminants below are **stable** — never renumber or reuse a code, only append new variants.
+
+| Discriminant | Variant | Meaning |
+|:---:|---|---|
+| `1` | `Unauthorized` | Caller lacks the required authorization |
+| `2` | `NotFound` | Requested resource does not exist |
+| `3` | `InvalidInput` | Argument failed validation bounds |
+| `4` | `AlreadyExists` | Duplicate registration of an existing entity |
+| `5` | `InsufficientBalance` | Funding account lacks tokens for the transfer |
+| `6` | `InvalidState` | Invalid bounty lifecycle transition |
+| `7` | `Overflow` | Checked arithmetic overflow |
+| `8` | `BatchTooLarge` | Batch read exceeded `MAX_LIMIT` (50) IDs |
+
+### Batch Read Limits
+
+All batch query entrypoints enforce a hard cap of `MAX_LIMIT = 50` IDs per invocation to keep RPC simulation budgets and ledger footprints predictable:
+
+- `get_bounties(ids)` — processes at most the first 50 IDs.
+- `get_bounty_metas(ids)` — processes at most the first 50 IDs.
+- `get_bounties_by_ids(ids)` — processes at most the first 50 IDs.
+
+Callers must chunk larger ID sets into batches of 50 or fewer. Passing more than 50 IDs is not an error for these read paths (the excess is ignored), but callers should not rely on truncation; chunk explicitly.
+
+### Paged Contributor History
+
+Contributor history queries are paged rather than batched: callers supply a `start` offset and a page size, and the contract returns at most one page per invocation. Page sizes are bounded by the same `MAX_LIMIT` cap. Use the returned cursor/offset to request subsequent pages; do not attempt to fetch unbounded history in a single invocation.
 
 ### Code 1: `Unauthorized`
 - **Definition:** Caller is not permitted to perform this action.
@@ -151,6 +177,7 @@ try {
 ## 5. Drift Prevention & Automated Testing
 
 To ensure documentation never drifts from code:
-- **Contract Codes:** All numeric codes 1–7 in `src/errors.rs` are verified against the documented codes in unit test `test_contract_errors_match_documented_reference`.
+- **Contract Codes:** All numeric discriminants in `src/errors.rs` (`ContractError`) are verified against the documented codes in unit test `test_contract_errors_match_documented_reference`, and exact codes are asserted through `try_*` client methods in `src/test.rs`.
+- **Batch Limits:** Unit tests in `src/test.rs` verify `get_bounties` / `get_bounty_metas` behavior for 0, 50, and 51+ IDs against `MAX_LIMIT`.
 - **SDK Error Codes:** All 9 variants of `MergeMintErrorCode` in `sdk/src/types.ts` are verified against `docs/errors.md` in `sdk/src/sdk-issues.test.ts`.
 - **Backend Error Mapping:** Redaction and error response formats in `mergemint-backend/src/routes/tx.rs` are tested against mock error fixtures.

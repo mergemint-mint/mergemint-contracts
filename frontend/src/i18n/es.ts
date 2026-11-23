@@ -16,11 +16,20 @@ const es: Record<TranslationKey, string> = {
   status_all: 'todas',
   status_open: 'abierta',
   status_claimed: 'reclamada',
+  status_in_progress: 'en progreso',
+  status_submitted: 'enviada',
   status_disputed: 'en disputa',
   status_completed: 'completada',
   status_cancelled: 'cancelada',
+  status_expired: 'expirada',
+  status_archived: 'archivada',
   load_more: 'Cargar más',
   loading: 'Cargando...',
+
+  // Paused contract notice
+  paused_notice_title: 'Contrato en pausa',
+  paused_notice_message:
+    'El contrato está en pausa. Las acciones de recompensas están temporalmente deshabilitadas.',
 
   // BountyDetail (page)
   claiming: 'Reclamando...',
