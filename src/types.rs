@@ -29,7 +29,18 @@ pub enum DataKey {
     Bounty(BountyId),
     BountyMeta(BountyId),
     Contributor(Address),
+    /// Legacy single-blob list of bounty IDs created by a contributor —
+    /// replaced by ContributorBountiesCount / ContributorBountiesPage.
+    /// Kept in the enum so existing serialised keys can still be read during a
+    /// migration pass. New code must not write this variant.
     ContributorBounties(Address),
+    /// Total number of bounty IDs recorded for a contributor across all
+    /// `ContributorBountiesPage` shards.
+    ContributorBountiesCount(Address),
+    /// Paged contributor-bounties shard. `page` is 0-indexed; each shard holds
+    /// at most `storage::PAGE_SIZE` (50) entries. See storage.rs for the
+    /// layout contract, mirroring `StatusIndexPage`.
+    ContributorBountiesPage(Address, u32),
     /// Bounty IDs a contributor was an assignee on when the bounty reached a
     /// terminal status (`"completed"` or `"cancelled"`). Maintained
     /// incrementally by `storage::move_bounty_status`.
@@ -68,11 +79,30 @@ pub enum DataKey {
     /// rather than from the exact completion/cancellation ledger (which the
     /// contract does not currently record).
     ArchiveEligibleAt(BountyId),
-    /// Bounty IDs paid in a given reward token, keyed by the token contract
-    /// address. Appended to on `create_bounty`; entries for archived
-    /// bounties are pruned by `archive_bounty` so the index only lists
-    /// bounties with a live full record.
+    /// Legacy single-blob token index — replaced by TokenBountiesPage.
+    /// Kept in the enum so existing serialised keys can still be read during a
+    /// migration pass. New code must not write this variant.
     TokenBounties(Address),
+    /// Total number of bounty IDs indexed under a given reward token (sum
+    /// across all `TokenBountiesPage` shards). Maintained by
+    /// `storage::append_token_bounty` / `storage::remove_token_bounty`.
+    TokenBountiesCount(Address),
+    /// Paged token index shard, keyed by `(reward_token, page)`. `page` is
+    /// 0-indexed and each shard holds at most `storage::PAGE_SIZE` bounty IDs,
+    /// so a popular token (e.g. XLM/USDC) never exceeds Soroban's 64 KB
+    /// per-entry XDR cap. Entries for archived bounties are pruned by
+    /// `archive_bounty` via swap-remove so the index only lists bounties with
+    /// a live full record.
+    TokenBountiesPage(Address, u32),
+    /// Total number of open bounty IDs indexed under a given tag (sum across
+    /// all `TagIndexPage` shards). Maintained on `create_bounty`,
+    /// `update_tags`, and status transitions.
+    TagIndexCount(Symbol),
+    /// Paged tag index shard, keyed by `(tag, page)`. `page` is 0-indexed and
+    /// each shard holds at most `storage::PAGE_SIZE` bounty IDs, bounding the
+    /// read footprint of `get_bounties_by_tag` to a single page slice instead
+    /// of an O(N) scan over every open bounty.
+    TagIndexPage(Symbol, u32),
     /// Contract admin address, set lazily by the first admin-only call.
     Admin,
     /// Admin-configured cap on concurrent open+claimed bounties per creator.
@@ -121,7 +151,22 @@ pub enum DataKey {
     /// Emergency circuit breaker set by `pause` / cleared by `unpause`.
     /// Absent means not paused.
     Paused,
+    /// O(1) index of the bounty a contributor is currently assigned to and
+    /// actively working on. Written on `claim_bounty` / `reassign_bounty`,
+    /// removed on `unclaim_bounty`, `release_stale_claim`, completion,
+    /// cancellation, and dispute resolution. Replaces the O(N) scan over
+    /// in-progress bounties in `get_contributor_active_bounty`.
+    ContributorActiveBounty(Address),
 }
+
+/// Hard cap on the number of distinct sponsors a single bounty may accrue.
+/// Bounds the `refund_sponsors` loop so an attacker cannot grief
+/// `cancel_bounty` / `expire_bounty` by adding hundreds of dust sponsors.
+pub const MAX_SPONSORS_PER_BOUNTY: u32 = 32;
+
+/// Minimum amount a single `sponsor_bounty` call may contribute. Prevents
+/// dust sponsorships that inflate the sponsor list without meaningful funds.
+pub const MIN_SPONSOR_AMOUNT: i128 = 1;
 
 /// Snapshot of contract-wide admin settings, returned by `get_config`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,6 +302,9 @@ pub struct BountySummary {
     pub assignee: Option<Address>,
     pub status: Symbol,
     pub reward: i128,
+    /// Reward token the bounty was denominated in. Retained so archived
+    /// bounties report their true token instead of a placeholder address.
+    pub reward_token: Address,
 }
 
 impl Contributor {
