@@ -3,11 +3,11 @@
   "private": true,
   "workspaces": [
     "mergemint-contracts/sdk",
-    "mergemint-frontend"
+    "frontend"
   ],
   "scripts": {
     "build:sdk": "npm run build --workspace=mergemint-contracts/sdk",
-    "dev:frontend": "npm run dev --workspace=mergemint-frontend",
+    "dev:frontend": "npm run dev --workspace=frontend",
     "lint:js": "eslint --max-warnings=0 .",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
