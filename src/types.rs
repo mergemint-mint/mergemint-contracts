@@ -199,6 +199,9 @@ pub struct PendingResolution {
     pub decided_at: u32,
 }
 
+/// Maximum number of milestones a bounty may carry to prevent unbounded vector metering.
+pub const MAX_MILESTONES: u32 = 20;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct Milestone {

@@ -407,6 +407,179 @@ fn test_complete_bounty_after_assignee_dispute_panics() {
 
 /// Every `ContractError` variant must map to a distinct, stable `u32` code.
 #[test]
+fn test_contract_error_messages() {
+    use crate::errors::{message, ContractError};
+
+    assert_eq!(message(ContractError::BountyNotFound), "bounty not found");
+    assert_eq!(
+        message(ContractError::BountyAlreadyAssigned),
+        "bounty already assigned"
+    );
+    assert_eq!(
+        message(ContractError::AlreadyClaimed),
+        "bounty already claimed by contributor"
+    );
+    assert_eq!(message(ContractError::BountyNotOpen), "bounty not open");
+    assert_eq!(
+        message(ContractError::BountyNotInProgress),
+        "bounty is not in progress"
+    );
+    assert_eq!(
+        message(ContractError::BountyHasNoAssignee),
+        "bounty has no assignee"
+    );
+    assert_eq!(
+        message(ContractError::RewardMustBePositive),
+        "reward_amount must be positive"
+    );
+    assert_eq!(
+        message(ContractError::NotBountyCreator),
+        "not bounty creator"
+    );
+    assert_eq!(
+        message(ContractError::VerifierCannotBeAssignee),
+        "verifier cannot be the assignee"
+    );
+    assert_eq!(
+        message(ContractError::CreatorCannotClaim),
+        "creator cannot claim"
+    );
+    assert_eq!(
+        message(ContractError::ContributorHasActiveClaim),
+        "contributor already has an active claim"
+    );
+    assert_eq!(
+        message(ContractError::BountyIsDisputed),
+        "bounty is disputed"
+    );
+    assert_eq!(message(ContractError::TooManyTags), "too many tags");
+    assert_eq!(
+        message(ContractError::OnlyCreatorOrAssigneeCanDispute),
+        "only creator or assignee can raise dispute"
+    );
+    assert_eq!(
+        message(ContractError::DeadlineNotPassed),
+        "deadline has not passed"
+    );
+    assert_eq!(
+        message(ContractError::BountyDeadlinePassed),
+        "bounty deadline passed"
+    );
+    assert_eq!(
+        message(ContractError::BountyNoDeadline),
+        "bounty has no deadline"
+    );
+    assert_eq!(
+        message(ContractError::ReputationTooLow),
+        "contributor reputation is too low"
+    );
+    assert_eq!(
+        message(ContractError::VerifierNotAuthorized),
+        "verifier is not in the required verifiers list"
+    );
+    assert_eq!(
+        message(ContractError::AlreadyApproved),
+        "verifier has already approved this bounty"
+    );
+    assert_eq!(
+        message(ContractError::BountyNotDisputed),
+        "bounty is not in disputed status"
+    );
+    assert_eq!(
+        message(ContractError::NotArbitrator),
+        "caller is not authorized to resolve this dispute"
+    );
+    assert_eq!(
+        message(ContractError::RewardBelowMinimum),
+        "reward_amount is below the minimum allowed"
+    );
+    assert_eq!(
+        message(ContractError::MaxAssigneesMustBePositive),
+        "max_assignees must be at least 1"
+    );
+    assert_eq!(
+        message(ContractError::ApprovalThresholdExceedsVerifiers),
+        "approval_threshold cannot exceed the number of required_verifiers"
+    );
+    assert_eq!(
+        message(ContractError::InvalidRewardToken),
+        "invalid reward_token address"
+    );
+    assert_eq!(
+        message(ContractError::MilestoneAlreadyCompleted),
+        "milestone is already completed"
+    );
+    assert_eq!(
+        message(ContractError::NotAllMilestonesCompleted),
+        "not all milestones are completed"
+    );
+    assert_eq!(
+        message(ContractError::InvalidMilestoneIndex),
+        "invalid milestone index"
+    );
+    assert_eq!(
+        message(ContractError::MilestoneRewardsMismatch),
+        "milestone rewards do not sum to reward_amount"
+    );
+    assert_eq!(
+        message(ContractError::MilestoneRewardMustBePositive),
+        "milestone reward must be positive"
+    );
+    assert_eq!(
+        message(ContractError::TooManyMilestones),
+        "too many milestones"
+    );
+    assert_eq!(
+        message(ContractError::MetadataEmpty),
+        "metadata must not be empty"
+    );
+}
+
+/// Every `ContractError` variant must map to a distinct panic message.
+#[test]
+fn test_contract_error_messages_are_unique() {
+    use crate::errors::{message, ContractError};
+
+    let variants = [
+        ContractError::BountyNotFound,
+        ContractError::BountyAlreadyAssigned,
+        ContractError::BountyNotOpen,
+        ContractError::BountyNotInProgress,
+        ContractError::BountyHasNoAssignee,
+        ContractError::RewardMustBePositive,
+        ContractError::RewardBelowMinimum,
+        ContractError::NotBountyCreator,
+        ContractError::VerifierCannotBeAssignee,
+        ContractError::CreatorCannotClaim,
+        ContractError::ContributorHasActiveClaim,
+        ContractError::BountyIsDisputed,
+        ContractError::BountyDeadlinePassed,
+        ContractError::BountyNoDeadline,
+        ContractError::DeadlineNotPassed,
+        ContractError::ReputationTooLow,
+        ContractError::TooManyTags,
+        ContractError::MaxAssigneesMustBePositive,
+        ContractError::OnlyCreatorOrAssigneeCanDispute,
+        ContractError::VerifierNotAuthorized,
+        ContractError::AlreadyApproved,
+        ContractError::BountyNotDisputed,
+        ContractError::NotArbitrator,
+        ContractError::ApprovalThresholdExceedsVerifiers,
+        ContractError::InvalidRewardToken,
+        ContractError::MilestoneAlreadyCompleted,
+        ContractError::NotAllMilestonesCompleted,
+        ContractError::InvalidMilestoneIndex,
+    ];
+
+    for (i, a) in variants.iter().enumerate() {
+        for b in variants.iter().skip(i + 1) {
+            assert_ne!(message(*a), message(*b));
+        }
+    }
+}
+
+/// Every `ContractError` variant must map to a distinct, stable `u32` code.
+#[test]
 fn test_contract_error_codes_are_unique() {
     use crate::errors::ContractError;
 
@@ -440,6 +613,8 @@ fn test_contract_error_codes_are_unique() {
         ContractError::NotAllMilestonesCompleted,
         ContractError::InvalidMilestoneIndex,
         ContractError::MilestoneRewardsMismatch,
+        ContractError::MilestoneRewardMustBePositive,
+        ContractError::TooManyMilestones,
         ContractError::MetadataEmpty,
     ];
 
@@ -816,6 +991,142 @@ fn test_create_bounty_rejects_milestone_reward_overflow() {
         &Symbol::new(&env, "overflow"),
         &String::from_str(&env, "desc"),
         &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject negative milestone rewards.
+#[test]
+#[should_panic(expected = "milestone reward must be positive")]
+fn test_create_bounty_rejects_negative_milestone_reward() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 1500,
+        completed: false,
+        deadline: None,
+    });
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m2"),
+        reward: -500,
+        completed: false,
+        deadline: None,
+    });
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "neg_reward"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject zero milestone rewards.
+#[test]
+#[should_panic(expected = "milestone reward must be positive")]
+fn test_create_bounty_rejects_zero_milestone_reward() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 0,
+        completed: false,
+        deadline: None,
+    });
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "zero_reward"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject pre-completed milestones.
+#[test]
+#[should_panic(expected = "milestone is already completed")]
+fn test_create_bounty_rejects_pre_completed_milestone() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        description: Symbol::new(&env, "m1"),
+        reward: 1000,
+        completed: true,
+        deadline: None,
+    });
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "pre_comp"),
+        &String::from_str(&env, "desc"),
+        &1000,
+        &create_token_and_mint(&env, &creator, &contract_id, 0),
+        &0,
+        &None,
+        &Vec::new(&env),
+        &1,
+        &None,
+        &1,
+        &milestones,
+    );
+}
+
+/// Issue #1182: create_bounty must reject more than MAX_MILESTONES (20) milestones.
+#[test]
+#[should_panic(expected = "too many milestones")]
+fn test_create_bounty_rejects_oversized_milestone_list() {
+    let (env, creator, _contributor, _verifier) = setup_test();
+    let contract_id = env.register(MergeMintContract, ());
+    let client = MergeMintContractClient::new(&env, &contract_id);
+
+    let mut milestones = Vec::new(&env);
+    for _ in 0..21 {
+        milestones.push_back(Milestone {
+            description: Symbol::new(&env, "m"),
+            reward: 100,
+            completed: false,
+            deadline: None,
+        });
+    }
+
+    client.create_bounty(
+        &creator,
+        &Symbol::new(&env, "too_many"),
+        &String::from_str(&env, "desc"),
+        &2100,
         &create_token_and_mint(&env, &creator, &contract_id, 0),
         &0,
         &None,

@@ -337,6 +337,102 @@ proptest! {
     }
 
     #[test]
+    fn prop_milestone_non_positive_reward_rejected(
+        bad_reward in -10_000i128..=0i128,
+    ) {
+        let (env, client, creator, token_addr) = create_test_env();
+
+        let mut milestones = SorobanVec::new(&env);
+        milestones.push_back(Milestone {
+            description: Symbol::new(&env, "m1"),
+            reward: bad_reward,
+            completed: false,
+            deadline: None,
+        });
+
+        let res = client.try_create_bounty(
+            &creator,
+            &Symbol::new(&env, "nonpos"),
+            &SorobanString::from_str(&env, "desc"),
+            &1000,
+            &token_addr,
+            &0,
+            &None,
+            &SorobanVec::new(&env),
+            &1,
+            &None,
+            &1,
+            &milestones,
+        );
+        prop_assert!(res.is_err(), "Expected error for non-positive milestone reward");
+    }
+
+    #[test]
+    fn prop_milestone_pre_completed_rejected(
+        reward in 100i128..=10_000i128,
+    ) {
+        let (env, client, creator, token_addr) = create_test_env();
+
+        let mut milestones = SorobanVec::new(&env);
+        milestones.push_back(Milestone {
+            description: Symbol::new(&env, "m1"),
+            reward,
+            completed: true,
+            deadline: None,
+        });
+
+        let res = client.try_create_bounty(
+            &creator,
+            &Symbol::new(&env, "precomp"),
+            &SorobanString::from_str(&env, "desc"),
+            &reward,
+            &token_addr,
+            &0,
+            &None,
+            &SorobanVec::new(&env),
+            &1,
+            &None,
+            &1,
+            &milestones,
+        );
+        prop_assert!(res.is_err(), "Expected error for pre-completed milestone");
+    }
+
+    #[test]
+    fn prop_milestone_oversized_list_rejected(
+        count in 21usize..=30usize,
+    ) {
+        let (env, client, creator, token_addr) = create_test_env();
+
+        let mut milestones = SorobanVec::new(&env);
+        for _ in 0..count {
+            milestones.push_back(Milestone {
+                description: Symbol::new(&env, "m"),
+                reward: 100,
+                completed: false,
+                deadline: None,
+            });
+        }
+
+        let total_reward = (count as i128) * 100;
+        let res = client.try_create_bounty(
+            &creator,
+            &Symbol::new(&env, "oversized"),
+            &SorobanString::from_str(&env, "desc"),
+            &total_reward,
+            &token_addr,
+            &0,
+            &None,
+            &SorobanVec::new(&env),
+            &1,
+            &None,
+            &1,
+            &milestones,
+        );
+        prop_assert!(res.is_err(), "Expected error for oversized milestone list");
+    }
+
+    #[test]
     fn prop_too_many_tags_rejected(
         tag_count in 6usize..=15usize,
     ) {
