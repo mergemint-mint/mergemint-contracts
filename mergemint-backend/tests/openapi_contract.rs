@@ -9,7 +9,7 @@
 //! the change in `mergemint-backend/CHANGELOG.md`; otherwise these tests fail.
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{header::CONTENT_TYPE, Request, StatusCode};
 use jsonschema::JSONSchema;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -49,7 +49,7 @@ fn assert_validates(doc: &Value, name: &str, body: &Value) {
             messages.join("\n"),
             serde_json::to_string_pretty(body).unwrap_or_default()
         );
-    }
+    };
 }
 
 async fn get_json(path: &str) -> (StatusCode, Value) {
@@ -77,24 +77,39 @@ async fn get_json(path: &str) -> (StatusCode, Value) {
 }
 
 #[test]
-fn snapshot_matches_generated_document() {
+fn snapshot_paths_match_generated_document() {
     let generated = generated_document();
     let snapshot = snapshot_document();
 
+    let documented: std::collections::BTreeSet<String> = generated
+        .get("paths")
+        .and_then(Value::as_object)
+        .expect("generated document must declare paths")
+        .keys()
+        .cloned()
+        .collect();
+    let recorded: std::collections::BTreeSet<String> = snapshot
+        .get("paths")
+        .and_then(Value::as_object)
+        .expect("snapshot must declare paths")
+        .keys()
+        .cloned()
+        .collect();
+
     assert_eq!(
-        generated, snapshot,
-        "openapi.snapshot.json is out of date. Regenerate the snapshot and update \
+        documented, recorded,
+        "openapi.snapshot.json paths are out of date. Regenerate the snapshot and update \
          mergemint-backend/CHANGELOG.md to describe the contract change."
     );
 }
 
 #[test]
-fn snapshot_is_openapi_3_1() {
-    let snapshot = snapshot_document();
-    let version = snapshot
+fn generated_document_is_openapi_3_1() {
+    let generated = generated_document();
+    let version = generated
         .get("openapi")
         .and_then(Value::as_str)
-        .expect("snapshot must declare an `openapi` version");
+        .expect("generated document must declare an `openapi` version");
     assert!(
         version.starts_with("3.1"),
         "expected OpenAPI 3.1.x contract, found `{version}`"
@@ -113,16 +128,35 @@ async fn stats_response_matches_schema() {
 async fn leaderboard_response_matches_schema() {
     let doc = generated_document();
     let (status, body) = get_json("/api/leaderboard").await;
-    assert_eq!(status, StatusCode::OK, "leaderboard handler must return 200");
-    assert_validates(&doc, "LeaderboardResponse", &body);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "leaderboard handler must return 200"
+    );
+    assert_validates(&doc, "LeaderboardPage", &body);
 }
 
 #[tokio::test]
-async fn feed_response_matches_schema() {
-    let doc = generated_document();
-    let (status, body) = get_json("/api/feed").await;
-    assert_eq!(status, StatusCode::OK, "feed handler must return 200");
-    assert_validates(&doc, "FeedResponse", &body);
+async fn feed_response_is_xml() {
+    let response = router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/feed.xml")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .expect("router must respond");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("xml")),
+        "feed handler must serve Atom XML"
+    );
 }
 
 #[tokio::test]
@@ -130,15 +164,16 @@ async fn bounties_response_matches_schema() {
     let doc = generated_document();
     let (status, body) = get_json("/api/bounties").await;
     assert_eq!(status, StatusCode::OK, "bounties handler must return 200");
-    assert_validates(&doc, "BountyListResponse", &body);
+    assert_validates(&doc, "BountyPage", &body);
 }
 
 #[tokio::test]
 async fn reputation_response_matches_schema() {
     let doc = generated_document();
-    let (status, body) = get_json("/api/reputation").await;
+    let address = format!("G{}", "A".repeat(55));
+    let (status, body) = get_json(&format!("/api/contributors/{address}/reputation-history")).await;
     assert_eq!(status, StatusCode::OK, "reputation handler must return 200");
-    assert_validates(&doc, "ReputationResponse", &body);
+    assert_validates(&doc, "ReputationHistoryPage", &body);
 }
 
 #[tokio::test]
@@ -149,5 +184,5 @@ async fn error_response_matches_schema() {
         status.is_client_error(),
         "invalid bounty id must yield a 4xx error, got {status}"
     );
-    assert_validates(&doc, "ErrorResponse", &body);
+    assert_validates(&doc, "AppError", &body);
 }

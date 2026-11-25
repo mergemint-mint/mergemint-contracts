@@ -203,7 +203,7 @@ mod tests {
             limiter.len()
         );
         assert!(
-            limiter.len() > 0,
+            !limiter.is_empty(),
             "the map must not be empty after active inserts"
         );
     }

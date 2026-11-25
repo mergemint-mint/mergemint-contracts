@@ -267,7 +267,8 @@ fn idempotency_check_from_entry(entry: &IdempotencyEntry) -> IdempotencyCheck {
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(body.clone()))
                 .unwrap_or_else(|_| {
-                    AppError::internal("failed to build idempotency replay response").into_response()
+                    AppError::internal("failed to build idempotency replay response")
+                        .into_response()
                 }),
         ),
         IdempotencyEntry::InFlight => IdempotencyCheck::Conflict(
