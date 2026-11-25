@@ -27,6 +27,12 @@ use crate::{
     routes::tx::AppState,
 };
 
+/// Event emitted when a claimed bounty's deadline is approaching.
+///
+/// Shared with the deadline reminder job so the live SSE event and the durable
+/// email dispatch agree on the event name (#1264).
+pub const DEADLINE_APPROACHING_EVENT: &str = "deadline_approaching";
+
 const PUBLIC_BASE_URL_ENV: &str = "PUBLIC_BASE_URL";
 const SMTP_HOST_ENV: &str = "SMTP_HOST";
 const SMTP_PORT_ENV: &str = "SMTP_PORT";
@@ -351,6 +357,12 @@ fn email_error(status: StatusCode, message: &str) -> (StatusCode, Json<serde_jso
     (status, Json(serde_json::json!({"error": message})))
 }
 
+/// Subscribe permanently to bounty events for durable email delivery.
+///
+/// This consumer is started once at boot and keeps its own receiver, so email
+/// delivery does not depend on how many SSE clients are currently connected.
+/// The deadline reminder job publishes its live SSE event on a best-effort
+/// basis; the email for that event is handled here (see #1264).
 pub fn start_email_notifier(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut receiver = state.bounty_broadcast.subscribe();
@@ -424,7 +436,7 @@ fn email_template(event: &str) -> Option<(&'static str, &'static str)> {
             "Bounty dispute update",
             "There is an update to a dispute on your bounty.",
         )),
-        "deadline_approaching" => Some((
+        DEADLINE_APPROACHING_EVENT => Some((
             "Bounty deadline approaching",
             "A claimed bounty is approaching its deadline.",
         )),
