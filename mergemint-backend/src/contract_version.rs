@@ -106,7 +106,10 @@ pub async fn check_contract_version(
                 ));
             }
 
-            let response: RpcResponse = response.json().await.context("failed to parse RPC response")?;
+            let response: RpcResponse = response
+                .json()
+                .await
+                .context("failed to parse RPC response")?;
 
             if let Some(error) = response.error {
                 return Err(anyhow!("Soroban RPC simulateTransaction failed: {error}"));
@@ -122,8 +125,9 @@ pub async fn check_contract_version(
             let stellar_xdr::ScVal::Symbol(symbol) = value else {
                 return Err(anyhow!("contract version() did not return a symbol"));
             };
-            Ok(String::from_utf8(symbol.into()).context("contract version symbol was not valid UTF-8")?)
-        })();
+            String::from_utf8(symbol.into()).context("contract version symbol was not valid UTF-8")
+        })
+        .await;
 
         match result {
             Ok(version) => return Ok(version),

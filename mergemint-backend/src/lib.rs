@@ -1,10 +1,14 @@
-#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 
 pub mod db;
 pub mod deadline_reminders;
 pub mod events;
 pub mod indexer;
 pub mod notifications;
+pub mod openapi;
 pub mod rate_limit;
 pub mod routes;
 pub mod security_headers;

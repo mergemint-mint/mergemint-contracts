@@ -244,7 +244,7 @@ fn conditional_json_response<T: Serialize>(value: T, headers: &HeaderMap) -> Res
                     || candidate.trim_start_matches("W/") == etag.trim_start_matches("W/")
             })
         });
-    let etag = HeaderValue::from_str(&etag).expect("generated ETag is a valid header value");
+    let etag = HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("W/\"0\""));
     if matches {
         (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response()
     } else {
@@ -355,7 +355,7 @@ pub async fn export_bounties_csv(
         ))
     });
     let response_stream = header.chain(rows);
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
         .header(
@@ -363,7 +363,15 @@ pub async fn export_bounties_csv(
             HeaderValue::from_static("attachment; filename=\"bounties.csv\""),
         )
         .body(Body::from_stream(response_stream))
-        .expect("static CSV response headers are valid"))
+        .map_err(|error| {
+            tracing::error!(%error, "failed to build CSV stream response");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::routes::tx::AppError::internal(
+                    "failed to build CSV response",
+                )),
+            )
+        })
 }
 
 fn csv_field(value: &str) -> String {

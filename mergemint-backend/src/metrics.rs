@@ -205,7 +205,9 @@ impl Metrics {
             INDEXER_LEDGER_GAPS.load(Ordering::Relaxed)
         ));
 
-        out.push_str("# HELP mergemint_indexer_decode_errors_total Indexer events that failed to decode.\n");
+        out.push_str(
+            "# HELP mergemint_indexer_decode_errors_total Indexer events that failed to decode.\n",
+        );
         out.push_str("# TYPE mergemint_indexer_decode_errors_total counter\n");
         out.push_str(&format!(
             "mergemint_indexer_decode_errors_total {}\n",
@@ -381,11 +383,8 @@ mod tests {
         )
         .unwrap();
         let ssrf_before = value_for(&before, "mergemint_webhook_ssrf_blocked_total").unwrap();
-        let sse_before = value_for(
-            &before,
-            "mergemint_sse_rejected_total{reason=\"per_ip\"}",
-        )
-        .unwrap();
+        let sse_before =
+            value_for(&before, "mergemint_sse_rejected_total{reason=\"per_ip\"}").unwrap();
 
         record_indexer_decode_error();
         record_indexer_unrecognized_event();

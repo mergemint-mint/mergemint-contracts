@@ -1,265 +1,1646 @@
 {
-    "paths": {
-        "/admin/audit-logs": [
-            "get"
-        ],
-        "/admin/webhooks/failed": [
-            "get"
-        ],
-        "/admin/webhooks/{id}/replay": [
-            "post"
-        ],
-        "/bounties": [
-            "get"
-        ],
-        "/bounties/assignee/{address}": [
-            "get"
-        ],
-        "/bounties/stream": [
-            "get"
-        ],
-        "/bounties/{id}": [
-            "get"
-        ],
-        "/bounties/{id}/claim": [
-            "post"
-        ],
-        "/contributors/{address}/reputation-history": [
-            "get"
-        ],
-        "/leaderboard": [
-            "get"
-        ],
-        "/notifications/subscriptions": [
-            "post"
-        ],
-        "/notifications/unsubscribe": [
-            "get"
-        ],
-        "/notifications/verify": [
-            "get"
-        ],
-        "/stats": [
-            "get"
-        ],
-        "/tx/cancel": [
-            "post"
-        ],
-        "/tx/extend-deadline": [
-            "post"
-        ],
-        "/tx/submit": [
-            "post"
-        ],
-        "/tx/top-up": [
-            "post"
-        ],
-        "/webhooks/subscriptions": [
-            "get"
-        ],
-        "/webhooks/subscriptions/{id}": [
-            "get"
-        ]
-    },
+  "components": {
     "schemas": {
-        "AppError": {
-            "fields": [
-                "code",
-                "message"
-            ],
-            "enum": null
+      "AppError": {
+        "description": "The JSON shape returned to the client on any error.\n\n**Security note (#469):** For `INTERNAL_SERVER_ERROR` (500) responses the\n`message` field is *always* set to the generic string\n`\"internal server error\"` before serialising.  The original detail is\nemitted via `tracing::error!` so it appears in server logs without ever\nbeing sent to the client.  This prevents RPC debug strings, stack traces,\nand other internal state from leaking across the API boundary.",
+        "properties": {
+          "code": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          }
         },
-        "AuditLog": {
-            "fields": [
-                "action",
-                "actor",
-                "id",
-                "target",
-                "timestamp"
-            ],
-            "enum": null
-        },
-        "Bounty": {
-            "fields": [
-                "assignee",
-                "created_at",
-                "creator",
-                "deadline",
-                "description",
-                "id",
-                "reward",
-                "reward_decimals",
-                "reward_token",
-                "status",
-                "tags",
-                "title"
-            ],
-            "enum": null
-        },
-        "BountyPage": {
-            "fields": [
-                "bounties",
-                "next_cursor"
-            ],
-            "enum": null
-        },
-        "BountySortField": {
-            "fields": [],
-            "enum": [
-                "created",
-                "reward",
-                "deadline"
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "AuditLog": {
+        "description": "An audit log entry recording an administrative action (e.g., resolve_dispute).\n\nFields match the database schema defined in migrations/0002_create_audit_logs_table.sql.",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
             ]
+          },
+          "target": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
         },
-        "CancelBountyRequest": {
-            "fields": [
-                "bountyId",
-                "creator"
-            ],
-            "enum": null
-        },
-        "ClaimResponse": {
-            "fields": [
-                "id",
-                "status"
-            ],
-            "enum": null
-        },
-        "LeaderboardEntry": {
-            "fields": [
-                "address",
-                "completed_bounties",
-                "reputation"
-            ],
-            "enum": null
-        },
-        "LeaderboardPage": {
-            "fields": [
-                "entries"
-            ],
-            "enum": null
-        },
-        "CreateEmailSubscriptionRequest": {
-            "fields": [
-                "contributor_address",
-                "email"
-            ],
-            "enum": null
-        },
-        "ExtendDeadlineRequest": {
-            "fields": [
-                "bountyId",
-                "creator",
-                "newDeadline"
-            ],
-            "enum": null
-        },
-        "FailedWebhookDelivery": {
-            "fields": [
-                "attempts",
-                "created_at",
-                "id",
-                "last_error",
-                "last_status",
-                "payload",
-                "subscription_id"
-            ],
-            "enum": null
-        },
-        "FailedWebhookPage": {
-            "fields": [
-                "deliveries",
-                "next_cursor"
-            ],
-            "enum": null
-        },
-        "QueryAuditLogsResponse": {
-            "fields": [
-                "logs",
-                "next_cursor"
-            ],
-            "enum": null
-        },
-        "ReputationHistoryEntry": {
-            "fields": [
-                "contributor_address",
-                "event_id",
-                "ledger",
-                "new_value",
-                "old_value",
-                "reason",
-                "timestamp"
-            ],
-            "enum": null
-        },
-        "ReputationHistoryPage": {
-            "fields": [
-                "entries",
-                "next_offset"
-            ],
-            "enum": null
-        },
-        "SortOrder": {
-            "fields": [],
-            "enum": [
-                "asc",
-                "desc"
+        "required": [
+          "actor",
+          "action",
+          "target",
+          "timestamp"
+        ],
+        "type": "object"
+      },
+      "Bounty": {
+        "description": "A bounty row as exposed by the listing endpoints (`list_bounties`,\n`list_bounties_by_assignee`). Distinct from `routes::tx::Bounty`, which\nmodels only the fields needed to build payout XDR for the dispute /\nself-claim flows.",
+        "properties": {
+          "assignee": {
+            "type": [
+              "string",
+              "null"
             ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "creator": {
+            "type": "string"
+          },
+          "deadline": {
+            "description": "Optional expiry, mirrored from the contract's `Bounty::deadline`. `None`\nmeans the bounty never expires.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "reward": {
+            "description": "Reward amount, mirrored from the contract's `Bounty::reward_amount`.",
+            "type": "integer"
+          },
+          "reward_decimals": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reward_token": {
+            "description": "Contract token address and precision used to format the reward. Also\nkeeps aggregate totals in a single unit; older indexed rows may not\nhave this value yet.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "Lifecycle status (`open`, `claimed`, `submitted`, `completed`, `cancelled`).",
+            "type": "string"
+          },
+          "tags": {
+            "description": "Tags attached to the bounty, used by the `tag` listing filter.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": "string"
+          }
         },
-        "SubmitSignedTransactionRequest": {
-            "fields": [
-                "source",
-                "xdr"
-            ],
-            "enum": null
+        "required": [
+          "id",
+          "creator",
+          "created_at",
+          "reward"
+        ],
+        "type": "object"
+      },
+      "BountyPage": {
+        "description": "One page of a cursor-paginated bounty listing.",
+        "properties": {
+          "bounties": {
+            "items": {
+              "$ref": "#/components/schemas/Bounty"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         },
-        "SubmitTransactionResponse": {
-            "fields": [
-                "hash",
-                "latestLedger",
-                "status"
-            ],
-            "enum": null
+        "required": [
+          "bounties"
+        ],
+        "type": "object"
+      },
+      "BountySortField": {
+        "description": "Columns a bounty listing may be sorted by. Deserialization is restricted to\nthis whitelist (`#[serde(rename_all = \"lowercase\")]`), so an unknown\n`sort=` value is rejected by the query extractor and can never reach the\nquery layer.",
+        "enum": [
+          "created",
+          "reward",
+          "deadline"
+        ],
+        "type": "string"
+      },
+      "CancelBountyRequest": {
+        "properties": {
+          "bountyId": {
+            "type": "string"
+          },
+          "creator": {
+            "type": "string"
+          }
         },
-        "StatsResponse": {
-            "fields": [
-                "active_contributors",
-                "open_bounties",
-                "total_paid_out"
-            ],
-            "enum": null
+        "required": [
+          "bountyId",
+          "creator"
+        ],
+        "type": "object"
+      },
+      "ClaimResponse": {
+        "description": "Response body for `POST /bounties/{id}/claim`.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
         },
-        "TokenTotal": {
-            "fields": [
-                "amount",
-                "token_address"
-            ],
-            "enum": null
+        "required": [
+          "id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "CreateEmailSubscriptionRequest": {
+        "properties": {
+          "contributor_address": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          }
         },
-        "TopUpBountyRequest": {
-            "fields": [
-                "amount",
-                "bountyId",
-                "funder"
-            ],
-            "enum": null
+        "required": [
+          "contributor_address",
+          "email"
+        ],
+        "type": "object"
+      },
+      "ExtendDeadlineRequest": {
+        "properties": {
+          "bountyId": {
+            "type": "string"
+          },
+          "creator": {
+            "type": "string"
+          },
+          "newDeadline": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
         },
-        "UnsignedTransactionResponse": {
-            "fields": [
-                "estimated_fee",
-                "xdr"
-            ],
-            "enum": null
+        "required": [
+          "bountyId",
+          "creator",
+          "newDeadline"
+        ],
+        "type": "object"
+      },
+      "FailedWebhookDelivery": {
+        "properties": {
+          "attempts": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_status": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "payload": {
+            "type": "object"
+          },
+          "subscription_id": {
+            "type": "string"
+          }
         },
-        "WebhookSubscription": {
-            "fields": [
-                "active",
-                "created_at",
-                "event_types",
-                "id",
-                "url"
-            ],
-            "enum": null
-        }
+        "required": [
+          "id",
+          "subscription_id",
+          "payload",
+          "attempts",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "FailedWebhookPage": {
+        "properties": {
+          "deliveries": {
+            "items": {
+              "$ref": "#/components/schemas/FailedWebhookDelivery"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "deliveries"
+        ],
+        "type": "object"
+      },
+      "LeaderboardEntry": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "completed_bounties": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reputation": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "address",
+          "completed_bounties",
+          "reputation"
+        ],
+        "type": "object"
+      },
+      "LeaderboardPage": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/LeaderboardEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "type": "object"
+      },
+      "QueryAuditLogsResponse": {
+        "properties": {
+          "logs": {
+            "items": {
+              "$ref": "#/components/schemas/AuditLog"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "logs"
+        ],
+        "type": "object"
+      },
+      "ReputationHistoryEntry": {
+        "properties": {
+          "contributor_address": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "ledger": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "new_value": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "old_value": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "contributor_address",
+          "ledger",
+          "timestamp",
+          "old_value",
+          "new_value",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ReputationHistoryPage": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ReputationHistoryEntry"
+            },
+            "type": "array"
+          },
+          "next_offset": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "type": "object"
+      },
+      "SortOrder": {
+        "description": "Direction applied to the selected [`BountySortField`]. Whitelisted the same\nway, so only `asc` / `desc` are ever accepted.",
+        "enum": [
+          "asc",
+          "desc"
+        ],
+        "type": "string"
+      },
+      "StatsResponse": {
+        "properties": {
+          "active_contributors": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "open_bounties": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total_paid_out": {
+            "items": {
+              "$ref": "#/components/schemas/TokenTotal"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "open_bounties",
+          "total_paid_out",
+          "active_contributors"
+        ],
+        "type": "object"
+      },
+      "SubmitSignedTransactionRequest": {
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "xdr": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "xdr"
+        ],
+        "type": "object"
+      },
+      "SubmitTransactionResponse": {
+        "properties": {
+          "hash": {
+            "type": "string"
+          },
+          "latestLedger": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "hash",
+          "status",
+          "latestLedger"
+        ],
+        "type": "object"
+      },
+      "TokenTotal": {
+        "properties": {
+          "amount": {
+            "type": "integer"
+          },
+          "token_address": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token_address",
+          "amount"
+        ],
+        "type": "object"
+      },
+      "TopUpBountyRequest": {
+        "properties": {
+          "amount": {
+            "description": "Positive amount in the reward token's decimal units.",
+            "type": "string"
+          },
+          "bountyId": {
+            "type": "string"
+          },
+          "funder": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bountyId",
+          "funder",
+          "amount"
+        ],
+        "type": "object"
+      },
+      "UnsignedTransactionResponse": {
+        "properties": {
+          "estimated_fee": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "xdr": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "xdr",
+          "estimated_fee"
+        ],
+        "type": "object"
+      },
+      "WebhookSubscription": {
+        "description": "A registered webhook endpoint that receives signed bounty event payloads.",
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "event_types": {
+            "description": "Event names this subscription receives; `\"*\"` or an empty list means all.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "event_types",
+          "active",
+          "created_at"
+        ],
+        "type": "object"
+      }
     }
+  },
+  "info": {
+    "description": "Rate-limited responses include X-RateLimit-Limit and X-RateLimit-Remaining; 429 responses include Retry-After in seconds.",
+    "license": {
+      "name": ""
+    },
+    "title": "MergeMint backend API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/admin/audit-logs": {
+      "get": {
+        "description": "Supported query parameters:\n- `actor`: filter by the actor who performed the action (e.g., arbitrator address)\n- `action`: filter by action type (e.g., \"resolve_dispute\")\n- `target`: filter by target (e.g., bounty_id)\n- `from` / `to`: inclusive Unix timestamps in seconds\n- `cursor`: opaque cursor returned by the previous page\n- `limit`: maximum number of results to return (default: 50, max: 100)",
+        "operationId": "query_audit_logs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "actor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryAuditLogsResponse"
+                }
+              }
+            },
+            "description": "Paginated audit logs"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Invalid cursor or time range"
+          }
+        },
+        "summary": "Query audit logs with optional filtering by actor, action, or target.\nThis is a read-only admin endpoint.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/webhooks/failed": {
+      "get": {
+        "operationId": "list_failed_webhooks_route",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailedWebhookPage"
+                }
+              }
+            },
+            "description": "Paginated failed webhook deliveries"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Persistent delivery storage is unavailable"
+          }
+        },
+        "summary": "List dead-lettered webhook deliveries with cursor pagination.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/webhooks/{id}/replay": {
+      "post": {
+        "operationId": "replay_webhook_route",
+        "parameters": [
+          {
+            "description": "Dead-letter delivery identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Delivery queued for replay"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Dead-letter delivery not found"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Persistent delivery storage is unavailable"
+          }
+        },
+        "summary": "Requeue a dead-lettered delivery and record the administrative action.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/bounties": {
+      "get": {
+        "description": "Supports optional `status` and `tag` filters that translate into indexed\nSQL filters in the store, composing with the existing pagination and limit\nclamping. An invalid `status` value yields 400.\n\nAlso supports optional `sort` (`reward`, `deadline`, `created`) and `order`\n(`asc`, `desc`) parameters. Both are validated against whitelists before\nbeing passed to the store, so user input never reaches SQL directly. When\nomitted, the default remains newest first (`created desc`) to avoid\nbreaking existing clients.\n\nPagination supports both the legacy `cursor` (a `created_at` timestamp) and\nthe opaque `page_cursor` token introduced in issue #873. When `page_cursor`\nis supplied it takes precedence and the response carries a `next_cursor`\nfor the following page.",
+        "operationId": "list_bounties",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Legacy offset-style cursor: a `created_at` timestamp. Kept for backward\ncompatibility with existing clients.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor-based pagination token (issue #873). Encodes\n`(created_at, id)` as base64 so paging stays stable when new bounties\nare inserted concurrently. Takes precedence over `cursor` when present.",
+            "in": "query",
+            "name": "page_cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional status filter. Validated against [`VALID_STATUSES`]; an\nunrecognised value is rejected with 400 rather than silently ignored.",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional tag filter. Matched against the bounty's indexed tag column.",
+            "in": "query",
+            "name": "tag",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional case-insensitive full-text query over bounty title and description.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional sort column (`created`, `reward`, `deadline`). Deserialization\nis restricted to [`BountySortField`], so an unrecognised value is\nrejected with 400 by the query extractor and never reaches the store.",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/BountySortField"
+            }
+          },
+          {
+            "description": "Optional sort direction (`asc`, `desc`), whitelisted the same way.",
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SortOrder"
+            }
+          },
+          {
+            "description": "Return 304 when the current page matches this ETag",
+            "in": "header",
+            "name": "If-None-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BountyPage"
+                }
+              }
+            },
+            "description": "Paginated list of bounties"
+          },
+          "304": {
+            "description": "The bounty list has not changed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Invalid filter, sort or cursor"
+          }
+        },
+        "summary": "`GET /bounties`",
+        "tags": [
+          "bounties"
+        ]
+      }
+    },
+    "/bounties/assignee/{address}": {
+      "get": {
+        "description": "Returns a paginated list of bounties assigned to `address`. A\nsyntactically invalid address is rejected with 400 before it ever\nreaches the store — a malformed value should surface as a client error,\nnot silently be treated the same as a well-formed address with no\nresults.",
+        "operationId": "list_bounties_by_assignee",
+        "parameters": [
+          {
+            "description": "Stellar account or contract address",
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Legacy offset-style cursor: a `created_at` timestamp. Kept for backward\ncompatibility with existing clients.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor-based pagination token (issue #873). Encodes\n`(created_at, id)` as base64 so paging stays stable when new bounties\nare inserted concurrently. Takes precedence over `cursor` when present.",
+            "in": "query",
+            "name": "page_cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional status filter. Validated against [`VALID_STATUSES`]; an\nunrecognised value is rejected with 400 rather than silently ignored.",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional tag filter. Matched against the bounty's indexed tag column.",
+            "in": "query",
+            "name": "tag",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional case-insensitive full-text query over bounty title and description.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional sort column (`created`, `reward`, `deadline`). Deserialization\nis restricted to [`BountySortField`], so an unrecognised value is\nrejected with 400 by the query extractor and never reaches the store.",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/BountySortField"
+            }
+          },
+          {
+            "description": "Optional sort direction (`asc`, `desc`), whitelisted the same way.",
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SortOrder"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BountyPage"
+                }
+              }
+            },
+            "description": "Paginated list of bounties for the assignee"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Malformed assignee address"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "`GET /bounties/assignee/{address}`",
+        "tags": [
+          "bounties"
+        ]
+      }
+    },
+    "/bounties/stream": {
+      "get": {
+        "description": "Server-Sent Events channel that broadcasts a bounty ID whenever a bounty's\nstate changes (see `claim_bounty`). Clients subscribe once and receive\nincremental push notifications instead of polling. State changes use the\n`bounty_updated` event; deadline reminders use `deadline_approaching`.",
+        "operationId": "bounty_stream",
+        "responses": {
+          "200": {
+            "description": "SSE stream of bounty state changes"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Too many concurrent stream connections"
+          }
+        },
+        "summary": "`GET /bounties/stream`",
+        "tags": [
+          "bounties"
+        ]
+      }
+    },
+    "/bounties/{id}": {
+      "get": {
+        "operationId": "get_bounty_route",
+        "parameters": [
+          {
+            "description": "Bounty identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bounty"
+                }
+              }
+            },
+            "description": "Bounty found"
+          },
+          "304": {
+            "description": "The bounty has not changed"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Bounty not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "`GET /bounties/{id}`",
+        "tags": [
+          "bounties"
+        ]
+      }
+    },
+    "/bounties/{id}/claim": {
+      "post": {
+        "description": "Marks a bounty as claimed by the caller and broadcasts the bounty ID on the\nSSE channel so subscribed clients are notified without a polling round-trip.",
+        "operationId": "claim_bounty",
+        "parameters": [
+          {
+            "description": "Bounty identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Return 304 when the bounty matches this ETag",
+            "in": "header",
+            "name": "If-None-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimResponse"
+                }
+              }
+            },
+            "description": "Bounty claimed"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "`POST /bounties/{id}/claim`",
+        "tags": [
+          "bounties"
+        ]
+      }
+    },
+    "/contributors/{address}/reputation-history": {
+      "get": {
+        "operationId": "get_reputation_history",
+        "parameters": [
+          {
+            "description": "Stellar contributor address",
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReputationHistoryPage"
+                }
+              }
+            },
+            "description": "Contributor reputation changes, newest first"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Malformed contributor address"
+          }
+        },
+        "tags": [
+          "contributors"
+        ]
+      }
+    },
+    "/leaderboard": {
+      "get": {
+        "description": "Returns a paginated list of top contributors ranked by reputation and\ncompleted bounties. Results are cached in memory for 60 seconds to avoid\nexpensive aggregation on every request.\n\nQuery parameters:\n- `limit`: Maximum number of entries to return (default: 20, max: 100)",
+        "operationId": "get_leaderboard_route",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeaderboardPage"
+                }
+              }
+            },
+            "description": "Contributors ranked by reputation"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "`GET /leaderboard`",
+        "tags": [
+          "leaderboard"
+        ]
+      }
+    },
+    "/notifications/subscriptions": {
+      "post": {
+        "operationId": "create_email_subscription",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEmailSubscriptionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Subscription request accepted"
+          },
+          "400": {
+            "description": "Invalid contributor address or email"
+          },
+          "503": {
+            "description": "Email delivery is not configured"
+          }
+        },
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/notifications/unsubscribe": {
+      "get": {
+        "operationId": "unsubscribe_email",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Email unsubscribe result"
+          }
+        },
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/notifications/verify": {
+      "get": {
+        "operationId": "verify_email",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Email verification result"
+          }
+        },
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/stats": {
+      "get": {
+        "operationId": "get_stats_route",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatsResponse"
+                }
+              }
+            },
+            "description": "Platform totals, with payout amounts separated by reward token"
+          }
+        },
+        "summary": "`GET /stats`",
+        "tags": [
+          "stats"
+        ]
+      }
+    },
+    "/tx/cancel": {
+      "post": {
+        "operationId": "cancel_bounty_transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelBountyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsignedTransactionResponse"
+                }
+              }
+            },
+            "description": "Unsigned simulated transaction"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Caller is not the bounty creator"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Contract simulation failed"
+          }
+        },
+        "summary": "Build and simulate a creator-authorized `cancel_bounty` invocation.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/tx/extend-deadline": {
+      "post": {
+        "operationId": "extend_deadline_transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtendDeadlineRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsignedTransactionResponse"
+                }
+              }
+            },
+            "description": "Unsigned simulated transaction"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Caller is not the bounty creator"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Contract simulation failed"
+          }
+        },
+        "summary": "Build and simulate a creator-authorized `extend_deadline` invocation.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/tx/submit": {
+      "post": {
+        "operationId": "submit_signed_transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitSignedTransactionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmitTransactionResponse"
+                }
+              }
+            },
+            "description": "Transaction accepted by Soroban RPC"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Invalid transaction envelope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Soroban RPC rejected the transaction"
+          }
+        },
+        "summary": "Submit a wallet-signed transaction envelope to Soroban RPC.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/tx/top-up": {
+      "post": {
+        "operationId": "top_up_bounty_transaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TopUpBountyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsignedTransactionResponse"
+                }
+              }
+            },
+            "description": "Unsigned simulated transaction"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Contract simulation failed"
+          }
+        },
+        "summary": "Build and simulate a `sponsor_bounty` invocation for a top-up.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/webhooks/subscriptions": {
+      "get": {
+        "operationId": "list_subscriptions_route",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WebhookSubscription"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Registered webhook subscriptions"
+          }
+        },
+        "summary": "Retrieve all registered webhook subscriptions.",
+        "tags": [
+          "webhooks"
+        ]
+      }
+    },
+    "/webhooks/subscriptions/{id}": {
+      "get": {
+        "operationId": "get_subscription_route",
+        "parameters": [
+          {
+            "description": "Webhook subscription identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookSubscription"
+                }
+              }
+            },
+            "description": "Webhook subscription"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppError"
+                }
+              }
+            },
+            "description": "Subscription not found"
+          }
+        },
+        "summary": "Retrieve a single webhook subscription by identifier.",
+        "tags": [
+          "webhooks"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "Bounty listing and live updates",
+      "name": "bounties"
+    },
+    {
+      "description": "Email notification subscriptions",
+      "name": "notifications"
+    }
+  ]
 }
