@@ -17,6 +17,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -45,6 +46,8 @@ const AUDIT_LOGS_MIGRATION: &str = include_str!("../migrations/0002_create_audit
 #[cfg(test)]
 const AUDIT_LOGS_PAGINATION_MIGRATION: &str =
     include_str!("../migrations/0003_add_audit_log_pagination_index.sql");
+#[cfg(test)]
+const IDEMPOTENCY_MIGRATION: &str = include_str!("../migrations/0010_create_idempotency_keys.sql");
 
 /// Lightweight in-memory store used during development / integration tests.
 /// Production deployments replace this with a real database pool.
@@ -1012,6 +1015,13 @@ pub enum IdempotencyEntry {
 #[derive(Debug, Default)]
 pub struct IdempotencyStore {
     pub entries: HashMap<String, IdempotencyEntry>,
+    /// Canonical request fingerprint recorded with each key (#1263). Checking
+    /// it before replay prevents one client from reusing another request's
+    /// cached response under the same key.
+    pub request_hashes: HashMap<String, String>,
+    /// Expiry timestamp for each key, mirroring the Postgres `expires_at`
+    /// column so the in-memory fallback also releases stale reservations.
+    pub expiries: HashMap<String, DateTime<Utc>>,
 }
 
 /// Shared, thread-safe handle to the idempotency store.
@@ -1036,6 +1046,267 @@ pub fn read_idempotency(
     store: &SharedIdempotencyStore,
 ) -> std::sync::RwLockReadGuard<'_, IdempotencyStore> {
     store.read().unwrap_or_else(|e| e.into_inner())
+}
+
+// ---------------------------------------------------------------------------
+// Shared idempotency backend (#1263)
+// ---------------------------------------------------------------------------
+
+/// Default lifetime of an idempotency record in either backend.
+///
+/// Completed responses are replayable for this long; abandoned in-flight
+/// reservations are reclaimed on the next claim once the TTL has elapsed.
+pub const IDEMPOTENCY_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// Outcome of attempting to claim a client-supplied `Idempotency-Key`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdempotencyClaim {
+    /// The key was free and is now reserved for this caller.
+    Proceed,
+    /// A previous request with the same key and payload completed; replay it.
+    Replay(String),
+    /// A previous request with the same key and payload is still running.
+    InFlight,
+    /// The key was already used with a different payload.
+    PayloadMismatch,
+}
+
+/// Canonical SHA-256 fingerprint of a request payload, hex encoded.
+///
+/// Serializing the typed request rather than the raw HTTP body makes the
+/// fingerprint independent of field order and insignificant JSON whitespace,
+/// while still changing whenever a field the handler actually uses changes.
+pub fn request_fingerprint<T: Serialize>(payload: &T) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(payload)?;
+    Ok(hex::encode(Sha256::digest(&bytes)))
+}
+
+fn expiry_from_now(ttl: Duration) -> DateTime<Utc> {
+    let seconds = i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX);
+    Utc::now() + chrono::Duration::seconds(seconds)
+}
+
+/// Atomically claim `key` in the active backend.
+///
+/// When `pool` is present the shared Postgres ledger is used, so every
+/// replica observes the same reservation. Otherwise the in-memory fallback
+/// keeps single-instance deployments zero-configuration.
+pub async fn claim_idempotency_key(
+    pool: Option<&sqlx::PgPool>,
+    store: &SharedIdempotencyStore,
+    key: &str,
+    request_hash: &str,
+    ttl: Duration,
+) -> Result<IdempotencyClaim, sqlx::Error> {
+    match pool {
+        Some(pool) => claim_idempotency_postgres(pool, key, request_hash, ttl).await,
+        None => Ok(claim_idempotency_memory(store, key, request_hash, ttl)),
+    }
+}
+
+fn claim_idempotency_memory(
+    store: &SharedIdempotencyStore,
+    key: &str,
+    request_hash: &str,
+    ttl: Duration,
+) -> IdempotencyClaim {
+    let mut guard = acquire_idempotency(store);
+    // Expired records are reclaimed on access, exactly like their Postgres
+    // counterparts. Removing all three fields together keeps the fallback
+    // ledger internally consistent.
+    if guard
+        .expiries
+        .get(key)
+        .is_some_and(|expires_at| *expires_at <= Utc::now())
+    {
+        guard.entries.remove(key);
+        guard.request_hashes.remove(key);
+        guard.expiries.remove(key);
+    }
+
+    if let Some(entry) = guard.entries.get(key) {
+        // A hash recorded by an earlier request wins over the entry itself:
+        // the payload must match before any response can be replayed.
+        if guard
+            .request_hashes
+            .get(key)
+            .is_some_and(|stored| stored != request_hash)
+        {
+            return IdempotencyClaim::PayloadMismatch;
+        }
+        return match entry {
+            IdempotencyEntry::InFlight => IdempotencyClaim::InFlight,
+            IdempotencyEntry::Completed(body) => IdempotencyClaim::Replay(body.clone()),
+        };
+    }
+
+    // One critical section covers both writes, so a concurrent request can
+    // never see a reservation without its fingerprint (or vice versa).
+    guard
+        .entries
+        .insert(key.to_string(), IdempotencyEntry::InFlight);
+    guard
+        .request_hashes
+        .insert(key.to_string(), request_hash.to_string());
+    guard.expiries.insert(key.to_string(), expiry_from_now(ttl));
+    IdempotencyClaim::Proceed
+}
+
+async fn claim_idempotency_postgres(
+    pool: &sqlx::PgPool,
+    key: &str,
+    request_hash: &str,
+    ttl: Duration,
+) -> Result<IdempotencyClaim, sqlx::Error> {
+    use sqlx::Row;
+
+    // At most two passes: an `ON CONFLICT DO NOTHING` claim can lose a race
+    // with a TTL reclaimer, after which the fresh row is claimed on pass two.
+    for _ in 0..2 {
+        let inserted = sqlx::query(
+            "INSERT INTO idempotency_keys (key, request_hash, status, response_body, expires_at) \
+             VALUES ($1, $2, 'in_flight', NULL, $3) \
+             ON CONFLICT (key) DO NOTHING",
+        )
+        .bind(key)
+        .bind(request_hash)
+        .bind(expiry_from_now(ttl))
+        .execute(pool)
+        .await?
+        .rows_affected()
+            == 1;
+        if inserted {
+            return Ok(IdempotencyClaim::Proceed);
+        }
+
+        let Some(row) = sqlx::query(
+            "SELECT request_hash, status, response_body, expires_at \
+             FROM idempotency_keys WHERE key = $1",
+        )
+        .bind(key)
+        .fetch_optional(pool)
+        .await?
+        else {
+            // The conflicting row was reclaimed between our two statements.
+            continue;
+        };
+
+        let expires_at: DateTime<Utc> = row.try_get("expires_at")?;
+        if expires_at <= Utc::now() {
+            // Conditional delete: a row that was refreshed by another
+            // replica is never removed, only one still past its TTL.
+            sqlx::query("DELETE FROM idempotency_keys WHERE key = $1 AND expires_at <= $2")
+                .bind(key)
+                .bind(Utc::now())
+                .execute(pool)
+                .await?;
+            continue;
+        }
+
+        let stored_hash: String = row.try_get("request_hash")?;
+        if stored_hash != request_hash {
+            return Ok(IdempotencyClaim::PayloadMismatch);
+        }
+        let status: String = row.try_get("status")?;
+        return Ok(match status.as_str() {
+            "completed" => IdempotencyClaim::Replay(
+                row.try_get::<Option<String>, _>("response_body")?
+                    .unwrap_or_default(),
+            ),
+            // `in_flight` is the only other value the CHECK constraint allows.
+            // On anything unexpected, refuse rather than risk double submit.
+            _ => IdempotencyClaim::InFlight,
+        });
+    }
+
+    // Both passes lost a race with concurrent reclaimers. Reporting a
+    // conflict is safe: the client retries once the winning row is readable.
+    Ok(IdempotencyClaim::InFlight)
+}
+
+/// Finalize a reservation previously returned as [`IdempotencyClaim::Proceed`].
+///
+/// `Some(body)` atomically promotes the row to `completed` (only while it is
+/// still `in_flight` for the same hash); `None` removes the reservation so the
+/// client can retry after a failed request.
+pub async fn finalize_idempotency_key(
+    pool: Option<&sqlx::PgPool>,
+    store: &SharedIdempotencyStore,
+    key: &str,
+    request_hash: &str,
+    body: Option<String>,
+    ttl: Duration,
+) -> Result<(), sqlx::Error> {
+    if let Some(pool) = pool {
+        if let Some(body) = body {
+            sqlx::query(
+                "UPDATE idempotency_keys \
+                 SET status = 'completed', response_body = $3, expires_at = $4 \
+                 WHERE key = $1 AND status = 'in_flight' AND request_hash = $2",
+            )
+            .bind(key)
+            .bind(request_hash)
+            .bind(body)
+            .bind(expiry_from_now(ttl))
+            .execute(pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "DELETE FROM idempotency_keys \
+                 WHERE key = $1 AND status = 'in_flight' AND request_hash = $2",
+            )
+            .bind(key)
+            .bind(request_hash)
+            .execute(pool)
+            .await?;
+        }
+        return Ok(());
+    }
+
+    let mut guard = acquire_idempotency(store);
+    if let Some(body) = body {
+        guard
+            .entries
+            .insert(key.to_string(), IdempotencyEntry::Completed(body));
+        guard.expiries.insert(key.to_string(), expiry_from_now(ttl));
+    } else {
+        guard.entries.remove(key);
+        guard.request_hashes.remove(key);
+        guard.expiries.remove(key);
+    }
+    Ok(())
+}
+
+/// Sweep every expired row from the shared ledger, returning the row count.
+///
+/// Claims also reclaim their own expired key, so this background sweep is a
+/// space-maintenance task rather than a correctness requirement.
+pub async fn cleanup_expired_idempotency_keys(pool: &sqlx::PgPool) -> Result<u64, sqlx::Error> {
+    Ok(
+        sqlx::query("DELETE FROM idempotency_keys WHERE expires_at <= $1")
+            .bind(Utc::now())
+            .execute(pool)
+            .await?
+            .rows_affected(),
+    )
+}
+
+/// Sweep expired keys from the in-memory fallback, returning the row count.
+pub fn cleanup_expired_idempotency_keys_memory(store: &SharedIdempotencyStore) -> u64 {
+    let mut guard = acquire_idempotency(store);
+    let now = Utc::now();
+    let expired: Vec<String> = guard
+        .expiries
+        .iter()
+        .filter(|(_, expires_at)| **expires_at <= now)
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in &expired {
+        guard.entries.remove(key);
+        guard.request_hashes.remove(key);
+        guard.expiries.remove(key);
+    }
+    expired.len() as u64
 }
 
 /// Get a single bounty by id
@@ -1157,6 +1428,175 @@ mod tests {
 
         let guard = acquire_idempotency(&store);
         assert!(guard.entries.is_empty(), "recovered store should be intact");
+    }
+
+    #[test]
+    fn idempotency_migration_declares_the_shared_ledger_columns() {
+        for column in [
+            "key",
+            "request_hash",
+            "status",
+            "response_body",
+            "expires_at",
+        ] {
+            assert!(
+                IDEMPOTENCY_MIGRATION.contains(column),
+                "migration must define {column}"
+            );
+        }
+        assert!(IDEMPOTENCY_MIGRATION.contains("PRIMARY KEY"));
+        assert!(IDEMPOTENCY_MIGRATION.contains("TIMESTAMPTZ"));
+        assert!(IDEMPOTENCY_MIGRATION.contains("in_flight"));
+        assert!(IDEMPOTENCY_MIGRATION.contains("completed"));
+    }
+
+    #[test]
+    fn request_fingerprint_is_canonical_and_payload_sensitive() {
+        let request: serde_json::Value =
+            serde_json::json!({"bounty_id": "abc", "claimant": "alice"});
+        let reordered: serde_json::Value =
+            serde_json::json!({"claimant": "alice", "bounty_id": "abc"});
+        let different: serde_json::Value =
+            serde_json::json!({"bounty_id": "abc", "claimant": "bob"});
+
+        let fingerprint = request_fingerprint(&request).expect("fingerprint must serialize");
+        assert_eq!(fingerprint.len(), 64, "SHA-256 must be hex encoded");
+        assert_eq!(
+            request_fingerprint(&reordered).expect("fingerprint"),
+            fingerprint
+        );
+        assert_ne!(
+            request_fingerprint(&different).expect("fingerprint"),
+            fingerprint
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_memory_replays_a_completed_response() {
+        let store = new_shared_idempotency_store();
+        let hash = "hash-a";
+
+        assert_eq!(
+            claim_idempotency_key(None, &store, "replay-key", hash, IDEMPOTENCY_TTL)
+                .await
+                .expect("claim must succeed"),
+            IdempotencyClaim::Proceed
+        );
+        finalize_idempotency_key(
+            None,
+            &store,
+            "replay-key",
+            hash,
+            Some("{\"ok\":true}".to_string()),
+            IDEMPOTENCY_TTL,
+        )
+        .await
+        .expect("finalize must succeed");
+        assert_eq!(
+            claim_idempotency_key(None, &store, "replay-key", hash, IDEMPOTENCY_TTL)
+                .await
+                .expect("claim must succeed"),
+            IdempotencyClaim::Replay("{\"ok\":true}".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_memory_reports_conflict_while_in_flight() {
+        let store = new_shared_idempotency_store();
+        let hash = "hash-b";
+
+        assert_eq!(
+            claim_idempotency_key(None, &store, "busy-key", hash, IDEMPOTENCY_TTL)
+                .await
+                .expect("claim must succeed"),
+            IdempotencyClaim::Proceed
+        );
+        assert_eq!(
+            claim_idempotency_key(None, &store, "busy-key", hash, IDEMPOTENCY_TTL)
+                .await
+                .expect("claim must succeed"),
+            IdempotencyClaim::InFlight
+        );
+
+        // A failed request frees the key for a retry with the same payload.
+        finalize_idempotency_key(None, &store, "busy-key", hash, None, IDEMPOTENCY_TTL)
+            .await
+            .expect("release must succeed");
+        assert_eq!(
+            claim_idempotency_key(None, &store, "busy-key", hash, IDEMPOTENCY_TTL)
+                .await
+                .expect("claim must succeed"),
+            IdempotencyClaim::Proceed
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_memory_rejects_key_reuse_with_a_different_payload() {
+        let store = new_shared_idempotency_store();
+
+        assert_eq!(
+            claim_idempotency_key(None, &store, "mismatch-key", "first", IDEMPOTENCY_TTL)
+                .await
+                .expect("claim must succeed"),
+            IdempotencyClaim::Proceed
+        );
+        finalize_idempotency_key(
+            None,
+            &store,
+            "mismatch-key",
+            "first",
+            Some("first response".to_string()),
+            IDEMPOTENCY_TTL,
+        )
+        .await
+        .expect("finalize must succeed");
+
+        assert_eq!(
+            claim_idempotency_key(None, &store, "mismatch-key", "second", IDEMPOTENCY_TTL)
+                .await
+                .expect("claim must succeed"),
+            IdempotencyClaim::PayloadMismatch
+        );
+        assert!(
+            read_idempotency(&store).request_hashes.get("mismatch-key")
+                == Some(&"first".to_string()),
+            "a mismatched retry must not overwrite the recorded fingerprint"
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_memory_reclaims_an_expired_key() {
+        let store = new_shared_idempotency_store();
+
+        assert_eq!(
+            claim_idempotency_key(
+                None,
+                &store,
+                "expired-memory-key",
+                "first",
+                Duration::from_millis(10)
+            )
+            .await
+            .expect("claim must succeed"),
+            IdempotencyClaim::Proceed
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The expired fingerprint is gone, so a different payload may claim
+        // the key instead of being rejected as a mismatch.
+        assert_eq!(
+            claim_idempotency_key(
+                None,
+                &store,
+                "expired-memory-key",
+                "second",
+                IDEMPOTENCY_TTL
+            )
+            .await
+            .expect("claim must succeed"),
+            IdempotencyClaim::Proceed
+        );
+        assert_eq!(cleanup_expired_idempotency_keys_memory(&store), 0);
     }
 
     #[test]

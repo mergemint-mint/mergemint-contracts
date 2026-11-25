@@ -446,6 +446,10 @@ async fn main() {
                 include_str!("../migrations/0002_create_audit_logs_table.sql"),
                 "audit log storage",
             ),
+            (
+                include_str!("../migrations/0010_create_idempotency_keys.sql"),
+                "idempotency key storage",
+            ),
         ] {
             for statement in migration
                 .split(';')
@@ -503,6 +507,24 @@ async fn main() {
         sse_keep_alive_duration,
         webhook_guard: webhook_guard.clone(),
         sse_limiter: sse_limiter.clone(),
+    });
+
+    // Keep the idempotency ledger bounded in whichever backend is active.
+    // Claims already reclaim their own expired key; this sweep removes rows
+    // no client retries (#1263).
+    let cleanup_pool = state.postgres.clone();
+    let cleanup_store = state.idempotency.clone();
+    tokio::spawn(async move {
+        let mut sweep = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            sweep.tick().await;
+            db::cleanup_expired_idempotency_keys_memory(&cleanup_store);
+            if let Some(pool) = cleanup_pool.as_ref() {
+                if let Err(error) = db::cleanup_expired_idempotency_keys(pool).await {
+                    tracing::warn!(%error, "failed to sweep expired idempotency keys");
+                }
+            }
+        }
     });
 
     // No fallback to a default client here: that client would skip the SSRF
@@ -815,7 +837,10 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         if let Ok(row) = sqlx::query_scalar::<_, i64>(
             "SELECT ledger FROM indexer_checkpoints WHERE name = $1 ORDER BY ledger DESC LIMIT 1",
         )
-        .bind(format!("indexer:{}", std::env::var("CONTRACT_ID").unwrap_or_default()))
+        .bind(format!(
+            "indexer:{}",
+            std::env::var("CONTRACT_ID").unwrap_or_default()
+        ))
         .fetch_one(&pool)
         .await
         {

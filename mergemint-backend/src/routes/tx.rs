@@ -25,8 +25,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::db::{
-    acquire_idempotency, read_db, read_idempotency, write_audit_log, AuditLog, IdempotencyEntry,
-    SharedDb, SharedIdempotencyStore,
+    claim_idempotency_key, finalize_idempotency_key, read_db, request_fingerprint, write_audit_log,
+    AuditLog, IdempotencyClaim, SharedDb, SharedIdempotencyStore,
 };
 
 // ---------------------------------------------------------------------------
@@ -197,40 +197,48 @@ fn add_rate_limit_headers(mut response: Response, snapshot: RateLimitSnapshot) -
 }
 
 // ---------------------------------------------------------------------------
-// Idempotency-Key handling (claim_bounty double-submit guard)
+// Idempotency-Key handling (double-submit guard, #1263)
 // ---------------------------------------------------------------------------
 
 /// The header clients set to make a transaction-submitting request safe to
 /// retry after a timeout.
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 
+/// How long a keyed response remains replayable in either backend.
+const IDEMPOTENCY_KEY_TTL: std::time::Duration = crate::db::IDEMPOTENCY_TTL;
+
 /// Outcome of checking an inbound `Idempotency-Key` before doing any work.
 enum IdempotencyCheck {
     /// No key was supplied; proceed without dedup (back-compat default).
     NotRequested,
-    /// A fresh key was reserved as in-flight; the caller must finalize it
-    /// via `finalize_idempotency_key` once the request completes.
-    Proceed(String),
-    /// A prior request with this key already completed; replay its response
-    /// instead of resubmitting the transaction.
+    /// A fresh key was reserved; the caller must finalize it once the
+    /// request completes. Carries the fingerprint binding the reservation.
+    Proceed { key: String, hash: String },
+    /// A prior request with this key and payload completed; replay its body.
     Replay(Response),
-    /// A prior request with this key is still being processed.
+    /// A prior request with this key and payload is still in progress.
     Conflict(Response),
+    /// The key was already used with a different request payload.
+    PayloadMismatch(Response),
 }
 
-/// Looks up `Idempotency-Key` in `headers` against `store` and either
-/// reserves the key as in-flight or short-circuits with a replayed /
-/// conflict response.
+/// Claim `Idempotency-Key` in the backend selected by `AppState` and either
+/// reserve it or short-circuit with a replay / conflict / mismatch response.
 ///
 /// ## Why dedup here (double-submit guard)
 ///
-/// `resolve_dispute` and `self_claim` both submit a chain transaction. If a
-/// client's connection drops after the transaction was built but before the
-/// response arrived, a naive retry would submit it a second time. Callers
-/// that pass an `Idempotency-Key` header get exactly-once handling: the
-/// first request wins and every retry with the same key gets that same
-/// result back instead of re-triggering the transaction build.
-fn check_idempotency_key(headers: &HeaderMap, store: &SharedIdempotencyStore) -> IdempotencyCheck {
+/// Transaction-submitting routes can be retried by a client whose connection
+/// dropped before the response arrived. With an `Idempotency-Key` header the
+/// first request wins: every replica consults the same Postgres ledger (when
+/// configured), a concurrent retry sees `in_flight` and gets 409, and a
+/// completed request is replayed from its cached response. A different payload
+/// under the same key is rejected with 422 instead of replaying another
+/// request's result. Without a header behaviour is unchanged.
+async fn check_idempotency_key(
+    state: &AppState,
+    headers: &HeaderMap,
+    hash: &str,
+) -> IdempotencyCheck {
     let Some(key) = headers
         .get(IDEMPOTENCY_KEY_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -239,62 +247,68 @@ fn check_idempotency_key(headers: &HeaderMap, store: &SharedIdempotencyStore) ->
         return IdempotencyCheck::NotRequested;
     };
 
-    // Fast path: a read lock is enough to detect an already-completed or
-    // already-in-flight key without taking the write lock.
-    if let Some(entry) = read_idempotency(store).entries.get(key) {
-        return idempotency_check_from_entry(entry);
-    }
-
-    let mut guard = acquire_idempotency(store);
-    // Re-check under the write lock in case another request reserved the
-    // key between our read above and acquiring the write lock.
-    match guard.entries.get(key) {
-        Some(entry) => idempotency_check_from_entry(entry),
-        None => {
-            guard
-                .entries
-                .insert(key.to_string(), IdempotencyEntry::InFlight);
-            IdempotencyCheck::Proceed(key.to_string())
+    let claim = match claim_idempotency_key(
+        state.postgres.as_ref(),
+        &state.idempotency,
+        key,
+        hash,
+        IDEMPOTENCY_KEY_TTL,
+    )
+    .await
+    {
+        Ok(claim) => claim,
+        Err(error) => {
+            return IdempotencyCheck::Conflict(AppError::internal(error).into_response());
         }
-    }
-}
+    };
 
-fn idempotency_check_from_entry(entry: &IdempotencyEntry) -> IdempotencyCheck {
-    match entry {
-        IdempotencyEntry::Completed(body) => IdempotencyCheck::Replay(
+    match claim {
+        IdempotencyClaim::Proceed => IdempotencyCheck::Proceed {
+            key: key.to_string(),
+            hash: hash.to_string(),
+        },
+        IdempotencyClaim::Replay(body) => IdempotencyCheck::Replay(
             Response::builder()
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(body.clone()))
+                .body(axum::body::Body::from(body))
                 .unwrap_or_else(|_| {
-                    AppError::internal("failed to build idempotency replay response").into_response()
+                    AppError::internal("failed to build idempotency replay response")
+                        .into_response()
                 }),
         ),
-        IdempotencyEntry::InFlight => IdempotencyCheck::Conflict(
+        IdempotencyClaim::InFlight => IdempotencyCheck::Conflict(
             AppError {
                 code: 409,
                 message: "a request with this Idempotency-Key is already in progress".to_string(),
             }
             .into_response(),
         ),
+        IdempotencyClaim::PayloadMismatch => IdempotencyCheck::PayloadMismatch(
+            AppError {
+                code: 422,
+                message: "Idempotency-Key was already used with a different request payload"
+                    .to_string(),
+            }
+            .into_response(),
+        ),
     }
 }
 
-/// Records the final outcome of a request that reserved `key` via
-/// `check_idempotency_key`.
-///
-/// On success the response body is cached so retries replay it. On failure
-/// the reservation is removed entirely -- no transaction was submitted, so
-/// the key is free to be reused once the client fixes the request.
-fn finalize_idempotency_key(store: &SharedIdempotencyStore, key: String, result: Option<String>) {
-    let mut guard = acquire_idempotency(store);
-    match result {
-        Some(body) => {
-            guard.entries.insert(key, IdempotencyEntry::Completed(body));
-        }
-        None => {
-            guard.entries.remove(&key);
-        }
+/// Release a reservation when a request ends without a final outcome (for
+/// example, the rate limiter rejected it before any work was submitted).
+async fn release_idempotency_key(state: &AppState, key: &str, hash: &str) {
+    if let Err(error) = finalize_idempotency_key(
+        state.postgres.as_ref(),
+        &state.idempotency,
+        key,
+        hash,
+        None,
+        IDEMPOTENCY_KEY_TTL,
+    )
+    .await
+    {
+        tracing::warn!(%error, "failed to release idempotency key");
     }
 }
 
@@ -469,7 +483,7 @@ pub struct ResolveDisputeResponse {
     pub xdr: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SelfClaimRequest {
     pub bounty_id: String,
     pub claimant: String,
@@ -996,10 +1010,19 @@ pub async fn self_claim(
     headers: HeaderMap,
     Json(req): Json<SelfClaimRequest>,
 ) -> Response {
-    let idempotency_key = match check_idempotency_key(&headers, &state.idempotency) {
+    let hash = match request_fingerprint(&req) {
+        Ok(hash) => hash,
+        Err(_) => {
+            return AppError::internal("failed to fingerprint idempotency payload").into_response()
+        }
+    };
+
+    let reservation = match check_idempotency_key(&state, &headers, &hash).await {
         IdempotencyCheck::NotRequested => None,
-        IdempotencyCheck::Proceed(key) => Some(key),
-        IdempotencyCheck::Replay(response) | IdempotencyCheck::Conflict(response) => {
+        IdempotencyCheck::Proceed { key, hash } => Some((key, hash)),
+        IdempotencyCheck::Replay(response)
+        | IdempotencyCheck::Conflict(response)
+        | IdempotencyCheck::PayloadMismatch(response) => {
             let snapshot = state.check_self_claim_rate_limit(&req.claimant, false);
             return add_rate_limit_headers(response, snapshot);
         }
@@ -1010,6 +1033,9 @@ pub async fn self_claim(
     // the per-window allowance is exhausted.
     let rate_limit = state.check_self_claim_rate_limit(&req.claimant, true);
     if !rate_limit.allowed {
+        if let Some((key, hash)) = reservation.as_ref() {
+            release_idempotency_key(&state, key, hash).await;
+        }
         let (status, body) = AppError::too_many_requests(
             "rate limit exceeded for self_claim; retry after the window resets",
         );
@@ -1018,12 +1044,23 @@ pub async fn self_claim(
 
     let result = self_claim_inner(&state, &req).await;
 
-    if let Some(key) = idempotency_key {
-        let cached_body = result
+    if let Some((key, hash)) = reservation {
+        let body = result
             .as_ref()
             .ok()
-            .and_then(|resp| serde_json::to_string(resp).ok());
-        finalize_idempotency_key(&state.idempotency, key, cached_body);
+            .and_then(|response| serde_json::to_string(response).ok());
+        if let Err(error) = finalize_idempotency_key(
+            state.postgres.as_ref(),
+            &state.idempotency,
+            &key,
+            &hash,
+            body,
+            IDEMPOTENCY_KEY_TTL,
+        )
+        .await
+        {
+            tracing::warn!(%error, "failed to finalize idempotency key");
+        }
     }
 
     let response = match result {
@@ -1533,6 +1570,37 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    /// Reusing a key with a different payload must return 422 rather than
+    /// replaying the first request's response (#1263).
+    #[tokio::test]
+    async fn self_claim_rejects_key_reuse_with_a_different_payload() {
+        let state = claimable_state("bounty-5");
+        let request = SelfClaimRequest {
+            bounty_id: "bounty-5".to_string(),
+            claimant: "claimant-a".to_string(),
+        };
+
+        let first = self_claim(
+            State(Arc::clone(&state)),
+            idempotency_headers("mismatch-key"),
+            Json(request.clone()),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // Different claimant means a different fingerprint but the same key.
+        let second = self_claim(
+            State(Arc::clone(&state)),
+            idempotency_headers("mismatch-key"),
+            Json(SelfClaimRequest {
+                claimant: "claimant-b".to_string(),
+                ..request
+            }),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     /// A failed claim (e.g. unknown bounty id) must not leave a stale
