@@ -191,6 +191,36 @@ pub fn calculate_backoff_delay(attempt: usize, config: &RetryConfig) -> Duration
     Duration::from_millis(calculated_millis.min(max_millis) as u64)
 }
 
+/// Maximum number of bytes retained from a webhook error response body.
+///
+/// Error bodies are diagnostic only. Capping the read at 8 KiB prevents a
+/// malicious or misconfigured receiver from exhausting worker memory by
+/// streaming an arbitrarily large 4xx/5xx response (#1265).
+pub const MAX_WEBHOOK_ERROR_BODY_BYTES: usize = 8 * 1024;
+
+/// Read at most [`MAX_WEBHOOK_ERROR_BODY_BYTES`] bytes from `response` via
+/// [`reqwest::Response::chunk`], decoding with a lossy UTF-8 conversion so
+/// arbitrary (or truncated multi-byte) bytes can never fail the delivery path.
+///
+/// The body is consumed incrementally and never fully buffered, so memory use
+/// stays bounded even when the peer streams gigabytes. A read error or the end
+/// of the stream simply returns whatever was captured so far.
+async fn read_bounded_error_body(mut response: reqwest::Response) -> String {
+    let mut body = Vec::with_capacity(MAX_WEBHOOK_ERROR_BODY_BYTES);
+
+    while body.len() < MAX_WEBHOOK_ERROR_BODY_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = MAX_WEBHOOK_ERROR_BODY_BYTES - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    String::from_utf8_lossy(&body).into_owned()
+}
+
 /// Deliver a webhook payload to a single subscription with exponential backoff retries.
 #[tracing::instrument(
     skip(client, subscription, payload, retry_config),
@@ -245,7 +275,7 @@ pub async fn deliver_webhook_payload(
                 }
 
                 if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    let body_text = response.text().await.unwrap_or_default();
+                    let body_text = read_bounded_error_body(response).await;
                     return Err(WebhookDeliveryError::ClientError(
                         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_REQUEST),
                         body_text,
@@ -841,6 +871,7 @@ mod tests {
     use crate::routes::tx::new_shared_rate_limiter;
     use axum::routing::{get, post};
     use axum::Router;
+    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
 
@@ -901,6 +932,110 @@ mod tests {
             initial_delay: Duration::from_millis(5),
             backoff_factor: 1.0,
             max_delay: Duration::from_millis(10),
+        }
+    }
+
+    /// Start a local mock receiver that always answers `status` with `body`.
+    async fn spawn_body_receiver(status: StatusCode, body: Vec<u8>) -> SocketAddr {
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                let body = body.clone();
+                async move { (status, axum::body::Body::from(body)) }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn oversized_4xx_body_is_truncated_to_configured_cap() {
+        // A 1 MiB error body must not be buffered in full (regression for #1265).
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counting = Arc::clone(&attempts);
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                counting.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        axum::body::Body::from("x".repeat(1024 * 1024)),
+                    )
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let result = deliver_webhook_payload(
+            &local_test_client(),
+            &test_subscription(format!("http://{addr}/hook")),
+            &test_payload(),
+            &fast_retry(),
+        )
+        .await;
+
+        match result {
+            Err(WebhookDeliveryError::ClientError(status, text)) => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    text.len(),
+                    MAX_WEBHOOK_ERROR_BODY_BYTES,
+                    "error body must be capped at {MAX_WEBHOOK_ERROR_BODY_BYTES} bytes"
+                );
+                assert!(
+                    text.bytes().all(|byte| byte == b'x'),
+                    "captured body should only contain the repeated payload byte"
+                );
+            }
+            other => panic!("expected a bounded ClientError, got {other:?}"),
+        }
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "a 400 response must not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_body_with_invalid_utf8_is_read_lossily() {
+        // Invalid UTF-8 (and a byte sequence split at the cap) must never
+        // turn a diagnostic read into a failed delivery path.
+        let addr = spawn_body_receiver(
+            StatusCode::BAD_REQUEST,
+            vec![0xff; MAX_WEBHOOK_ERROR_BODY_BYTES * 2],
+        )
+        .await;
+
+        let result = deliver_webhook_payload(
+            &local_test_client(),
+            &test_subscription(format!("http://{addr}/hook")),
+            &test_payload(),
+            &fast_retry(),
+        )
+        .await;
+
+        match result {
+            Err(WebhookDeliveryError::ClientError(status, text)) => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(
+                    text.contains('\u{fffd}'),
+                    "invalid UTF-8 must be replaced with U+FFFD"
+                );
+                assert!(
+                    text.chars().count() <= MAX_WEBHOOK_ERROR_BODY_BYTES,
+                    "lossy decode must not grow the body beyond the byte cap in characters"
+                );
+            }
+            other => panic!("expected a ClientError with a lossy body, got {other:?}"),
         }
     }
 
