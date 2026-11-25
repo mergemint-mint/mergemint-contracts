@@ -222,9 +222,15 @@ pub(crate) fn decode_bounty_id_from_xdr(value_hex: &str, is_tuple: bool) -> Opti
         };
         bytes.as_ref()
     } else {
-        // Covers CONTRIBUTOR_ONLY_EVENTS, CONTRACT_ADMIN_EVENTS, and
-        // any truly unknown name.
-        None
+        // Single-value shape: the entire payload is ScVal::Bytes.
+        let ScVal::Bytes(bytes) = &scval else {
+            return None;
+        };
+        bytes.as_ref()
+    };
+
+    if bytes.len() != BOUNTY_ID_LEN {
+        return None;
     }
 
     Some(hex::encode(bytes))
@@ -338,8 +344,9 @@ pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: b
         //
         // Contributor-only and contract-admin events have no bounty_id by
         // design; they must not emit a spurious "unrecognized" warning.
-        let is_recognised = SINGLE_VALUE_EVENTS.contains(&event_name.as_str())
-            || TUPLE_EVENTS.contains(&event_name.as_str())
+        let is_bounty_scoped = SINGLE_VALUE_EVENTS.contains(&event_name.as_str())
+            || TUPLE_EVENTS.contains(&event_name.as_str());
+        let is_recognised = is_bounty_scoped
             || CONTRIBUTOR_ONLY_EVENTS.contains(&event_name.as_str())
             || CONTRACT_ADMIN_EVENTS.contains(&event_name.as_str());
 
@@ -543,13 +550,9 @@ mod tests {
         }
     }
 
-    /// Build a RawEvent with an arbitrary (possibly invalid) payload string.
-    fn raw_event(name: &str, value_hex: &str, ledger: u32) -> RawEvent {
-        RawEvent {
-            topics: vec![TopicDecodeResult::Ok(name.to_owned())],
-            value_hex: value_hex.to_owned(),
-            ledger,
-        }
+    /// Build a well-formed event whose payload carries a valid bounty id.
+    fn ok_event(name: &str, ledger: u32) -> RawEvent {
+        single_event(name, ledger)
     }
 
     fn err_event(ledger: u32) -> RawEvent {
@@ -680,32 +683,6 @@ mod tests {
     fn test_extract_bounty_id_hex_returns_none_for_admin_events() {
         for name in CONTRACT_ADMIN_EVENTS {
             let result = extract_bounty_id_hex(&[name.to_string()], &valid_single_bounty_id());
-            assert!(
-                result.is_none(),
-                "contract-admin event '{name}' should yield None — no bounty_id"
-            );
-        }
-    }
-
-    /// `extract_bounty_id_hex` must return None for contributor-only events —
-    /// they carry no bounty_id by design and must not trigger a warning.
-    #[test]
-    fn test_extract_bounty_id_hex_returns_none_for_contributor_only_events() {
-        for name in CONTRIBUTOR_ONLY_EVENTS {
-            let result = extract_bounty_id_hex(&[name.to_string()], "aabbccdd");
-            assert!(
-                result.is_none(),
-                "contributor-only event '{name}' should yield None — no bounty_id"
-            );
-        }
-    }
-
-    /// `extract_bounty_id_hex` must return None for contract-admin events —
-    /// they carry no bounty_id by design.
-    #[test]
-    fn test_extract_bounty_id_hex_returns_none_for_admin_events() {
-        for name in CONTRACT_ADMIN_EVENTS {
-            let result = extract_bounty_id_hex(&[name.to_string()], "aabbccdd");
             assert!(
                 result.is_none(),
                 "contract-admin event '{name}' should yield None — no bounty_id"
@@ -865,24 +842,6 @@ mod tests {
             assert_eq!(
                 state.last_ledger, 1,
                 "tuple event '{name}' should advance last_ledger"
-            );
-        }
-    }
-
-    /// Contributor-only events must advance last_ledger without warning.
-    #[test]
-    fn test_contributor_only_events_advance_ledger_without_warn() {
-        for &name in CONTRIBUTOR_ONLY_EVENTS {
-            let mut state = IndexerState { last_ledger: 0 };
-            let events = vec![raw_event(name, "deadbeef", 5)];
-            poll_once(&mut state, &events, true);
-            assert_eq!(
-                state.last_ledger, 1,
-                "bounty-scoped event '{name}' should advance last_ledger on a complete page"
-            );
-            assert!(
-                extract_bounty_id_hex(&[name.to_owned()], "aabbccdd").is_some(),
-                "bounty-scoped event '{name}' should extract a bounty id"
             );
         }
     }

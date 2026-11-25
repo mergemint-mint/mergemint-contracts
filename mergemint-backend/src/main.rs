@@ -93,6 +93,10 @@
 // only sent when `HSTS_ENABLED=true`, i.e. when the service is reached over
 // HTTPS. See `security_headers.rs` and docs/security.md.
 
+// The binary re-declares library modules to wire its own Axum state, so items
+// consumed only through the library API or tests appear unused in this crate.
+#![allow(dead_code)]
+
 use sqlx::Row;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -137,11 +141,13 @@ mod sse_limit;
 mod test_helpers;
 mod webhooks;
 
+use mergemint_backend::openapi::ApiDoc;
+
 use db::{new_shared_db, new_shared_idempotency_store};
 use deadline_reminders::{
     read_deadline_reminder_interval, read_deadline_reminder_lead_time, start_deadline_reminder_job,
 };
-use metrics::{metrics_router, track_metrics, Metrics};
+use metrics::{router as metrics_router, track_metrics, Metrics};
 use notifications::{
     create_email_subscription, start_email_notifier, unsubscribe_email, verify_email,
 };
@@ -200,69 +206,6 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
 const CONTRACT_VERSION_WARN_ONLY_ENV: &str = "CONTRACT_VERSION_WARN_ONLY";
 static CONTRACT_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 const OTEL_EXPORTER_OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
-
-/// OpenAPI description of the bounty read API (#865), served at
-/// `/api-docs/openapi.json` and rendered by the Swagger UI page (#866).
-#[derive(OpenApi)]
-#[openapi(
-    info(
-        title = "MergeMint backend API",
-        description = "Rate-limited responses include X-RateLimit-Limit and X-RateLimit-Remaining; 429 responses include Retry-After in seconds."
-    ),
-    paths(
-        routes::bounties::list_bounties,
-        routes::bounties::list_bounties_by_assignee,
-        routes::bounties::get_bounty_route,
-        routes::bounties::claim_bounty,
-        routes::bounties::bounty_stream,
-        routes::leaderboard::get_leaderboard_route,
-        routes::reputation::get_reputation_history,
-        routes::stats::get_stats_route,
-        routes::tx::query_audit_logs,
-        routes::tx::cancel_bounty_transaction,
-        routes::tx::top_up_bounty_transaction,
-        routes::tx::extend_deadline_transaction,
-        routes::tx::submit_signed_transaction,
-        webhooks::list_failed_webhooks_route,
-        webhooks::replay_webhook_route,
-        notifications::create_email_subscription,
-        notifications::verify_email,
-        notifications::unsubscribe_email,
-        webhooks::list_subscriptions_route,
-        webhooks::get_subscription_route,
-    ),
-    components(schemas(
-        db::Bounty,
-        db::BountyPage,
-        db::BountySortField,
-        db::SortOrder,
-        routes::bounties::ClaimResponse,
-        routes::tx::AppError,
-        routes::tx::QueryAuditLogsResponse,
-        routes::reputation::ReputationHistoryPage,
-        routes::tx::CancelBountyRequest,
-        routes::tx::TopUpBountyRequest,
-        routes::tx::ExtendDeadlineRequest,
-        routes::tx::UnsignedTransactionResponse,
-        routes::tx::SubmitSignedTransactionRequest,
-        routes::tx::SubmitTransactionResponse,
-        db::AuditLog,
-        db::LeaderboardEntry,
-        db::LeaderboardPage,
-        db::ReputationHistoryEntry,
-        db::StatsResponse,
-        db::TokenTotal,
-        db::WebhookSubscription,
-        webhooks::FailedWebhookDelivery,
-        webhooks::FailedWebhookPage,
-        notifications::CreateEmailSubscriptionRequest,
-    )),
-    tags(
-        (name = "bounties", description = "Bounty listing and live updates"),
-        (name = "notifications", description = "Email notification subscriptions")
-    )
-)]
-struct ApiDoc;
 
 /// Swagger UI version loaded from the CDN by `swagger_ui`.
 const SWAGGER_UI_VERSION: &str = "5.17.14";
@@ -793,8 +736,8 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut ready = db::ping_db(&state.db).is_ok();
     // Bind the pool first so the read guard is dropped before the `.await`.
     let pool = db::read_db(&state.db).postgres.clone();
-    if let Some(pool) = pool {
-        ready &= sqlx::query("SELECT 1").execute(&pool).await.is_ok();
+    if let Some(ref pool) = pool {
+        ready &= sqlx::query("SELECT 1").execute(pool).await.is_ok();
     }
 
     // Indexer lag check: compare the latest indexed checkpoint ledger against
@@ -815,7 +758,10 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         if let Ok(row) = sqlx::query_scalar::<_, i64>(
             "SELECT ledger FROM indexer_checkpoints WHERE name = $1 ORDER BY ledger DESC LIMIT 1",
         )
-        .bind(format!("indexer:{}", std::env::var("CONTRACT_ID").unwrap_or_default()))
+        .bind(format!(
+            "indexer:{}",
+            std::env::var("CONTRACT_ID").unwrap_or_default()
+        ))
         .fetch_one(&pool)
         .await
         {
@@ -1213,38 +1159,7 @@ mod tests {
 
     #[test]
     fn openapi_document_matches_snapshot() {
-        let document = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serializes");
-        let mut paths = serde_json::Map::new();
-        for (path, item) in document["paths"].as_object().expect("paths object") {
-            let mut methods: Vec<_> = item
-                .as_object()
-                .expect("path item object")
-                .keys()
-                .cloned()
-                .collect();
-            methods.sort();
-            paths.insert(path.clone(), serde_json::json!(methods));
-        }
-
-        let mut schemas = serde_json::Map::new();
-        for (name, schema) in document["components"]["schemas"]
-            .as_object()
-            .expect("schemas object")
-        {
-            let mut fields: Vec<_> = schema["properties"]
-                .as_object()
-                .map(|properties| properties.keys().cloned().collect())
-                .unwrap_or_default();
-            fields.sort();
-            schemas.insert(
-                name.clone(),
-                serde_json::json!({
-                    "fields": fields,
-                    "enum": schema.get("enum").cloned().unwrap_or(serde_json::Value::Null)
-                }),
-            );
-        }
-        let actual = serde_json::json!({ "paths": paths, "schemas": schemas });
+        let actual = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serializes");
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../openapi.snapshot.json"))
                 .expect("OpenAPI snapshot must be valid JSON");

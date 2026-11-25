@@ -36,11 +36,7 @@ pub async fn open_bounties_feed(
             } else if trimmed.chars().count() > MAX_TAG_LEN
                 || trimmed.chars().any(|c| c.is_control())
             {
-                return (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "invalid tag filter",
-                )
-                    .into_response();
+                return (axum::http::StatusCode::BAD_REQUEST, "invalid tag filter").into_response();
             } else {
                 Some(trimmed)
             }
@@ -147,8 +143,10 @@ mod tests {
 
     #[test]
     fn rejects_control_characters() {
-        assert!(validate_tag(Some("rust\n")).is_err());
-        assert!(validate_tag(Some("rust\0")).is_err());
+        // Leading/trailing whitespace is trimmed by the handler, so control
+        // characters must be embedded to exercise the rejection path.
+        assert!(validate_tag(Some("ru\nst")).is_err());
+        assert!(validate_tag(Some("ru\0st")).is_err());
     }
 
     #[test]
