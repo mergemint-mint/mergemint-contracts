@@ -61,7 +61,7 @@ struct Counts {
 
 /// A CIDR range: network address plus prefix length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Cidr {
+pub(crate) struct Cidr {
     addr: IpAddr,
     prefix: u8,
 }
@@ -74,7 +74,11 @@ impl Cidr {
                 if self.prefix > 32 {
                     return false;
                 }
-                let mask: u32 = if self.prefix == 0 { 0 } else { !0u32 << (32 - self.prefix) };
+                let mask: u32 = if self.prefix == 0 {
+                    0
+                } else {
+                    !0u32 << (32 - self.prefix)
+                };
                 u32::from(net) & mask == u32::from(host) & mask
             }
             (IpAddr::V6(net), IpAddr::V6(host)) => {
@@ -156,7 +160,7 @@ impl SseConnectionLimiter {
     /// Restrict `X-Forwarded-For` honouring to peers whose address falls within
     /// one of these CIDR ranges.  When the list is empty the header is never
     /// trusted even if `SSE_TRUST_X_FORWARDED_FOR=true`.
-    pub fn with_trusted_proxies(mut self, proxies: Vec<Cidr>) -> Self {
+    pub(crate) fn with_trusted_proxies(mut self, proxies: Vec<Cidr>) -> Self {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {
             inner.trusted_proxies = proxies;
         }
@@ -301,7 +305,9 @@ fn subnet_key(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => {
             let segs = v6.segments();
-            IpAddr::V6(Ipv6Addr::new(segs[0], segs[1], segs[2], segs[3], 0, 0, 0, 0))
+            IpAddr::V6(Ipv6Addr::new(
+                segs[0], segs[1], segs[2], segs[3], 0, 0, 0, 0,
+            ))
         }
         IpAddr::V4(v4) => IpAddr::V4(v4),
     }
@@ -432,8 +438,8 @@ mod tests {
         );
         assert_eq!(untrusted.client_ip(&headers, None), None);
 
-        let trusted = SseConnectionLimiter::with_options(1, 1, true)
-            .with_trusted_proxies(vec![Cidr {
+        let trusted =
+            SseConnectionLimiter::with_options(1, 1, true).with_trusted_proxies(vec![Cidr {
                 addr: ip("192.0.2.0"),
                 prefix: 24,
             }]);
@@ -460,7 +466,7 @@ mod tests {
             limiter.try_acquire(Some(b)).unwrap_err(),
             LimitExceeded::PerIp
         );
-        assert_eq!(limiter.try_acquire(Some(c)).is_ok(), true);
+        assert!(limiter.try_acquire(Some(c)).is_ok());
     }
 
     #[test]

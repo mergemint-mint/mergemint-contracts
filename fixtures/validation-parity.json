@@ -26,11 +26,11 @@
   "description": [
     { "value": "Fix the payout bug", "valid": true, "reason": "well under the limit" },
     { "value": "a", "valid": true, "reason": "single character is still valid" },
-    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": true, "reason": "32 chars, still valid for a String" },
-    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": false, "reason": "33 chars, one over the limit" },
+    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": true, "reason": "280 chars, at the description limit" },
+    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": false, "reason": "281 chars, one over the description limit" },
     { "value": "", "valid": false, "reason": "empty description is rejected" },
     { "value": "   ", "valid": false, "reason": "whitespace-only description is rejected" },
     { "value": "café ☕ payout fix", "valid": true, "reason": "multibyte UTF-8 within the limit" },
-    { "value": "this description is far too long to be stored on-chain as a Soroban Symbol", "valid": false, "reason": "well over the description limit" }
+    { "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": false, "reason": "well over the description limit" }
   ]
 }
