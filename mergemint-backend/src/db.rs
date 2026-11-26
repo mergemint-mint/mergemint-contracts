@@ -44,7 +44,7 @@ const BOUNTIES_INDEX_MIGRATION: &str = include_str!("../migrations/0001_add_boun
 const AUDIT_LOGS_MIGRATION: &str = include_str!("../migrations/0002_create_audit_logs_table.sql");
 #[cfg(test)]
 const AUDIT_LOGS_PAGINATION_MIGRATION: &str =
-    include_str!("../migrations/0003_add_audit_log_pagination_index.sql");
+    include_str!("../migrations/0004_add_audit_log_pagination_index.sql");
 
 /// Lightweight in-memory store used during development / integration tests.
 /// Production deployments replace this with a real database pool.
@@ -1233,6 +1233,56 @@ mod tests {
         }
         assert!(AUDIT_LOGS_PAGINATION_MIGRATION
             .contains("ON audit_logs (action, timestamp DESC, id DESC)"));
+    }
+
+    /// Regression guard for issue #1260: no two migration files may share the
+    /// same numeric version prefix.  `sqlx::migrate!` resolves migrations by
+    /// their leading `NNNN_` number; a collision causes a non-deterministic
+    /// apply order or a hard failure depending on which file the filesystem
+    /// returns first.
+    ///
+    /// This test reads the migrations directory at compile time via
+    /// `include_str!` for the three files already pinned above, but the
+    /// duplicate check must scan *all* files.  We use `std::fs::read_dir` at
+    /// test time for that — the directory path is known relative to
+    /// `CARGO_MANIFEST_DIR`.
+    #[test]
+    fn migration_version_prefixes_are_unique() {
+        use std::collections::HashSet;
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let migrations_dir = std::path::Path::new(manifest_dir).join("migrations");
+
+        let entries = std::fs::read_dir(&migrations_dir)
+            .unwrap_or_else(|error| panic!("failed to read migrations dir: {error}"));
+
+        let mut seen = HashSet::new();
+        for entry in entries {
+            let entry = entry.expect("failed to read migration directory entry");
+            let filename = entry.file_name().to_string_lossy().to_string();
+
+            // Only consider .sql files.
+            if !filename.ends_with(".sql") {
+                continue;
+            }
+
+            // Extract the leading numeric prefix (e.g. "0001" from
+            // "0001_add_bounties_indexes.sql").
+            let prefix = filename
+                .split('_')
+                .next()
+                .unwrap_or_else(|| panic!("migration file '{filename}' has no '_' separator"));
+
+            let prefix_n: u32 = prefix.parse().unwrap_or_else(|_| {
+                panic!("migration file '{filename}' has a non-numeric prefix '{prefix}'")
+            });
+
+            assert!(
+                seen.insert(prefix_n),
+                "duplicate migration version prefix {prefix_n:04} — \
+                 two migration files share the same number (issue #1260)"
+            );
+        }
     }
 
     #[test]
