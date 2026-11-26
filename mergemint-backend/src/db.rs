@@ -990,6 +990,22 @@ pub fn close_db(db: &SharedDb) {
 // Idempotency-key store
 // ---------------------------------------------------------------------------
 
+/// How long an `InFlight` reservation stays valid if its owner disappears
+/// without running destructors (#1262).
+///
+/// Normal future cancellation, `TimeoutLayer` timeouts and panic unwinding
+/// release the key immediately through [`IdempotencyGuard`]. This TTL is a
+/// backstop for paths that skip destructors entirely (e.g. `mem::forget` or a
+/// process abort followed by a state restore), so a key can never stay stuck
+/// returning `409 Conflict` forever.
+pub const IDEMPOTENCY_IN_FLIGHT_TTL: Duration = Duration::from_secs(60);
+
+/// How long a `Completed` response is cached for replay before eviction (#1262).
+///
+/// Without an expiry, every distinct `Idempotency-Key` would be retained for
+/// the lifetime of the process and leak memory indefinitely.
+pub const IDEMPOTENCY_COMPLETED_TTL: Duration = Duration::from_secs(60 * 60);
+
 /// Outcome recorded for a client-supplied `Idempotency-Key`.
 ///
 /// `InFlight` is written *before* the transaction-submitting work begins, so
@@ -997,10 +1013,47 @@ pub fn close_db(db: &SharedDb) {
 /// response came back) sees the reservation rather than racing the same
 /// submission a second time. `Completed` replays the original response body
 /// once the first request finishes successfully.
+///
+/// Both variants carry the [`Instant`] at which they were created so expired
+/// entries can be reclaimed; `InFlight` also carries a unique reservation
+/// token that lets a late RAII guard drop avoid deleting a newer reservation.
 #[derive(Debug, Clone)]
 pub enum IdempotencyEntry {
-    InFlight,
-    Completed(String),
+    InFlight { created_at: Instant, token: u64 },
+    Completed { body: String, created_at: Instant },
+}
+
+impl IdempotencyEntry {
+    /// Create a fresh in-flight reservation.
+    pub fn in_flight(created_at: Instant, token: u64) -> Self {
+        Self::InFlight { created_at, token }
+    }
+
+    /// Create a fresh completed response.
+    pub fn completed(body: String, created_at: Instant) -> Self {
+        Self::Completed { body, created_at }
+    }
+
+    /// When this entry was first written to the store.
+    pub fn created_at(&self) -> Instant {
+        match self {
+            Self::InFlight { created_at, .. } | Self::Completed { created_at, .. } => *created_at,
+        }
+    }
+
+    /// Whether the entry's age has reached the TTL for its state.
+    pub fn is_expired(
+        &self,
+        now: Instant,
+        in_flight_ttl: Duration,
+        completed_ttl: Duration,
+    ) -> bool {
+        let ttl = match self {
+            Self::InFlight { .. } => in_flight_ttl,
+            Self::Completed { .. } => completed_ttl,
+        };
+        now.saturating_duration_since(self.created_at()) >= ttl
+    }
 }
 
 /// In-memory record of recently-seen idempotency keys, keyed by the raw
@@ -1009,9 +1062,123 @@ pub enum IdempotencyEntry {
 /// Mirrors `DbStore`: a plain `HashMap` guarded by an `RwLock` kept separate
 /// from `DbStore` so idempotency bookkeeping never contends with the
 /// business-data lock.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct IdempotencyStore {
     pub entries: HashMap<String, IdempotencyEntry>,
+    /// TTL applied to `InFlight` reservations (overridable in tests).
+    pub in_flight_ttl: Duration,
+    /// TTL applied to `Completed` responses (overridable in tests).
+    pub completed_ttl: Duration,
+    /// Monotonic source of reservation tokens; wrapping is harmless because a
+    /// collision would require 2^64 reservations within one in-flight TTL.
+    next_token: u64,
+}
+
+impl Default for IdempotencyStore {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            in_flight_ttl: IDEMPOTENCY_IN_FLIGHT_TTL,
+            completed_ttl: IDEMPOTENCY_COMPLETED_TTL,
+            next_token: 0,
+        }
+    }
+}
+
+impl IdempotencyStore {
+    /// Remove every entry whose age has reached its TTL (#1262).
+    pub fn prune_expired(&mut self, now: Instant) {
+        let (in_flight_ttl, completed_ttl) = (self.in_flight_ttl, self.completed_ttl);
+        self.entries
+            .retain(|_, entry| !entry.is_expired(now, in_flight_ttl, completed_ttl));
+    }
+
+    /// Reserve `key` as in-flight and return its unique token.
+    pub fn reserve(&mut self, key: String, now: Instant) -> u64 {
+        self.next_token = self.next_token.wrapping_add(1);
+        let token = self.next_token;
+        self.entries
+            .insert(key, IdempotencyEntry::in_flight(now, token));
+        token
+    }
+
+    /// Turn the matching in-flight reservation into a cached response.
+    ///
+    /// Returns `false` if the reservation was already released or replaced,
+    /// so a stale guard cannot overwrite a newer request's outcome.
+    pub fn complete(&mut self, key: &str, token: u64, body: String, now: Instant) -> bool {
+        if !matches!(
+            self.entries.get(key),
+            Some(IdempotencyEntry::InFlight { token: t, .. }) if *t == token
+        ) {
+            return false;
+        }
+        self.entries
+            .insert(key.to_string(), IdempotencyEntry::completed(body, now));
+        true
+    }
+
+    /// Release a reservation only if it is still the one owned by `token`.
+    pub fn release(&mut self, key: &str, token: u64) -> bool {
+        if !matches!(
+            self.entries.get(key),
+            Some(IdempotencyEntry::InFlight { token: t, .. }) if *t == token
+        ) {
+            return false;
+        }
+        self.entries.remove(key);
+        true
+    }
+}
+
+/// RAII owner of an `InFlight` idempotency reservation (#1262).
+///
+/// The guard is held across the request's `await` points. Dropping it —
+/// because the handler returns, a `TimeoutLayer` cancels the future, the
+/// client disconnects, or a panic unwinds the stack — releases the key so a
+/// retry is never permanently stuck with `409 Conflict`. Call
+/// [`complete`](Self::complete) on success to cache the response instead; the
+/// cached entry is evicted once its TTL elapses.
+#[derive(Debug)]
+#[must_use = "dropping an IdempotencyGuard releases its key; keep it alive until the request finishes"]
+pub struct IdempotencyGuard {
+    store: SharedIdempotencyStore,
+    key: String,
+    token: u64,
+    completed: bool,
+}
+
+impl IdempotencyGuard {
+    /// Wrap a reservation previously created by [`IdempotencyStore::reserve`].
+    pub fn new(store: &SharedIdempotencyStore, key: String, token: u64) -> Self {
+        Self {
+            store: Arc::clone(store),
+            key,
+            token,
+            completed: false,
+        }
+    }
+
+    /// Cache `body` as the final response and consume the guard.
+    ///
+    /// After a successful `complete`, `Drop` no longer releases the key; the
+    /// response is replayed until the completed-entry TTL expires. If the
+    /// reservation was already replaced, this is a no-op and `Drop` still
+    /// runs its token-checked release (which cannot touch the newer entry).
+    pub fn complete(mut self, body: String) {
+        let mut store = acquire_idempotency(&self.store);
+        self.completed = store.complete(&self.key, self.token, body, Instant::now());
+    }
+}
+
+impl Drop for IdempotencyGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut store = acquire_idempotency(&self.store);
+        store.release(&self.key, self.token);
+    }
 }
 
 /// Shared, thread-safe handle to the idempotency store.
@@ -1032,6 +1199,8 @@ pub fn acquire_idempotency(
 
 /// Acquire the idempotency-store read lock, recovering gracefully from lock
 /// poison (see the module-level note on lock-poison recovery, #473).
+// Used by tests and other crates; the binary only needs the write path (#1262).
+#[allow(dead_code)]
 pub fn read_idempotency(
     store: &SharedIdempotencyStore,
 ) -> std::sync::RwLockReadGuard<'_, IdempotencyStore> {
@@ -1157,6 +1326,99 @@ mod tests {
 
         let guard = acquire_idempotency(&store);
         assert!(guard.entries.is_empty(), "recovered store should be intact");
+    }
+
+    #[test]
+    fn idempotency_guard_releases_reservation_on_drop() {
+        let store = new_shared_idempotency_store();
+        let token = acquire_idempotency(&store).reserve("drop-key".to_string(), Instant::now());
+        let guard = IdempotencyGuard::new(&store, "drop-key".to_string(), token);
+
+        assert!(matches!(
+            read_idempotency(&store).entries.get("drop-key"),
+            Some(IdempotencyEntry::InFlight { token: t, .. }) if *t == token
+        ));
+
+        drop(guard);
+
+        assert!(
+            read_idempotency(&store).entries.is_empty(),
+            "dropping the guard must clear the in-flight reservation"
+        );
+    }
+
+    #[test]
+    fn idempotency_guard_complete_caches_response_instead_of_releasing() {
+        let store = new_shared_idempotency_store();
+        let token = acquire_idempotency(&store).reserve("done-key".to_string(), Instant::now());
+        let guard = IdempotencyGuard::new(&store, "done-key".to_string(), token);
+        guard.complete(r#"{"ok":true}"#.to_string());
+
+        assert!(matches!(
+            read_idempotency(&store).entries.get("done-key"),
+            Some(IdempotencyEntry::Completed { body, .. }) if body == r#"{"ok":true}"#
+        ));
+    }
+
+    #[test]
+    fn stale_guard_drop_does_not_release_a_newer_reservation() {
+        let store = new_shared_idempotency_store();
+        let created_at = Instant::now();
+        let stale_token = acquire_idempotency(&store).reserve("key".to_string(), created_at);
+        let stale_guard = IdempotencyGuard::new(&store, "key".to_string(), stale_token);
+
+        // Simulate the stale reservation expiring and a retry claiming the key.
+        {
+            let mut entries = acquire_idempotency(&store);
+            entries.prune_expired(created_at + IDEMPOTENCY_IN_FLIGHT_TTL);
+        }
+        let fresh_token = acquire_idempotency(&store).reserve("key".to_string(), created_at);
+
+        drop(stale_guard);
+
+        assert!(matches!(
+            read_idempotency(&store).entries.get("key"),
+            Some(IdempotencyEntry::InFlight { token, .. }) if *token == fresh_token
+        ));
+    }
+
+    #[test]
+    fn idempotency_entries_expire_at_their_state_specific_ttl() {
+        let store = new_shared_idempotency_store();
+        let created_at = Instant::now();
+        let completed_token;
+        {
+            let mut entries = acquire_idempotency(&store);
+            entries.in_flight_ttl = Duration::from_secs(1);
+            entries.completed_ttl = Duration::from_secs(2);
+            entries.reserve("in-flight-key".to_string(), created_at);
+            completed_token = entries.reserve("completed-key".to_string(), created_at);
+            assert!(entries.complete(
+                "completed-key",
+                completed_token,
+                "cached body".to_string(),
+                created_at
+            ));
+        }
+
+        {
+            let mut entries = acquire_idempotency(&store);
+            entries.prune_expired(created_at + Duration::from_secs(1));
+            assert!(
+                !entries.entries.contains_key("in-flight-key"),
+                "in-flight reservations must expire at the in-flight TTL"
+            );
+            assert!(
+                entries.entries.contains_key("completed-key"),
+                "completed responses have their own, longer TTL"
+            );
+
+            entries.prune_expired(created_at + Duration::from_secs(2));
+            assert!(
+                entries.entries.is_empty(),
+                "completed responses must eventually be evicted"
+            );
+        }
     }
 
     #[test]
