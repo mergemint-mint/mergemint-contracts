@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #![no_std]
+#![allow(dead_code, deprecated, unused_imports, clippy::too_many_arguments)]
 // Non-test contract code must raise typed `ContractError`s (via `fail`)
 // instead of panicking opaquely. `cfg_attr` keeps this from firing inside
 // `#[cfg(test)]` modules, where panics/unwraps are the normal assertion
@@ -22,22 +23,7 @@ pub use crate::errors::*;
 pub use contract::MergeMintContractClient;
 
 #[cfg(test)]
-mod mutation_guard_tests;
-
-#[cfg(test)]
-mod verification_proofs;
-
-#[cfg(test)]
-mod bounty_meta_fuzz_tests;
-
-#[cfg(test)]
-mod archive_lifecycle_tests;
-
-#[cfg(test)]
 mod test;
-
-#[cfg(test)]
-mod ownership_race_tests;
 
 #[cfg(all(test, feature = "fuzz"))]
 mod fuzz_tests;

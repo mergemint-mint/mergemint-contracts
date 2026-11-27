@@ -44,7 +44,7 @@ concurrency:
 jobs:
   release-please:
     name: Release PRs
-    if: github.event_name == 'push' || !inputs.dry-run
+    if: github.event_name == 'push' || !inputs['dry-run']
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -62,7 +62,7 @@ jobs:
 
   dry-run:
     name: Release PRs (dry run)
-    if: github.event_name == 'workflow_dispatch' && inputs.dry-run
+    if: github.event_name == 'workflow_dispatch' && inputs['dry-run']
     runs-on: ubuntu-latest
     permissions:
       contents: read

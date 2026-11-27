@@ -8,7 +8,7 @@ use crate::events;
 use crate::storage;
 use crate::types::{
     Bounty, BountyId, BountyMeta, BountySummary, ContractConfig, Contributor, Milestone,
-    PendingResolution, MAX_MILESTONES,
+    PendingResolution,
 };
 
 #[contract]

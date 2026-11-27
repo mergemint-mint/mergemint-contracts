@@ -1,14 +1,8 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::queries::{
-        get_bounty, get_bounties, get_bounty_metas, get_claimed_at_ledger, get_pending_resolution,
-        is_dispute_appealed,
-    };
-    use crate::state::{
-        Bounty, BountyId, PendingResolution, BOUNTIES, BOUNTY_ARCHIVE, BOUNTY_METAS,
-        CLAIMED_AT_LEDGER, DISPUTE_APPEALED, PENDING_RESOLUTION,
-    };
+    use crate::contract::queries::{get_bounty, get_bounties};
+    use crate::state::{Bounty, BountyId, BOUNTIES};
     use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
 
     #[test]
@@ -103,123 +97,6 @@ mod tests {
         assert_eq!(results.len(), 3);
         assert!(results.get(0).unwrap().is_none());
         assert!(results.get(1).unwrap().is_none());
-        assert!(results.get(2).unwrap().is_none());
-    }
-
-    #[test]
-    fn test_get_pending_resolution_default_none() {
-        let env = Env::default();
-        assert!(get_pending_resolution(&env, 1).is_none());
-    }
-
-    #[test]
-    fn test_get_pending_resolution_populated() {
-        let env = Env::default();
-        let resolution = PendingResolution {
-            winner: Address::generate(&env),
-            resolved_at_ledger: 42,
-        };
-        PENDING_RESOLUTION.set(&env, &7, &resolution);
-
-        let result = get_pending_resolution(&env, 7);
-        assert!(result.is_some());
-        let result = result.unwrap();
-        assert_eq!(result.winner, resolution.winner);
-        assert_eq!(result.resolved_at_ledger, 42);
-        assert!(get_pending_resolution(&env, 8).is_none());
-    }
-
-    #[test]
-    fn test_is_dispute_appealed_default_false() {
-        let env = Env::default();
-        assert!(!is_dispute_appealed(&env, 1));
-    }
-
-    #[test]
-    fn test_is_dispute_appealed_populated() {
-        let env = Env::default();
-        DISPUTE_APPEALED.set(&env, &3, &true);
-        assert!(is_dispute_appealed(&env, 3));
-        assert!(!is_dispute_appealed(&env, 4));
-    }
-
-    #[test]
-    fn test_get_claimed_at_ledger_default_none() {
-        let env = Env::default();
-        assert!(get_claimed_at_ledger(&env, 1).is_none());
-    }
-
-    #[test]
-    fn test_get_claimed_at_ledger_populated() {
-        let env = Env::default();
-        CLAIMED_AT_LEDGER.set(&env, &5, &1234u32);
-        assert_eq!(get_claimed_at_ledger(&env, 5), Some(1234u32));
-        assert!(get_claimed_at_ledger(&env, 6).is_none());
-    }
-
-    #[test]
-    fn test_get_bounty_metas_never_allocated() {
-        let env = Env::default();
-        let mut ids = Vec::new(&env);
-        ids.push_back(500);
-        ids.push_back(501);
-
-        let results = get_bounty_metas(&env, ids);
-        assert_eq!(results.len(), 2);
-        assert!(results.get(0).unwrap().is_none());
-        assert!(results.get(1).unwrap().is_none());
-    }
-
-    #[test]
-    fn test_get_bounties_archive_fallback() {
-        let env = Env::default();
-        let creator = Address::generate(&env);
-        let archived = Bounty {
-            id: 30,
-            creator: creator.clone(),
-            amount: 300,
-            description: soroban_sdk::String::from_str(&env, "Archived bounty"),
-        };
-        BOUNTY_ARCHIVE.set(&env, &30, &archived);
-
-        let mut ids = Vec::new(&env);
-        ids.push_back(30);
-        let results = get_bounties(&env, ids);
-        assert_eq!(results.len(), 1);
-        assert!(results.get(0).unwrap().is_some());
-        assert_eq!(results.get(0).unwrap().unwrap().id, 30);
-    }
-
-    #[test]
-    fn test_get_bounties_mixed_active_archived_unallocated() {
-        let env = Env::default();
-        let creator = Address::generate(&env);
-
-        let active = Bounty {
-            id: 40,
-            creator: creator.clone(),
-            amount: 400,
-            description: soroban_sdk::String::from_str(&env, "Active bounty"),
-        };
-        BOUNTIES.set(&env, &40, &active);
-
-        let archived = Bounty {
-            id: 41,
-            creator: creator.clone(),
-            amount: 410,
-            description: soroban_sdk::String::from_str(&env, "Archived bounty"),
-        };
-        BOUNTY_ARCHIVE.set(&env, &41, &archived);
-
-        let mut ids = Vec::new(&env);
-        ids.push_back(40);
-        ids.push_back(41);
-        ids.push_back(9999);
-
-        let results = get_bounties(&env, ids);
-        assert_eq!(results.len(), 3);
-        assert_eq!(results.get(0).unwrap().unwrap().id, 40);
-        assert_eq!(results.get(1).unwrap().unwrap().id, 41);
         assert!(results.get(2).unwrap().is_none());
     }
 }

@@ -77,8 +77,8 @@ function checkValidationFixtures() {
   if (!Array.isArray(fixture.rewardAmount) || fixture.rewardAmount.length === 0) {
     throw new Error('fixtures/validation-parity.json must contain non-empty rewardAmount cases');
   }
-  if (!Array.isArray(fixture.descriptionLength) || fixture.descriptionLength.length === 0) {
-    throw new Error('fixtures/validation-parity.json must contain non-empty descriptionLength cases');
+  if (!Array.isArray(fixture.description) || fixture.description.length === 0) {
+    throw new Error('fixtures/validation-parity.json must contain non-empty description cases');
   }
 
   const frontendValidation = readText('frontend/src/lib/validation.ts');
@@ -92,7 +92,7 @@ function checkValidationFixtures() {
   }
 
   console.log(
-    `✓ Verified validation-parity.json (${fixture.rewardAmount.length} reward cases, ${fixture.descriptionLength.length} description cases)`
+    `✓ Verified validation-parity.json (${fixture.rewardAmount.length} reward cases, ${fixture.description.length} description cases)`
   );
 }
 

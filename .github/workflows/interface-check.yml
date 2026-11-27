@@ -55,7 +55,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
 
       - name: Install Stellar CLI
-        run: cargo install stellar-cli --version 23.0.1 --locked
+        run: cargo install stellar-cli --version 25.2.0 --locked
 
       - name: Build contract
         run: cargo build --release --target wasm32v1-none
@@ -98,7 +98,8 @@ jobs:
             exit 1
           fi
 
-  cross-layer-parity:
+  parity-fixtures:
+    name: Cross-Layer Parity Fixtures
     runs-on: ubuntu-latest
     permissions:
       contents: read

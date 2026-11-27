@@ -61,6 +61,12 @@ jobs:
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies for Stellar CLI
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --version 25.2.0 --locked
+
       - name: Build release WASM
         run: scripts/build-release-wasm.sh ci dist
 

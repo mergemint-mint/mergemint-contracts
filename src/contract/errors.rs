@@ -28,8 +28,4 @@ pub enum ContractError {
     TransferFailed = 22,
     InvalidFeeRecipient = 23,
     FeeExceedsMaximum = 24,
-    NotAdmin = 25,
-    InvalidStatus = 26,
-    EscrowTransferFailed = 27,
-    EscrowInsufficientBalance = 28,
 }
